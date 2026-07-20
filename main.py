@@ -93,16 +93,14 @@ async def on_startup():
 async def login_page(request: Request):
     if get_current_user(request):
         return RedirectResponse("/", status_code=302)
-    return templates.TemplateResponse("login.html", {"request": request, "error": None})
+    return templates.TemplateResponse(request=request, name="login.html", context={"request": request, "error": None})
 
 
 @app.post("/login", response_class=HTMLResponse)
 async def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
     user = users_store.verify_login(username, password)
     if not user:
-        return templates.TemplateResponse(
-            "login.html", {"request": request, "error": "Sai tên đăng nhập hoặc mật khẩu."}
-        )
+        return templates.TemplateResponse(request=request, name="login.html", context={"request": request, "error": "Sai tên đăng nhập hoặc mật khẩu."})
 
     import uuid
     token = uuid.uuid4().hex
