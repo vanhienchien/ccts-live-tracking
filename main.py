@@ -131,7 +131,13 @@ async def map_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    return templates.TemplateResponse("map.html", {"request": request, "user": user})
+    
+    # Sửa thành như thế này:
+    return templates.TemplateResponse(
+        request=request, 
+        name="map.html", 
+        context={"request": request, "user": user}
+    )
 
 
 @app.get("/api/stations")
