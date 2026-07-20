@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Đăng nhập - CCTS Live Map</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    font-family: Arial, sans-serif;
+    background: linear-gradient(135deg, #2c3e50, #4a6580);
+    display: flex; align-items: center; justify-content: center;
+    height: 100vh; margin: 0;
+  }
+  .card {
+    background: #fff; padding: 36px 32px; border-radius: 12px;
+    box-shadow: 0 10px 30px rgba(0,0,0,.25); width: 320px; max-width: 90vw;
+  }
+  h2 { text-align: center; margin: 0 0 24px; color: #2c3e50; }
+  label { font-size: 13px; color: #555; display: block; margin-bottom: 4px; }
+  input {
+    width: 100%; padding: 10px; margin-bottom: 18px; border: 1px solid #ddd;
+    border-radius: 6px; font-size: 14px;
+  }
+  input:focus { outline: none; border-color: #2c3e50; }
+  button {
+    width: 100%; padding: 11px; background: #2c3e50; color: #fff; border: none;
+    border-radius: 6px; font-size: 15px; cursor: pointer; font-weight: 600;
+  }
+  button:hover { background: #1a252f; }
+  .error {
+    color: #e74c3c; font-size: 13px; margin-bottom: 14px; text-align: center;
+    background: #fdecea; padding: 8px; border-radius: 6px;
+  }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h2>🔐 CCTS Live Map</h2>
+    {% if error %}<div class="error">{{ error }}</div>{% endif %}
+    <form method="post" action="/login">
+      <label>Tên đăng nhập</label>
+      <input type="text" name="username" required autofocus autocomplete="username">
+      <label>Mật khẩu</label>
+      <input type="password" name="password" required autocomplete="current-password">
+      <button type="submit">Đăng nhập</button>
+    </form>
+  </div>
+</body>
+</html>
