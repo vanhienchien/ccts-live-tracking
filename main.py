@@ -3,13 +3,29 @@ CCTS Live Map - ứng dụng web độc lập (FastAPI + WebSocket), thay thế 
 Streamlit trước đây để có trải nghiệm mượt hơn (vị trí nhân sự cập nhật
 real-time không cần load lại trang).
 
-Chạy thử local:
-    uvicorn main:app --reload --host 0.0.0.0 --port 8000
+Chạy thử local (Windows - xem ghi chú NotImplementedError bên dưới):
+    uvicorn main:app --host 0.0.0.0 --port 8000
 
 Xem README.md đi kèm để biết cách cấu hình biến môi trường & deploy.
 """
 
+import sys
 import asyncio
+
+# ==========================================
+# QUAN TRỌNG - CHỈ ẢNH HƯỞNG TRÊN WINDOWS:
+# Khi chạy `uvicorn --reload` trên Windows, cơ chế theo dõi file thay đổi
+# (WatchFiles) khiến asyncio chuyển sang dùng SelectorEventLoop thay vì
+# ProactorEventLoop mặc định. SelectorEventLoop KHÔNG hỗ trợ tạo subprocess
+# trên Windows, mà Playwright Async API bắt buộc phải tạo subprocess để mở
+# trình duyệt -> gây lỗi "NotImplementedError" khi gọi client.login().
+# Dòng dưới đây ép asyncio dùng ProactorEventLoopPolicy (hỗ trợ subprocess)
+# ngay từ đầu, TRƯỚC khi uvicorn/bất kỳ code nào khác kịp chạy.
+# Trên Linux/macOS (vd khi deploy lên Render) dòng này không có tác dụng gì
+# (an toàn, không cần gỡ ra khi deploy) vì vấn đề này chỉ tồn tại trên Windows.
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+# ==========================================
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
@@ -20,12 +36,6 @@ import users_store
 from ccts_data import build_station_markers, get_static_data
 from location_hub import hub
 from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS
-import sys
-import asyncio
-
-# Sửa lỗi NotImplementedError của Playwright trên Windows
-if sys.platform == 'win32':
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 
 app = FastAPI(title="CCTS Live Map")
 templates = Jinja2Templates(directory="templates")
@@ -173,4 +183,8 @@ async def ws_location(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    # Trên Windows, cơ chế --reload (WatchFiles) có thể ép lại SelectorEventLoop
+    # dù đã set policy ở trên, nên tắt hẳn reload khi chạy trên Windows để đảm
+    # bảo ổn định. Trên Linux/macOS (kể cả khi deploy) vẫn giữ reload khi cần.
+    use_reload = sys.platform != "win32"
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=use_reload)

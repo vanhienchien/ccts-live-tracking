@@ -60,9 +60,30 @@ khác chỉ xem được **cấp bậc thấp hơn mình**, không phân biệt 
 
 ## 5. Chạy thử local
 
+**Trên Windows: KHÔNG dùng `--reload`** (xem giải thích bên dưới):
+
+```powershell
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+**Trên Linux/macOS**, có thể dùng `--reload` bình thường khi phát triển:
+
 ```bash
 uvicorn main:app --reload --host 0.0.0.0 --port 8000
 ```
+
+> **Vì sao Windows không được dùng `--reload`?** Cờ `--reload` bật cơ chế theo
+> dõi file thay đổi (WatchFiles), và trên Windows cơ chế này khiến asyncio
+> chuyển sang dùng `SelectorEventLoop` thay vì `ProactorEventLoop` mặc định.
+> `SelectorEventLoop` **không hỗ trợ tạo subprocess trên Windows**, trong khi
+> Playwright Async API bắt buộc phải tạo subprocess để mở trình duyệt — dẫn
+> đến lỗi `NotImplementedError` khi đăng nhập CCTS. `main.py` đã tự set
+> `WindowsProactorEventLoopPolicy` ở đầu file để giảm thiểu vấn đề này, nhưng
+> `--reload` vẫn có thể ép lại Selector sau đó, nên cách chắc chắn nhất là
+> tắt hẳn `--reload` khi chạy trên Windows (mỗi lần sửa code thì tự restart
+> thủ công). **Vấn đề này chỉ xảy ra trên Windows** — khi deploy lên Render
+> (chạy Linux) sẽ không gặp lỗi này, có thể dùng `--reload` thoải mái nếu cần
+> (dù trên production thường không cần reload).
 
 Mở `http://localhost:8000` (lưu ý: trình duyệt chỉ cho phép lấy vị trí GPS qua
 `https://` hoặc `localhost` — nên khi deploy thật cần có HTTPS, các nền tảng
