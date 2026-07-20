@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Live Map Viewer</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; }
+        #map { width: 100%; height: 100vh; }
+    </style>
+</head>
+<body>
+    <div id="map"></div>
+    <script>
+        var map = L.map('map').setView([12.25, 108.5], 6); // Tọa độ VN
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            maxZoom: 19,
+        }).addTo(map);
+
+        var markers = {}; // Lưu trữ marker của từng nhân sự
+
+        // Cập nhật tên miền khi deploy lên server thực tế
+        var ws = new WebSocket("ws://localhost:8000/ws/viewer");
+        
+        ws.onmessage = function(event) {
+            var data = JSON.parse(event.data);
+            var userId = data.username;
+            
+            if(markers[userId]) {
+                // Di chuyển marker mượt mà
+                markers[userId].setLatLng([data.lat, data.lng]);
+            } else {
+                // Tạo marker mới nếu chưa có
+                markers[userId] = L.marker([data.lat, data.lng]).addTo(map)
+                    .bindPopup("Kỹ thuật: " + data.full_name);
+            }
+        };
+    </script>
+</body>
+</html>
