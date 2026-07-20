@@ -93,7 +93,7 @@ async def on_startup():
 async def login_page(request: Request):
     if get_current_user(request):
         return RedirectResponse("/", status_code=302)
-    return templates.TemplateResponse(request, "login.html", {"error": None})
+    return templates.TemplateResponse("login.html", {"request": request, "error": None})
 
 
 @app.post("/login", response_class=HTMLResponse)
