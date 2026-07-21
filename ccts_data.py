@@ -62,18 +62,24 @@ def load_static_data():
         print(f"Lỗi đọc listLongLat.xlsx: {e}")
 
     # 3. Đọc Kỹ thuật viên & Region từ list_Stations.json
+    tech_by_region = {}  # {region: set(tech_name)} - dùng cho tag lọc theo kỹ thuật viên
     try:
         if os.path.exists("list_Stations.json"):
             with open("list_Stations.json", "r", encoding="utf-8") as f:
                 list_stations = json.load(f)
                 for region, engs in list_stations.items():
+                    tech_by_region.setdefault(region, set())
                     for eng, stations in engs.items():
+                        tech_by_region[region].add(eng)
                         for st in stations:
                             core_code = extract_core_station_code(st)
                             tech_map[core_code] = eng
                             region_map[core_code] = region
     except Exception as e:
         print(f"Lỗi đọc list_Stations.json: {e}")
+
+    # Chuyển set -> list đã sắp xếp để dễ trả JSON / hiển thị
+    tech_by_region = {region: sorted(names) for region, names in tech_by_region.items()}
 
     # 4. Đọc ChargePoint_Model.xlsx
     try:
@@ -83,12 +89,13 @@ def load_static_data():
     except Exception as e:
         print(f"Lỗi đọc ChargePoint_Model.xlsx: {e}")
 
-    return coords_map, tech_map, region_map, cp_model_map
+    return coords_map, tech_map, region_map, cp_model_map, tech_by_region
 
 
 def get_static_data():
-    """Dữ liệu tĩnh (toạ độ trạm, kỹ thuật viên, khu vực, model) hiếm khi đổi
-    -> chỉ nạp 1 lần khi server khởi động, dùng lại cho mọi lần cào ticket."""
+    """Dữ liệu tĩnh (toạ độ trạm, kỹ thuật viên, khu vực, model, danh sách kỹ
+    thuật theo khu vực) hiếm khi đổi -> chỉ nạp 1 lần khi server khởi động,
+    dùng lại cho mọi lần cào ticket."""
     global _static_cache
     if _static_cache is None:
         _static_cache = load_static_data()
@@ -162,7 +169,7 @@ async def fetch_live_tickets():
 async def build_station_markers():
     """Cào ticket mới nhất + gộp với toạ độ trạm, trả về JSON sẵn sàng để
     frontend (Leaflet.js) vẽ marker trực tiếp - không qua folium nữa."""
-    coords_map, tech_map, region_map, cp_model_map = get_static_data()
+    coords_map, tech_map, region_map, cp_model_map, tech_by_region = get_static_data()
     df_tickets = await fetch_live_tickets()
 
     stations = []
@@ -197,8 +204,9 @@ async def build_station_markers():
                 rows_html += f"""
                 <div style="background:#f9f9f9;border-left:4px solid {color};border-radius:4px;
                             padding:6px 8px;margin-bottom:6px;">
-                    <b>CP ID:</b> {row['Charge Point ID']} ({row['Model Name']})<br>
-                    <b>Trạng thái:</b> {row['Ticket Status']} (ID: {row['Ticket ID']})<br>
+                    <b>SN:</b> {row['Charge Point ID']} ({row['Model Name']})<br>
+                    <b>Ticket status:</b> {row['Ticket Status']}<br>
+                    <b>Ticket ID: {row['Ticket ID']}<br>
                     <b>Thời gian:</b> {row['Ticket Duration']}<br>
                     <i style="color:#666;">{row['Problem Description']}</i>
                 </div>
@@ -228,6 +236,8 @@ async def build_station_markers():
                 "color": color,
                 "popup_html": popup_html,
                 "cp_count": int(len(group)),
+                "region": region,
+                "tech_name": tech_name,
             })
 
     return {
@@ -236,3 +246,19 @@ async def build_station_markers():
         "missing_count": missing_count,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
+
+
+def filter_stations_for_user(stations, user):
+    """Kỹ thuật viên chỉ được xem trạm trong CHÍNH khu vực của họ (bao gồm
+    trạm của chính họ, đồng nghiệp kỹ thuật khác cùng khu vực, và trạm chưa
+    gán kỹ thuật viên (Unassigned) miễn là cùng khu vực). Các vai trò khác
+    (Điều phối khu vực trở lên) xem được toàn bộ, không giới hạn."""
+    role = (user.get("role") or "").strip().lower()
+    if role != "kỹ thuật":
+        return stations
+
+    user_region = (user.get("region") or "").strip().lower()
+    if not user_region:
+        return []  # Chưa gán khu vực -> không thấy trạm nào (an toàn hơn là thấy tất cả)
+
+    return [s for s in stations if (s.get("region") or "").strip().lower() == user_region]

@@ -103,6 +103,14 @@ def verify_login(username, password):
     }
 
 
+def list_users_public():
+    """Toàn bộ danh sách tài khoản, KHÔNG bao gồm cột mật khẩu - dùng để build
+    tag lọc kỹ thuật viên (đối chiếu tên hiển thị trong list_Stations.json
+    với username thật để hiển thị chấm online/offline)."""
+    df = _read_users_df()
+    return df.drop(columns=["password"]).to_dict("records")
+
+
 def get_user_info(username):
     """Tra cứu role/region hiện tại của 1 username (dùng cache, để không gọi
     Google Sheets liên tục khi có nhiều vị trí được gửi lên mỗi giây)."""

@@ -2,6 +2,8 @@
 // CCTS Live Map - frontend logic
 // ==========================================
 
+const CURRENT_USERNAME = (document.body.dataset.username || '').trim();
+
 const map = L.map('map').setView([12.25, 108.5], 6.3);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     attribution: '&copy; OpenStreetMap contributors',
@@ -11,9 +13,11 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 const stationLayer = L.layerGroup().addTo(map);
 const staffMarkers = {}; // username -> { marker, wrenchMarker }
 
+let allStations = [];          // cache toàn bộ trạm nhận được gần nhất (đã lọc theo quyền ở server)
+let selectedTechs = new Set(); // tên kỹ thuật viên đang được TICK CHỌN trong tag lọc (rỗng = hiện tất cả)
+let onlineUsernames = new Set(); // username (chữ thường) đang online
+
 // ---------- Icon trạm sạc: ghim giọt nước cổ điển (giống Folium mặc định) ----------
-// Vẽ bằng SVG nội tuyến (không phụ thuộc plugin/font ngoài) để đảm bảo luôn
-// hiển thị đúng, không bị "vỡ" icon nếu 1 CDN nào đó chậm/lỗi.
 function stationIcon(color) {
     const colorMap = { darkred: '#8b0000', orange: '#e67e22', green: '#2ca02c' };
     const fill = colorMap[color] || '#3498db';
@@ -33,14 +37,47 @@ function stationIcon(color) {
         popupAnchor: [0, -38],
     });
 }
-
-function renderStations(stations) {
+async function triggerManualRefresh() {
+    const btn = document.getElementById('btn-manual-refresh');
+    if (btn) {
+        btn.disabled = true;
+        btn.textContent = '⏳ Đang cào dữ liệu...';
+    }
+    try {
+        const res = await fetch('/api/admin/refresh-stations', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            alert('✅ ' + data.message);
+        } else {
+            alert('❌ ' + (data.error || 'Lỗi cập nhật.'));
+        }
+    } catch (err) {
+        alert('❌ Không thể kết nối tới server.');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.textContent = '🔄';
+        }
+    }
+}
+// Vẽ marker trạm dựa trên allStations + bộ lọc kỹ thuật viên hiện tại (selectedTechs)
+function applyStationFilter() {
     stationLayer.clearLayers();
-    (stations || []).forEach((s) => {
+    const stations = selectedTechs.size === 0
+        ? allStations
+        : allStations.filter((s) => selectedTechs.has(s.tech_name || 'Unassigned'));
+
+    stations.forEach((s) => {
         const marker = L.marker([s.lat, s.lng], { icon: stationIcon(s.color) });
         marker.bindPopup(s.popup_html, { maxWidth: 320, maxHeight: 340 });
+        marker._stationCode = s.station_code;
         marker.addTo(stationLayer);
     });
+}
+
+function renderStations(stations) {
+    allStations = stations || [];
+    applyStationFilter();
 }
 
 // ---------- Icon nhân sự (hình tròn + chữ viết tắt) ----------
@@ -72,7 +109,7 @@ function staffIcon(name, role) {
 function wrenchIcon() {
     return L.divIcon({
         className: '',
-        html: `<div class="wrench-badge" style="width:24px;height:24px;">🔧</div>`,
+        html: `<div class="wrench-pure-icon">🔧</div>`,
         iconSize: [24, 24],
         iconAnchor: [12, 12],
     });
@@ -89,7 +126,7 @@ function buildStaffPopup(loc) {
     <div style="font-family:Arial;font-size:12px;min-width:200px;">
         <b>${loc.full_name}</b><br>
         ${loc.role || ''}${loc.region ? ' · ' + loc.region : ''}<br>
-        <a href="${gmapUrl}" target="_blank" rel="noopener noreferrer">Xem trên Google Maps 🗺️</a>
+        <a href="${gmapUrl}" target="_blank" rel="noopener noreferrer">Xem trên Google Maps</a>
         ${workingNote}
     </div>`;
 }
@@ -138,6 +175,217 @@ function upsertStaffMarker(loc) {
     }
 }
 
+// ---------- Tag lọc theo kỹ thuật viên (gom theo khu vực + chấm online/offline) ----------
+const techPanel = document.getElementById('tech-filter-panel');
+const techFilterBtn = document.getElementById('tech-filter-btn');
+
+function techDotHtml(online) {
+    if (online === true) return '<span class="conn-dot ok" title="Đang online"></span>';
+    if (online === false) return '<span class="conn-dot" title="Đang offline"></span>';
+    return '<span class="conn-dot" style="background:#bbb;" title="Không xác định"></span>';
+}
+
+function renderTechPanel(data) {
+    const regions = data.regions || {};
+    let html = '';
+    Object.keys(regions).sort().forEach((region) => {
+        html += `<div class="region-group"><div class="region-title">📍 ${region}</div>`;
+        regions[region].forEach((item) => {
+            const uname = (item.username || '').toLowerCase();
+            html += `
+            <label data-tech="${item.tech_name}" ${uname ? `data-username="${uname}"` : ''}>
+                <input type="checkbox" class="tech-checkbox" value="${item.tech_name}">
+                ${techDotHtml(item.online)} ${item.tech_name}
+            </label>`;
+        });
+        html += `</div>`;
+    });
+    html += `
+    <div id="tech-filter-actions">
+        <button id="tech-select-all">Chọn tất cả</button>
+        <button id="tech-clear-all">Bỏ chọn</button>
+    </div>`;
+    techPanel.innerHTML = html;
+
+    techPanel.querySelectorAll('.tech-checkbox').forEach((cb) => {
+        cb.checked = selectedTechs.has(cb.value);
+        cb.addEventListener('change', () => {
+            if (cb.checked) selectedTechs.add(cb.value);
+            else selectedTechs.delete(cb.value);
+            applyStationFilter();
+        });
+    });
+
+    const selectAllBtn = document.getElementById('tech-select-all');
+    const clearAllBtn = document.getElementById('tech-clear-all');
+    if (selectAllBtn) {
+        selectAllBtn.addEventListener('click', () => {
+            techPanel.querySelectorAll('.tech-checkbox').forEach((cb) => {
+                cb.checked = true;
+                selectedTechs.add(cb.value);
+            });
+            applyStationFilter();
+        });
+    }
+    if (clearAllBtn) {
+        clearAllBtn.addEventListener('click', () => {
+            techPanel.querySelectorAll('.tech-checkbox').forEach((cb) => { cb.checked = false; });
+            selectedTechs.clear();
+            applyStationFilter();
+        });
+    }
+
+    updateTechPanelPresence();
+}
+
+function updateTechPanelPresence() {
+    if (!techPanel) return;
+    techPanel.querySelectorAll('label[data-username]').forEach((label) => {
+        const uname = label.dataset.username;
+        const dot = label.querySelector('.conn-dot');
+        if (!dot) return;
+        const online = onlineUsernames.has(uname);
+        dot.classList.toggle('ok', online);
+        dot.style.background = online ? '' : '#e74c3c';
+        dot.title = online ? 'Đang online' : 'Đang offline';
+    });
+}
+
+function loadTechnicianPanel() {
+    fetch('/api/technicians')
+        .then((r) => r.json())
+        .then(renderTechPanel)
+        .catch(() => {
+            techPanel.innerHTML = '<div style="padding:10px;font-size:13px;color:#999;">Không tải được danh sách kỹ thuật viên.</div>';
+        });
+}
+
+if (techFilterBtn) {
+    techFilterBtn.addEventListener('click', () => {
+        const isOpen = techPanel.style.display === 'block';
+        techPanel.style.display = isOpen ? 'none' : 'block';
+        if (!isOpen && !techPanel.dataset.loaded) {
+            techPanel.dataset.loaded = '1';
+            loadTechnicianPanel();
+        }
+    });
+}
+
+// ---------- Tìm kiếm trạm / kỹ thuật viên ----------
+const searchInput = document.getElementById('search-input');
+const searchResults = document.getElementById('search-results');
+
+function closeSearchResults() {
+    searchResults.style.display = 'none';
+    searchResults.innerHTML = '';
+}
+
+function flyToStation(stationCode) {
+    const s = allStations.find((x) => x.station_code === stationCode);
+    if (!s) return;
+    map.flyTo([s.lat, s.lng], 16, { duration: 1 });
+    setTimeout(() => {
+        stationLayer.eachLayer((layer) => {
+            if (layer._stationCode === stationCode) layer.openPopup();
+        });
+    }, 350);
+}
+
+function flyToStaff(username) {
+    const entry = staffMarkers[username];
+    if (!entry) {
+        alert('Kỹ thuật viên này hiện chưa có vị trí trên bản đồ (có thể đang offline).');
+        return;
+    }
+    map.flyTo(entry.marker.getLatLng(), 16, { duration: 1 });
+    setTimeout(() => entry.marker.openPopup(), 350);
+}
+
+function runSearch(keyword) {
+    const q = keyword.trim().toLowerCase();
+    if (!q) { closeSearchResults(); return; }
+
+    const stationMatches = allStations
+        .filter((s) => (s.station_code || '').toLowerCase().includes(q))
+        .slice(0, 8)
+        .map((s) => ({ type: 'station', label: s.station_code, sub: s.tech_name || 'Unassigned', value: s.station_code }));
+
+    const techNames = new Set(allStations.map((s) => s.tech_name).filter(Boolean));
+
+    const techMatches = [...techNames]
+        .filter((name) => name.toLowerCase().includes(q))
+        .slice(0, 8)
+        .map((name) => ({ type: 'tech', label: name, sub: 'Kỹ thuật viên', value: name }));
+
+    const results = [...stationMatches, ...techMatches];
+
+    if (results.length === 0) {
+        searchResults.innerHTML = '<div class="empty">Không tìm thấy kết quả</div>';
+    } else {
+        searchResults.innerHTML = results.map((r) => `
+            <div class="item" data-type="${r.type}" data-value="${r.value}">
+                ${r.type === 'station' ? '⚡' : '🧑‍🔧'} <b>${r.label}</b>
+                <div class="tag">${r.sub}</div>
+            </div>
+        `).join('');
+    }
+    searchResults.style.display = 'block';
+}
+
+if (searchInput) {
+    searchInput.addEventListener('input', (e) => runSearch(e.target.value));
+    searchInput.addEventListener('focus', (e) => { if (e.target.value) runSearch(e.target.value); });
+}
+
+if (searchResults) {
+    searchResults.addEventListener('click', (e) => {
+        const item = e.target.closest('.item');
+        if (!item) return;
+        const { type, value } = item.dataset;
+        if (type === 'station') {
+            flyToStation(value);
+        } else if (type === 'tech') {
+            // Tìm 1 kỹ thuật đang online có tên trùng khớp để bay tới vị trí của họ
+            const match = Object.entries(staffMarkers).find(([uname, entry]) => {
+                const popupContent = entry.marker.getPopup()?.getContent() || '';
+                return popupContent.includes(value);
+            });
+            if (match) {
+                flyToStaff(match[0]);
+            } else {
+                alert(`"${value}" hiện không có vị trí online trên bản đồ. Đang hiện các trạm họ phụ trách.`);
+                selectedTechs = new Set([value]);
+                applyStationFilter();
+                if (techPanel) {
+                    techPanel.style.display = 'block';
+                    if (!techPanel.dataset.loaded) { techPanel.dataset.loaded = '1'; loadTechnicianPanel(); }
+                }
+            }
+        }
+        closeSearchResults();
+        searchInput.value = '';
+    });
+}
+
+document.addEventListener('click', (e) => {
+    if (searchResults && !searchResults.contains(e.target) && e.target !== searchInput) {
+        closeSearchResults();
+    }
+});
+
+// ---------- Nút "Vị trí của bạn" ----------
+const myLocationBtn = document.getElementById('my-location-btn');
+if (myLocationBtn) {
+    myLocationBtn.addEventListener('click', () => {
+        const entry = staffMarkers[CURRENT_USERNAME];
+        if (entry) {
+            map.flyTo(entry.marker.getLatLng(), 17, { duration: 1 });
+        } else {
+            alert('Chưa xác định được vị trí của bạn. Hãy đảm bảo đã cấp quyền định vị cho trình duyệt và đợi vài giây.');
+        }
+    });
+}
+
 // ---------- WebSocket ----------
 let ws;
 let reconnectDelay = 2000;
@@ -168,6 +416,9 @@ function connectWebSocket() {
             renderStations(msg.stations);
             const el = document.getElementById('ticket-count');
             if (el) el.textContent = msg.total_tickets ?? 0;
+        } else if (msg.type === 'presence_update') {
+            onlineUsernames = new Set((msg.online_usernames || []).map((u) => u.toLowerCase()));
+            updateTechPanelPresence();
         }
     };
 

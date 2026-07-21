@@ -30,7 +30,7 @@ def haversine_meters(lat1, lng1, lat2, lng2):
 def find_nearby_station(lat, lng, threshold=STATION_PROXIMITY_METERS):
     """Tìm trạm gần nhất với 1 toạ độ, trả về (mã trạm, khoảng cách mét) nếu
     nằm trong ngưỡng, ngược lại (None, None)."""
-    coords_map, _, _, _ = get_static_data()
+    coords_map, _, _, _, _ = get_static_data()
     nearest_code, nearest_dist = None, None
     for code, c in coords_map.items():
         d = haversine_meters(lat, lng, c["lat"], c["lng"])
@@ -50,13 +50,21 @@ class LocationHub:
     async def register(self, websocket, user):
         async with self.lock:
             self.connections[websocket] = user
+        await self.broadcast_all({"type": "presence_update", "online_usernames": self.online_usernames()})
 
     async def unregister(self, websocket):
         async with self.lock:
             self.connections.pop(websocket, None)
+        await self.broadcast_all({"type": "presence_update", "online_usernames": self.online_usernames()})
         # Lưu ý: KHÔNG xoá vị trí khỏi self.locations khi 1 người ngắt kết nối
         # tạm thời (mất mạng, tắt màn hình...), để tránh marker biến mất/hiện
         # lại liên tục gây rối mắt cho người đang theo dõi bản đồ.
+
+    def online_usernames(self):
+        """Danh sách username (chữ thường) đang có ít nhất 1 kết nối WebSocket
+        mở - dùng để hiển thị chấm đỏ/xanh online-offline trong tag lọc kỹ
+        thuật viên."""
+        return list({v["username"].strip().lower() for v in self.connections.values()})
 
     def visible_locations_for(self, viewer):
         """Trả về list vị trí mà viewer được phép xem, theo đúng quy tắc phân
@@ -125,6 +133,25 @@ class LocationHub:
 
     def snapshot_for(self, viewer):
         return {"type": "snapshot", "locations": self.visible_locations_for(viewer)}
+    
+    def can_see_location(viewer_user: dict, target_user_info: dict) -> bool:
+        """
+        Quy tắc xem vị trí:
+        - Admin / Điều hành / Giám đốc: Xem được tất cả mọi người.
+        - Kỹ thuật / Điều phối khu vực: Chỉ xem được những ai CÙNG REGION với mình.
+        """
+        viewer_role = (viewer_user.get("role") or "").strip().lower()
+        
+        # Các vai trò cấp cao xem toàn bộ
+        if viewer_role in ["admin", "điều hành", "giám đốc"]:
+            return True
+        
+        # Lấy region của cả 2 người
+        viewer_region = (viewer_user.get("region") or "").strip().lower()
+        target_region = (target_user_info.get("region") or "").strip().lower()
+        
+        # Cùng region thì được xem vị trí của nhau
+        return viewer_region != "" and viewer_region == target_region
 
 
 hub = LocationHub()

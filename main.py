@@ -33,7 +33,7 @@ from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
 
 import users_store
-from ccts_data import build_station_markers, get_static_data
+from ccts_data import build_station_markers, get_static_data, filter_stations_for_user
 from location_hub import hub
 from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS
 
@@ -66,6 +66,28 @@ async def refresh_stations_once():
     _latest_station_payload = await build_station_markers()
 
 
+async def broadcast_stations_update():
+    """Đẩy danh sách trạm mới nhất tới TỪNG kết nối riêng biệt (không dùng
+    broadcast_all chung) vì mỗi người có thể thấy 1 tập trạm khác nhau -
+    Kỹ thuật viên chỉ thấy trạm trong khu vực của họ (filter_stations_for_user)."""
+    async with hub.lock:
+        targets = list(hub.connections.items())
+
+    dead = []
+    for ws, viewer in targets:
+        filtered = filter_stations_for_user(_latest_station_payload["stations"], viewer)
+        payload = {**_latest_station_payload, "stations": filtered, "type": "stations_update"}
+        try:
+            await ws.send_json(payload)
+        except Exception:
+            dead.append(ws)
+
+    if dead:
+        async with hub.lock:
+            for ws in dead:
+                hub.connections.pop(ws, None)
+
+
 async def refresh_stations_loop():
     """Cứ mỗi TICKET_REFRESH_SECONDS (mặc định 10 phút), cào lại ticket và đẩy
     (broadcast) danh sách trạm mới nhất tới mọi client đang mở web - lớp bản
@@ -74,7 +96,7 @@ async def refresh_stations_loop():
         await asyncio.sleep(TICKET_REFRESH_SECONDS)
         try:
             await refresh_stations_once()
-            await hub.broadcast_all({"type": "stations_update", **_latest_station_payload})
+            await broadcast_stations_update()
         except Exception as e:
             print(f"Lỗi làm mới dữ liệu ticket: {e}")
 
@@ -126,13 +148,24 @@ async def logout(request: Request):
 # ==========================================
 # Trang bản đồ chính
 # ==========================================
+@app.post("/api/admin/refresh-stations")
+async def api_refresh_stations(request: Request):
+    user = get_current_user(request)
+    # Kiểm tra nếu chưa đăng nhập hoặc không phải Admin
+    if not user or (user.get("role") or "").strip().lower() != "admin":
+        return JSONResponse({"error": "Bạn không có quyền thực hiện thao tác này."}, status_code=403)
+    
+    # Gọi hàm làm mới dữ liệu từ CCTS và broadcast cho tất cả client (đã lọc theo quyền xem)
+    await refresh_stations_once()
+    await broadcast_stations_update()
+    return {"status": "ok", "message": "Đã cập nhật dữ liệu trạm mới nhất!"}
+
 @app.get("/", response_class=HTMLResponse)
 async def map_page(request: Request):
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
     
-    # Sửa thành như thế này:
     return templates.TemplateResponse(
         request=request, 
         name="map.html", 
@@ -142,9 +175,46 @@ async def map_page(request: Request):
 
 @app.get("/api/stations")
 async def api_stations(request: Request):
-    if not get_current_user(request):
+    user = get_current_user(request)
+    if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    return _latest_station_payload
+    filtered = filter_stations_for_user(_latest_station_payload["stations"], user)
+    return {**_latest_station_payload, "stations": filtered}
+
+
+@app.get("/api/technicians")
+async def api_technicians(request: Request):
+    """Danh sách kỹ thuật viên gom theo khu vực (để hiển thị tag lọc trên bản
+    đồ), kèm trạng thái online/offline (đối chiếu với danh sách đang kết nối
+    WebSocket). Nếu 1 tên trong list_Stations.json không khớp được với tài
+    khoản nào trong Sheet Users, online sẽ trả về null (không xác định)."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    _, _, _, _, tech_by_region = get_static_data()
+    all_users = users_store.list_users_public()
+
+    name_to_username = {}
+    for u in all_users:
+        if (u.get("role") or "").strip().lower() == "kỹ thuật":
+            key = (u.get("full_name") or "").strip().lower()
+            if key:
+                name_to_username[key] = u["username"]
+
+    online_set = set(hub.online_usernames())
+
+    regions_out = {}
+    for region, names in tech_by_region.items():
+        items = []
+        for name in names:
+            username = name_to_username.get(name.strip().lower())
+            online = (username.strip().lower() in online_set) if username else None
+            items.append({"tech_name": name, "username": username, "online": online})
+        items.append({"tech_name": "Unassigned", "username": None, "online": None})
+        regions_out[region] = items
+
+    return {"regions": regions_out}
 
 
 # ==========================================
@@ -163,7 +233,9 @@ async def ws_location(websocket: WebSocket):
 
     try:
         await websocket.send_json(hub.snapshot_for(user))
-        await websocket.send_json({"type": "stations_update", **_latest_station_payload})
+        filtered = filter_stations_for_user(_latest_station_payload["stations"], user)
+        await websocket.send_json({**_latest_station_payload, "stations": filtered, "type": "stations_update"})
+        await websocket.send_json({"type": "presence_update", "online_usernames": hub.online_usernames()})
 
         while True:
             try:
