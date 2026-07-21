@@ -35,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 import users_store
 from ccts_data import build_station_markers, get_static_data, filter_stations_for_user
 from location_hub import hub
-from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS
+from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS, TRACCAR_TOKEN
 
 app = FastAPI(title="CCTS Live Map")
 templates = Jinja2Templates(directory="templates")
@@ -211,10 +211,37 @@ async def api_technicians(request: Request):
             username = name_to_username.get(name.strip().lower())
             online = (username.strip().lower() in online_set) if username else None
             items.append({"tech_name": name, "username": username, "online": online})
-        items.append({"tech_name": "Unassigned", "username": None, "online": None})
         regions_out[region] = items
 
-    return {"regions": regions_out}
+    return {"regions": regions_out, "unassigned": {"tech_name": "Unassigned", "username": None, "online": None}}
+
+
+@app.get("/api/traccar")
+async def api_traccar(id: str, lat: float, lon: float, accuracy: float = None, token: str = None):
+    """Endpoint tương thích với giao thức HTTP đơn giản của app Traccar Client
+    (Android/iOS, mã nguồn mở, miễn phí) - dùng để lấy vị trí liên tục kể cả
+    khi màn hình điện thoại tắt (trình duyệt không làm được việc này do giới
+    hạn nền tảng của iOS/Android).
+
+    Cấu hình trong app Traccar Client:
+    - Server URL: https://<domain-của-bạn>/api/traccar?token=<TRACCAR_TOKEN>
+    - Device Identifier: đúng bằng username của kỹ thuật viên đó trong Sheet Users
+
+    TRACCAR_TOKEN là 1 chuỗi bí mật tự đặt trong biến môi trường (xem README),
+    dùng để tránh người lạ gửi vị trí giả vào hệ thống (giao thức Traccar gốc
+    không hỗ trợ xác thực phức tạp hơn query param)."""
+    if TRACCAR_TOKEN and token != TRACCAR_TOKEN:
+        return JSONResponse({"error": "invalid token"}, status_code=403)
+
+    user_info = users_store.get_user_info(id)
+    if not user_info:
+        return JSONResponse({"error": f"Không tìm thấy tài khoản '{id}'"}, status_code=404)
+
+    await hub.update_location(
+        id, user_info, lat, lon, accuracy,
+        stations=_latest_station_payload["stations"],
+    )
+    return {"status": "ok"}
 
 
 # ==========================================
@@ -252,7 +279,10 @@ async def ws_location(websocket: WebSocket):
                     # Lấy role/region MỚI NHẤT (có cache) - phòng trường hợp
                     # Admin vừa đổi chức vụ của người này trên Sheets.
                     fresh_info = users_store.get_user_info(user["username"]) or user
-                    await hub.update_location(user["username"], fresh_info, lat, lng, accuracy)
+                    await hub.update_location(
+                        user["username"], fresh_info, lat, lng, accuracy,
+                        stations=_latest_station_payload["stations"],
+                    )
     finally:
         await hub.unregister(websocket)
 

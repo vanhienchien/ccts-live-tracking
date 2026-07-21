@@ -115,12 +115,25 @@ function wrenchIcon() {
     });
 }
 
+function formatDuration(sinceEpochSeconds) {
+    const elapsed = Math.max(0, Date.now() / 1000 - sinceEpochSeconds);
+    const totalMin = Math.floor(elapsed / 60);
+    if (totalMin < 60) {
+        const sec = Math.floor(elapsed % 60);
+        return `${totalMin} phút ${sec.toString().padStart(2, '0')} giây`;
+    }
+    const hours = Math.floor(totalMin / 60);
+    const mins = totalMin % 60;
+    return `${hours} giờ ${mins} phút`;
+}
+
 function buildStaffPopup(loc) {
     const gmapUrl = `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
     let workingNote = '';
     if (loc.nearby_station) {
+        const durationText = loc.nearby_since ? formatDuration(loc.nearby_since) : '';
         workingNote = `<div style="margin-top:4px;padding:4px 6px;background:#fff3cd;border-radius:4px;">
-            🔧 Đang tại trạm <b>${loc.nearby_station}</b> (~${loc.nearby_distance}m)</div>`;
+            🔧 Đang sửa trạm <b>${loc.nearby_station}</b>${durationText ? ` — đã ${durationText}` : ''}</div>`;
     }
     return `
     <div style="font-family:Arial;font-size:12px;min-width:200px;">
@@ -168,7 +181,8 @@ function upsertStaffMarker(loc) {
         } else {
             animateMarkerTo(entry.wrenchMarker, wrenchLatLng, 1200);
         }
-        entry.wrenchMarker.bindTooltip(`🔧 ${loc.full_name} đang sửa trạm ${loc.nearby_station}`);
+        const durationText = loc.nearby_since ? ` (đã ${formatDuration(loc.nearby_since)})` : '';
+        entry.wrenchMarker.bindTooltip(`🔧 ${loc.full_name} đang sửa trạm ${loc.nearby_station}${durationText}`);
     } else if (entry.wrenchMarker) {
         map.removeLayer(entry.wrenchMarker);
         entry.wrenchMarker = null;
@@ -178,6 +192,15 @@ function upsertStaffMarker(loc) {
 // ---------- Tag lọc theo kỹ thuật viên (gom theo khu vực + chấm online/offline) ----------
 const techPanel = document.getElementById('tech-filter-panel');
 const techFilterBtn = document.getElementById('tech-filter-btn');
+
+// Panel này nằm ĐÈ LÊN bản đồ Leaflet, nên mặc định cuộn chuột (wheel) bên
+// trong nó sẽ bị Leaflet bắt và zoom bản đồ thay vì cuộn danh sách. Đây là
+// API chính thức của Leaflet dành riêng cho việc này (control/popup nổi trên
+// bản đồ cần tự cuộn nội bộ).
+if (techPanel) {
+    L.DomEvent.disableScrollPropagation(techPanel);
+    L.DomEvent.disableClickPropagation(techPanel);
+}
 
 function techDotHtml(online) {
     if (online === true) return '<span class="conn-dot ok" title="Đang online"></span>';
@@ -200,6 +223,17 @@ function renderTechPanel(data) {
         });
         html += `</div>`;
     });
+
+    // "Unassigned" chỉ 1 mục duy nhất, dùng chung cho toàn bộ khu vực (không lặp lại)
+    if (data.unassigned) {
+        html += `<div class="region-group"><div class="region-title">🆕 Khác</div>
+            <label data-tech="Unassigned">
+                <input type="checkbox" class="tech-checkbox" value="Unassigned">
+                ${techDotHtml(null)} Unassigned
+            </label>
+        </div>`;
+    }
+
     html += `
     <div id="tech-filter-actions">
         <button id="tech-select-all">Chọn tất cả</button>

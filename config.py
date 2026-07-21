@@ -45,8 +45,13 @@ CCTS_PASS = os.environ.get("CCTS_PASSWORD", "Ccts123.")
 
 SESSION_COOKIE_NAME = "session_token"
 
-# Số giây làm mới dữ liệu ticket từ CCTS (mặc định 10 phút)
-TICKET_REFRESH_SECONDS = int(os.environ.get("TICKET_REFRESH_SECONDS", 600))
+# Chuỗi bí mật tự đặt để bảo vệ endpoint /api/traccar (app Traccar Client di
+# động gửi vị trí vào đây) - tránh người lạ gửi toạ độ giả vào hệ thống.
+# Để trống thì endpoint không yêu cầu token (KHÔNG khuyến khích khi deploy thật).
+TRACCAR_TOKEN = os.environ.get("TRACCAR_TOKEN", "").strip()
+
+# Số giây làm mới dữ liệu ticket từ CCTS (mặc định 15 phút)
+TICKET_REFRESH_SECONDS = int(os.environ.get("TICKET_REFRESH_SECONDS", 900))
 
 _gc = None
 

@@ -3,9 +3,9 @@ Quản lý vị trí trực tiếp (in-memory) & phát (broadcast) qua WebSocket
 
 QUAN TRỌNG: vị trí KHÔNG được lưu xuống Google Sheets nữa - đây là dữ liệu tức
 thời, chỉ tồn tại trong bộ nhớ khi server đang chạy. Nếu server khởi động lại,
-vị trí sẽ được cập nhật lại ngay khi trình duyệt của người dùng gửi ping tiếp
-theo (thường trong vài giây). Lựa chọn này giúp hệ thống đơn giản và tránh gọi
-Google Sheets API dồn dập khi có nhiều người cùng di chuyển liên tục.
+vị trí sẽ được cập nhật lại ngay khi có ping tiếp theo (từ trình duyệt hoặc từ
+app Traccar Client). Lựa chọn này giúp hệ thống đơn giản và tránh gọi Google
+Sheets API dồn dập khi có nhiều người cùng di chuyển liên tục.
 """
 
 import asyncio
@@ -13,9 +13,9 @@ import time
 from math import radians, sin, cos, sqrt, atan2
 
 import users_store
-from ccts_data import get_static_data
 
-STATION_PROXIMITY_METERS = 150  # Ngưỡng coi như "đang ở tại trạm"
+STATION_PROXIMITY_METERS = 10   # Ngưỡng coi như "đang đứng tại trạm" (theo yêu cầu: ~10m)
+ONLINE_THRESHOLD_SECONDS = 120  # Không có cập nhật vị trí quá 2 phút -> coi như offline
 
 
 def haversine_meters(lat1, lng1, lat2, lng2):
@@ -27,15 +27,17 @@ def haversine_meters(lat1, lng1, lat2, lng2):
     return 2 * R * atan2(sqrt(a), sqrt(1 - a))
 
 
-def find_nearby_station(lat, lng, threshold=STATION_PROXIMITY_METERS):
-    """Tìm trạm gần nhất với 1 toạ độ, trả về (mã trạm, khoảng cách mét) nếu
-    nằm trong ngưỡng, ngược lại (None, None)."""
-    coords_map, _, _, _, _ = get_static_data()
+def find_nearby_station_among(lat, lng, stations, threshold=STATION_PROXIMITY_METERS):
+    """Tìm trạm gần nhất trong DANH SÁCH TRẠM ĐANG CÓ SỰ CỐ (không phải toàn
+    bộ coords_map tĩnh) - đúng theo yêu cầu: chỉ tính khoảng cách tới các trạm
+    đang gim trên bản đồ. `stations` là list dict có ít nhất 'lat','lng',
+    'station_code'. Trả về (station_code, khoảng cách mét) nếu trong ngưỡng,
+    ngược lại (None, None)."""
     nearest_code, nearest_dist = None, None
-    for code, c in coords_map.items():
-        d = haversine_meters(lat, lng, c["lat"], c["lng"])
+    for s in stations or []:
+        d = haversine_meters(lat, lng, s["lat"], s["lng"])
         if nearest_dist is None or d < nearest_dist:
-            nearest_dist, nearest_code = d, code
+            nearest_dist, nearest_code = d, s.get("station_code")
     if nearest_dist is not None and nearest_dist <= threshold:
         return nearest_code, round(nearest_dist, 1)
     return None, None
@@ -43,8 +45,9 @@ def find_nearby_station(lat, lng, threshold=STATION_PROXIMITY_METERS):
 
 class LocationHub:
     def __init__(self):
-        self.locations = {}    # username -> {lat, lng, accuracy, full_name, role, region, updated_at, nearby_station, nearby_distance}
-        self.connections = {}  # websocket -> user dict (dùng để lọc quyền xem)
+        self.locations = {}        # username -> {lat, lng, accuracy, full_name, role, region, updated_at, nearby_station, nearby_since}
+        self.connections = {}      # websocket -> user dict (dùng để lọc quyền xem)
+        self.repair_sessions = {}  # username -> {"station_code": ..., "started_at": epoch}
         self.lock = asyncio.Lock()
 
     async def register(self, websocket, user):
@@ -61,10 +64,18 @@ class LocationHub:
         # lại liên tục gây rối mắt cho người đang theo dõi bản đồ.
 
     def online_usernames(self):
-        """Danh sách username (chữ thường) đang có ít nhất 1 kết nối WebSocket
-        mở - dùng để hiển thị chấm đỏ/xanh online-offline trong tag lọc kỹ
-        thuật viên."""
-        return list({v["username"].strip().lower() for v in self.connections.values()})
+        """'Online' giờ được xác định theo THỜI ĐIỂM CẬP NHẬT VỊ TRÍ GẦN NHẤT
+        (trong vòng ONLINE_THRESHOLD_SECONDS), KHÔNG chỉ dựa vào việc có đang
+        mở kết nối WebSocket hay không. Lý do: vị trí có thể đến từ 1 app di
+        động riêng (vd Traccar Client) không hề mở WebSocket tới server này,
+        nhưng vẫn nên được coi là 'đang online' nếu vẫn gửi vị trí đều đặn."""
+        now = time.time()
+        recent = {
+            uname for uname, loc in self.locations.items()
+            if now - loc.get("updated_at", 0) <= ONLINE_THRESHOLD_SECONDS
+        }
+        connected = {v["username"].strip().lower() for v in self.connections.values()}
+        return list(recent | connected)
 
     def visible_locations_for(self, viewer):
         """Trả về list vị trí mà viewer được phép xem, theo đúng quy tắc phân
@@ -76,8 +87,27 @@ class LocationHub:
                 result.append({"username": username, **loc})
         return result
 
-    async def update_location(self, username, user_info, lat, lng, accuracy):
-        nearby_code, nearby_dist = find_nearby_station(lat, lng)
+    async def update_location(self, username, user_info, lat, lng, accuracy, stations=None):
+        """`stations` PHẢI là danh sách trạm đang có sự cố hiện tại (từ
+        _latest_station_payload["stations"] trong main.py) - đây chính là
+        điểm sửa quan trọng: trước đây tính khoảng cách tới TOÀN BỘ trạm tĩnh
+        (coords_map), giờ chỉ tính tới các trạm đang thực sự hiển thị lỗi
+        trên bản đồ, đúng yêu cầu."""
+        nearby_code, _ = find_nearby_station_among(lat, lng, stations)
+
+        now = time.time()
+        session = self.repair_sessions.get(username)
+
+        if nearby_code:
+            if session and session["station_code"] == nearby_code:
+                started_at = session["started_at"]  # vẫn ở trạm cũ -> giữ nguyên mốc thời gian bắt đầu
+            else:
+                started_at = now  # vừa đến 1 trạm mới (hoặc trạm khác) -> tính lại từ đầu
+                self.repair_sessions[username] = {"station_code": nearby_code, "started_at": started_at}
+        else:
+            self.repair_sessions.pop(username, None)
+            started_at = None
+
         loc = {
             "lat": lat,
             "lng": lng,
@@ -85,15 +115,16 @@ class LocationHub:
             "full_name": user_info["full_name"],
             "role": user_info["role"],
             "region": user_info["region"],
-            "updated_at": time.time(),
+            "updated_at": now,
             "nearby_station": nearby_code,
-            "nearby_distance": nearby_dist,
+            "nearby_since": started_at,  # epoch giây - frontend tự tính + hiển thị thời lượng đang sửa trạm
         }
         async with self.lock:
             self.locations[username] = loc
 
         message = {"type": "location_update", "username": username, **loc}
         await self._broadcast_to_permitted(username, loc["role"], message)
+        await self.broadcast_all({"type": "presence_update", "online_usernames": self.online_usernames()})
 
     async def _broadcast_to_permitted(self, username, role, message):
         async with self.lock:
@@ -114,8 +145,8 @@ class LocationHub:
                     self.connections.pop(ws, None)
 
     async def broadcast_all(self, message):
-        """Gửi 1 thông điệp (vd cập nhật danh sách trạm) tới TẤT CẢ kết nối
-        đang mở, không lọc quyền (mọi người đều thấy chung 1 danh sách trạm)."""
+        """Gửi 1 thông điệp (vd cập nhật danh sách trạm, presence) tới TẤT CẢ
+        kết nối đang mở, không lọc quyền."""
         async with self.lock:
             targets = list(self.connections.keys())
 
@@ -133,25 +164,6 @@ class LocationHub:
 
     def snapshot_for(self, viewer):
         return {"type": "snapshot", "locations": self.visible_locations_for(viewer)}
-    
-    def can_see_location(viewer_user: dict, target_user_info: dict) -> bool:
-        """
-        Quy tắc xem vị trí:
-        - Admin / Điều hành / Giám đốc: Xem được tất cả mọi người.
-        - Kỹ thuật / Điều phối khu vực: Chỉ xem được những ai CÙNG REGION với mình.
-        """
-        viewer_role = (viewer_user.get("role") or "").strip().lower()
-        
-        # Các vai trò cấp cao xem toàn bộ
-        if viewer_role in ["admin", "điều hành", "giám đốc"]:
-            return True
-        
-        # Lấy region của cả 2 người
-        viewer_region = (viewer_user.get("region") or "").strip().lower()
-        target_region = (target_user_info.get("region") or "").strip().lower()
-        
-        # Cùng region thì được xem vị trí của nhau
-        return viewer_region != "" and viewer_region == target_region
 
 
 hub = LocationHub()

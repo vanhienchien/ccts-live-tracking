@@ -204,9 +204,8 @@ async def build_station_markers():
                 rows_html += f"""
                 <div style="background:#f9f9f9;border-left:4px solid {color};border-radius:4px;
                             padding:6px 8px;margin-bottom:6px;">
-                    <b>SN:</b> {row['Charge Point ID']} ({row['Model Name']})<br>
-                    <b>Ticket status:</b> {row['Ticket Status']}<br>
-                    <b>Ticket ID: {row['Ticket ID']}<br>
+                    <b>CP ID:</b> {row['Charge Point ID']} ({row['Model Name']})<br>
+                    <b>Trạng thái:</b> {row['Ticket Status']} (ID: {row['Ticket ID']})<br>
                     <b>Thời gian:</b> {row['Ticket Duration']}<br>
                     <i style="color:#666;">{row['Problem Description']}</i>
                 </div>
@@ -250,15 +249,22 @@ async def build_station_markers():
 
 def filter_stations_for_user(stations, user):
     """Kỹ thuật viên chỉ được xem trạm trong CHÍNH khu vực của họ (bao gồm
-    trạm của chính họ, đồng nghiệp kỹ thuật khác cùng khu vực, và trạm chưa
-    gán kỹ thuật viên (Unassigned) miễn là cùng khu vực). Các vai trò khác
+    trạm của chính họ, đồng nghiệp kỹ thuật khác cùng khu vực). RIÊNG trạm
+    chưa gán kỹ thuật viên (Unassigned) được công khai cho TẤT CẢ mọi người,
+    bất kể khu vực - để ai cũng biết có trạm mới xuất hiện. Các vai trò khác
     (Điều phối khu vực trở lên) xem được toàn bộ, không giới hạn."""
     role = (user.get("role") or "").strip().lower()
     if role != "kỹ thuật":
         return stations
 
     user_region = (user.get("region") or "").strip().lower()
-    if not user_region:
-        return []  # Chưa gán khu vực -> không thấy trạm nào (an toàn hơn là thấy tất cả)
 
-    return [s for s in stations if (s.get("region") or "").strip().lower() == user_region]
+    result = []
+    for s in stations:
+        tech_name = (s.get("tech_name") or "").strip()
+        if not tech_name or tech_name.lower() == "unassigned":
+            result.append(s)  # Unassigned -> luôn hiển thị, không phân biệt khu vực
+            continue
+        if user_region and (s.get("region") or "").strip().lower() == user_region:
+            result.append(s)
+    return result
