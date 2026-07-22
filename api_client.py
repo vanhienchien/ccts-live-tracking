@@ -1,20 +1,14 @@
 import asyncio
+import base64
+import hashlib
 import json
 import requests
-from playwright.async_api import async_playwright
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives import serialization
 
 
 class CCTSClient:
-    """Client đăng nhập & gọi API hệ thống CCTS.
-
-    Dùng Playwright ASYNC API (không phải Sync API) vì toàn bộ ứng dụng
-    (FastAPI/uvicorn) chạy trong 1 event loop asyncio đang hoạt động liên
-    tục. Playwright Sync API vốn được thiết kế cho script chạy độc lập,
-    không có event loop nào khác đang chạy cùng lúc - khi dùng chung với
-    ASGI app (đặc biệt trên Windows, do khác biệt policy event loop), nó có
-    thể xung đột dù được gọi trong thread riêng. Async API mới là cách dùng
-    đúng và ổn định trong ngữ cảnh này.
-    """
+    """Client đăng nhập & gọi API hệ thống CCTS (Pure API Version - Không Playwright)."""
 
     def __init__(self, username="esmanager", password="Ccts123.", base_url="https://cloud.cnpowercore.com:8091"):
         self.username = username
@@ -23,6 +17,7 @@ class CCTSClient:
         self.session = requests.Session()
         self.token = None
         self.ssoticket = None
+        
         self.base_headers = {
             'accept': 'application/json, text/plain, */*',
             'accept-language': 'en-US',
@@ -38,87 +33,111 @@ class CCTSClient:
             'sec-fetch-site': 'same-site',
             'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36'
         }
+        self.session.headers.update(self.base_headers)
+
+    def _clean_and_load_public_key(self, pub_key_raw: str):
+        """Làm sạch Public Key bị obfuscate 'power'."""
+        clean_key = pub_key_raw.strip().replace("\r", "").replace("\n", "").replace("power", "").replace("POWER", "")
+        clean_key = "".join(c for c in clean_key if c in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=")
+        
+        missing = len(clean_key) % 4
+        if missing:
+            clean_key += "=" * (4 - missing)
+        
+        pem_key = f"-----BEGIN PUBLIC KEY-----\n{clean_key}\n-----END PUBLIC KEY-----"
+        
+        try:
+            return serialization.load_pem_public_key(pem_key.encode('utf-8'))
+        except Exception as e:
+            print(f"[-] Load Public Key error: {e}")
+            raise
+
+    def _encrypt_password(self, pub_key_raw: str, plaintext_password: str) -> str:
+        """Mã hóa theo đúng logic frontend: MD5 → RSA PKCS1v15"""
+        # Bước 1: MD5
+        md5_hash = hashlib.md5(plaintext_password.encode('utf-8')).hexdigest()
+        
+        # Bước 2: RSA
+        public_key = self._clean_and_load_public_key(pub_key_raw)
+        encrypted_bytes = public_key.encrypt(
+            md5_hash.encode('utf-8'),
+            padding.PKCS1v15()
+        )
+        return base64.b64encode(encrypted_bytes).decode('utf-8')
 
     async def login(self):
-        """Đăng nhập bằng Playwright Async API, lấy token + cookie ssoticket."""
-        print("[+] Đang khởi động Playwright để đăng nhập...")
+        """Đăng nhập thuần API."""
+        print("[+] Đang lấy Public Key...")
+        
+        def _fetch_key():
+            return self.session.get(f"{self.base_url}/authen/index/getPublicKey")
+        
+        res_key = await asyncio.to_thread(_fetch_key)
+        key_data = res_key.json()
 
-        token_found = False
+        if str(key_data.get("code")) != "200":
+            raise Exception(f"[-] Không lấy được Public Key: {key_data}")
+            
+        pub_key_raw = key_data.get("data")
+        print("[+] Đang mã hóa mật khẩu (MD5 + RSA)...")
+        
+        encrypted_pw = self._encrypt_password(pub_key_raw, self.password)
 
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            context = await browser.new_context(viewport={"width": 1280, "height": 720})
-            page = await context.new_page()
+        payload = {
+            "account": self.username,
+            "password": encrypted_pw
+        }
+        
+        def _post_login():
+            return self.session.post(f"{self.base_url}/authen/login/validate", json=payload)
+        
+        print("[+] Gọi API login...")
+        res_login = await asyncio.to_thread(_post_login)
+        login_data = res_login.json()
 
-            async def handle_request_interception(route):
-                nonlocal token_found
-                request = route.request
+        if str(login_data.get("code")) != "200" or not login_data.get("success"):
+            raise Exception(f"[-] Đăng nhập thất bại: {login_data}")
 
-                if "findCCTSTicket" in request.url and request.method == "POST":
-                    try:
-                        post_data = request.post_data
-                        if post_data:
-                            payload = json.loads(post_data)
-                            if "token" in payload:
-                                self.token = payload["token"]
-                                token_found = True
-                    except Exception:
-                        pass
+        self.token = login_data.get("token") or login_data.get("data", {}).get("token")
+        self.ssoticket = self.session.cookies.get('ssoticket')
 
-                await route.continue_()
+        if not self.token:
+            raise Exception("[-] Không tìm thấy token trong response.")
+            
+        print(f"[✓] Đăng nhập thành công! Token: {self.token[:30]}...")
 
-            await page.route("**/findCCTSTicket**", handle_request_interception)
+    async def _post(self, endpoint, payload=None):
+        """POST helper - Tương thích hoàn toàn với ccts_data.py"""
+        if payload is None:
+            payload = {}
+        
+        # Đảm bảo có token
+        if isinstance(payload, dict):
+            payload = dict(payload)  # copy
+            if "token" not in payload and self.token:
+                payload["token"] = self.token
 
-            try:
-                await page.goto("https://console.cnpowercore.com/", timeout=90000)
-                await page.wait_for_load_state("domcontentloaded")
-
-                await page.fill("input[placeholder*='username or email']", self.username)
-                await page.fill("input[placeholder*='Password']", self.password)
-                await page.wait_for_timeout(1000)
-                await page.click("button:has-text('Log in'), button[type='submit']")
-
-                for _ in range(20):
-                    if token_found:
-                        break
-                    await page.wait_for_timeout(500)
-
-                cookies = await context.cookies()
-                for c in cookies:
-                    if c['name'] == 'ssoticket':
-                        self.ssoticket = c['value']
-
-            except Exception as e:
-                print(f"[-] Lỗi Playwright: {e}")
-            finally:
-                await browser.close()
-
-        if not self.token or not self.ssoticket:
-            raise Exception("[-] Đăng nhập thất bại, không lấy được Token hoặc Cookie ssoticket.")
-
-        self.session.headers.update(self.base_headers)
-        self.session.cookies.set('ssoticket', self.ssoticket, domain='cloud.cnpowercore.com')
-        print(f"[✓] Đăng nhập thành công! Token: {self.token[:15]}...")
-
-    async def _post(self, endpoint, payload):
-        """POST kèm tự động gắn Token, tự re-login nếu Token hết hạn.
-
-        requests.post() bản thân là hàm đồng bộ (blocking) - không xung đột
-        kiểu asyncio như Playwright Sync API, nhưng vẫn nên chạy qua
-        asyncio.to_thread() để không "đứng hình" event loop trong lúc chờ
-        mạng, đặc biệt khi có nhiều client WebSocket khác đang kết nối."""
         url = f"{self.base_url}{endpoint}"
-        payload['token'] = self.token
 
-        res = await asyncio.to_thread(self.session.post, url, json=payload)
-        res_data = res.json()
+        def _execute():
+            return self.session.post(url, json=payload, headers=self.base_headers)
 
+        res = await asyncio.to_thread(_execute)
+        
+        try:
+            res_data = res.json()
+        except:
+            res_data = {"code": "500", "message": "Invalid JSON", "success": False}
+
+        # Tự động re-login nếu token hết hạn
         if res_data.get("code") in ["401", "403", "50001"] or not res_data.get("success", True):
-            if "token" in str(res_data.get("message", "")).lower() or res_data.get("code") in ["401", "50001"]:
-                print("[!] Token nội bộ đã hết hạn. Đang gọi Playwright Re-login...")
+            if "token" in str(res_data.get("message", "")).lower() or str(res_data.get("code")) in ["401", "50001"]:
+                print("[!] Token hết hạn. Đang re-login...")
                 await self.login()
-                payload['token'] = self.token
-                res = await asyncio.to_thread(self.session.post, url, json=payload)
+                # Thử lại lần nữa
+                if isinstance(payload, dict):
+                    payload["token"] = self.token
+                res = await asyncio.to_thread(_execute)
                 res_data = res.json()
 
         return res_data

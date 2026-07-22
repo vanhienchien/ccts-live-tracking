@@ -9,4 +9,3 @@ gspread
 gspread-dataframe
 google-auth
 requests
-playwright

@@ -1,32 +1,14 @@
 """
-CCTS Live Map - ứng dụng web độc lập (FastAPI + WebSocket), thay thế bản
-Streamlit trước đây để có trải nghiệm mượt hơn (vị trí nhân sự cập nhật
-real-time không cần load lại trang).
+CCTS Live Map - ứng dụng web độc lập (FastAPI + WebSocket).
+Hiển thị vị trí nhân sự và cập nhật trạm real-time không cần load lại trang.
 
-Chạy thử local (Windows - xem ghi chú NotImplementedError bên dưới):
-    uvicorn main:app --host 0.0.0.0 --port 8000
+Chạy thử local:
+    uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 
 Xem README.md đi kèm để biết cách cấu hình biến môi trường & deploy.
 """
 
-import sys
 import asyncio
-
-# ==========================================
-# QUAN TRỌNG - CHỈ ẢNH HƯỞNG TRÊN WINDOWS:
-# Khi chạy `uvicorn --reload` trên Windows, cơ chế theo dõi file thay đổi
-# (WatchFiles) khiến asyncio chuyển sang dùng SelectorEventLoop thay vì
-# ProactorEventLoop mặc định. SelectorEventLoop KHÔNG hỗ trợ tạo subprocess
-# trên Windows, mà Playwright Async API bắt buộc phải tạo subprocess để mở
-# trình duyệt -> gây lỗi "NotImplementedError" khi gọi client.login().
-# Dòng dưới đây ép asyncio dùng ProactorEventLoopPolicy (hỗ trợ subprocess)
-# ngay từ đầu, TRƯỚC khi uvicorn/bất kỳ code nào khác kịp chạy.
-# Trên Linux/macOS (vd khi deploy lên Render) dòng này không có tác dụng gì
-# (an toàn, không cần gỡ ra khi deploy) vì vấn đề này chỉ tồn tại trên Windows.
-if sys.platform == "win32":
-    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-# ==========================================
-
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -42,8 +24,6 @@ templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Session đơn giản: token ngẫu nhiên -> thông tin user, lưu trong bộ nhớ server.
-# (Bị reset khi server khởi động lại - người dùng chỉ cần đăng nhập lại, chấp
-# nhận được với quy mô ứng dụng nội bộ nhỏ như thế này.)
 SESSIONS = {}
 
 _latest_station_payload = {
@@ -59,9 +39,7 @@ def get_current_user(request: Request):
 
 
 async def refresh_stations_once():
-    """build_station_markers() giờ là 1 coroutine thực sự (CCTSClient dùng
-    Playwright ASYNC API), nên chỉ cần await trực tiếp - không còn cần
-    asyncio.to_thread() nữa."""
+    """Lấy dữ liệu trạm mới nhất thông qua API."""
     global _latest_station_payload
     _latest_station_payload = await build_station_markers()
 
@@ -90,8 +68,7 @@ async def broadcast_stations_update():
 
 async def refresh_stations_loop():
     """Cứ mỗi TICKET_REFRESH_SECONDS (mặc định 10 phút), cào lại ticket và đẩy
-    (broadcast) danh sách trạm mới nhất tới mọi client đang mở web - lớp bản
-    đồ TRẠM sẽ được vẽ lại, còn marker VỊ TRÍ NHÂN SỰ không bị ảnh hưởng."""
+    (broadcast) danh sách trạm mới nhất tới mọi client đang mở web."""
     while True:
         await asyncio.sleep(TICKET_REFRESH_SECONDS)
         try:
@@ -151,11 +128,9 @@ async def logout(request: Request):
 @app.post("/api/admin/refresh-stations")
 async def api_refresh_stations(request: Request):
     user = get_current_user(request)
-    # Kiểm tra nếu chưa đăng nhập hoặc không phải Admin
     if not user or (user.get("role") or "").strip().lower() != "admin":
         return JSONResponse({"error": "Bạn không có quyền thực hiện thao tác này."}, status_code=403)
     
-    # Gọi hàm làm mới dữ liệu từ CCTS và broadcast cho tất cả client (đã lọc theo quyền xem)
     await refresh_stations_once()
     await broadcast_stations_update()
     return {"status": "ok", "message": "Đã cập nhật dữ liệu trạm mới nhất!"}
@@ -184,10 +159,6 @@ async def api_stations(request: Request):
 
 @app.get("/api/technicians")
 async def api_technicians(request: Request):
-    """Danh sách kỹ thuật viên gom theo khu vực (để hiển thị tag lọc trên bản
-    đồ), kèm trạng thái online/offline (đối chiếu với danh sách đang kết nối
-    WebSocket). Nếu 1 tên trong list_Stations.json không khớp được với tài
-    khoản nào trong Sheet Users, online sẽ trả về null (không xác định)."""
     user = get_current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
@@ -218,18 +189,6 @@ async def api_technicians(request: Request):
 
 @app.get("/api/traccar")
 async def api_traccar(id: str, lat: float, lon: float, accuracy: float = None, token: str = None):
-    """Endpoint tương thích với giao thức HTTP đơn giản của app Traccar Client
-    (Android/iOS, mã nguồn mở, miễn phí) - dùng để lấy vị trí liên tục kể cả
-    khi màn hình điện thoại tắt (trình duyệt không làm được việc này do giới
-    hạn nền tảng của iOS/Android).
-
-    Cấu hình trong app Traccar Client:
-    - Server URL: https://<domain-của-bạn>/api/traccar?token=<TRACCAR_TOKEN>
-    - Device Identifier: đúng bằng username của kỹ thuật viên đó trong Sheet Users
-
-    TRACCAR_TOKEN là 1 chuỗi bí mật tự đặt trong biến môi trường (xem README),
-    dùng để tránh người lạ gửi vị trí giả vào hệ thống (giao thức Traccar gốc
-    không hỗ trợ xác thực phức tạp hơn query param)."""
     if TRACCAR_TOKEN and token != TRACCAR_TOKEN:
         return JSONResponse({"error": "invalid token"}, status_code=403)
 
@@ -276,8 +235,6 @@ async def ws_location(websocket: WebSocket):
                 lat, lng = data.get("lat"), data.get("lng")
                 accuracy = data.get("accuracy")
                 if lat is not None and lng is not None:
-                    # Lấy role/region MỚI NHẤT (có cache) - phòng trường hợp
-                    # Admin vừa đổi chức vụ của người này trên Sheets.
                     fresh_info = users_store.get_user_info(user["username"]) or user
                     await hub.update_location(
                         user["username"], fresh_info, lat, lng, accuracy,
@@ -289,8 +246,6 @@ async def ws_location(websocket: WebSocket):
 
 if __name__ == "__main__":
     import uvicorn
-    # Trên Windows, cơ chế --reload (WatchFiles) có thể ép lại SelectorEventLoop
-    # dù đã set policy ở trên, nên tắt hẳn reload khi chạy trên Windows để đảm
-    # bảo ổn định. Trên Linux/macOS (kể cả khi deploy) vẫn giữ reload khi cần.
-    use_reload = sys.platform != "win32"
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=use_reload)
+    # Do không còn dùng Playwright nên không lo bị crash SelectorEventLoop trên Windows nữa.
+    # Bạn có thể bật tính năng reload thoải mái để lập trình.
+    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)

@@ -1,24 +1,3 @@
-"""
-Cấu hình chung cho toàn bộ ứng dụng - đọc từ biến môi trường (.env), KHÔNG
-hard-code thông tin nhạy cảm trong code (khác với bản demo main.py ban đầu).
-
-Các biến môi trường cần thiết:
-- SPREADSHEET_URL              : Link Google Sheet chứa tab "Users"
-- GOOGLE_SERVICE_ACCOUNT_JSON  : Nội dung JSON của Service Account (dán nguyên
-                                  văn dạng chuỗi 1 dòng) - dùng khi deploy (Render/
-                                  Railway...) vì các nền tảng này thường không cho
-                                  upload file, chỉ cho set biến môi trường.
-  HOẶC
-- GOOGLE_SERVICE_ACCOUNT_FILE  : Đường dẫn tới file service_account.json (dùng
-                                  khi chạy local hoặc VPS có thể upload file).
-- CCTS_USERNAME / CCTS_PASSWORD: Tài khoản đăng nhập hệ thống CCTS để cào ticket.
-- SESSION_SECRET (tuỳ chọn)    : Không bắt buộc ở bản đơn giản này vì ta chỉ dùng
-                                  session token ngẫu nhiên lưu trong bộ nhớ server.
-
-Có thể tạo file `.env` ở thư mục gốc (dùng cùng python-dotenv) khi chạy local
-để không phải export biến môi trường thủ công mỗi lần.
-"""
-
 import os
 import json
 
@@ -38,11 +17,19 @@ SCOPES = [
 
 SPREADSHEET_URL = os.environ.get("SPREADSHEET_URL", "").strip()
 
-# Thông tin đăng nhập CCTS - nên set qua biến môi trường khi deploy thật,
-# giá trị mặc định dưới đây chỉ để tiện chạy thử demo cục bộ.
-CCTS_USER = os.environ.get("CCTS_USERNAME", "esmanager")
-CCTS_PASS = os.environ.get("CCTS_PASSWORD", "Ccts123.")
-
+# ==================== CCTS ACCOUNTS ====================
+CCTS_ACCOUNTS = [
+    {
+        "username": os.environ.get("CCTS_USERNAME_ES", "esmanager"),
+        "password": os.environ.get("CCTS_PASSWORD", "Ccts123."),
+        "role": "esmanager"   # để phân biệt nếu cần
+    },
+    {
+        "username": os.environ.get("CCTS_USERNAME_ITS", "its_frontdesk 01"),
+        "password": os.environ.get("CCTS_PASSWORD", "Ccts123."),
+        "role": "itsmanager"
+    }
+]
 SESSION_COOKIE_NAME = "session_token"
 
 # Chuỗi bí mật tự đặt để bảo vệ endpoint /api/traccar (app Traccar Client di
