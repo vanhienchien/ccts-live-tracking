@@ -113,6 +113,36 @@
     animation: wrench-repair 1.2s infinite ease-in-out;
     transform-origin: center center;
 }
+
+/* ==========================================
+   Responsive - đa số nhân viên dùng điện thoại
+   ========================================== */
+@media (max-width: 700px) {
+  .header {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 8px 10px;
+    gap: 6px;
+  }
+  .header h2 { font-size: 15px; text-align: center; }
+  .header .info {
+    font-size: 12px;
+    justify-content: center;
+    gap: 6px;
+  }
+  .user-detail { display: none; } /* Ẩn dòng tên/chức vụ/khu vực trên di động để đỡ chật */
+  .conn-text-label { display: none; } /* Chỉ giữ chấm online, ẩn chữ "Đang kết nối..." */
+  .search-wrap { flex: 1 1 100%; order: 1; }
+  #search-input { width: 100%; box-sizing: border-box; font-size: 16px; }
+  #search-results { width: 100%; max-width: calc(100vw - 20px); }
+  .hdr-btn { font-size: 12px; padding: 6px 10px; }
+  #tech-filter-panel {
+    left: 10px; right: 10px; width: auto; top: auto; bottom: 10px;
+    max-height: 60vh;
+  }
+  #my-location-btn { bottom: 16px; right: 10px; width: 46px; height: 46px; }
+  #map { height: calc(100vh - 96px); }
+}
 </style>
 </head>
 <body data-username="{{ user.username }}">
@@ -124,9 +154,9 @@
         <div id="search-results"></div>
       </div>
       <button class="hdr-btn" id="tech-filter-btn">🧑‍🔧 Lọc kỹ thuật viên</button>
-      <span>👋 {{ user.full_name }} · {{ user.role }}{% if user.region %} · {{ user.region }}{% endif %}</span>
+      <span class="user-detail">👋 {{ user.full_name }} · {{ user.role }}{% if user.region %} · {{ user.region }}{% endif %}</span>
       <span>Sự cố đang mở: <span class="badge" id="ticket-count">–</span></span>
-      <span><span class="conn-dot" id="conn-dot"></span><span id="conn-text">Đang kết nối...</span></span>
+      <span><span class="conn-dot" id="conn-dot"></span><span class="conn-text-label" id="conn-text">Đang kết nối...</span></span>
       {% if user.role and user.role.strip().lower() == 'admin' %}
         <button id="btn-manual-refresh" onclick="triggerManualRefresh()" style="padding: 4px 10px; cursor: pointer; border-radius: 4px; border: 1px solid #1f77b4; background: #ffffff; color: #1f77b4; font-weight: bold; font-size: 13px; margin: 0 5px;">
           🔄

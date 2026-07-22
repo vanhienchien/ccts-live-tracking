@@ -17,6 +17,21 @@ from api_client import CCTSClient
 from utils import extract_core_station_code, parse_duration_to_hours
 from config import CCTS_USER, CCTS_PASS
 
+# Màu badge trạng thái ticket - dùng cho popup trạm chuyên nghiệp hơn
+STATUS_COLORS = {
+    "open": "#e74c3c",
+    "appointment": "#3498db",
+    "pending for asp close": "#9b59b6",
+    "pending for spare parts": "#e67e22",
+    "pending for local team close": "#16a085",
+    "pending for voms confirm": "#16a085",
+}
+
+
+def _status_color(status):
+    return STATUS_COLORS.get(str(status).strip().lower(), "#7f8c8d")
+
+
 _static_cache = None  # coords_map, tech_map, region_map, cp_model_map (nạp 1 lần, ít khi đổi)
 
 
@@ -28,20 +43,20 @@ def load_static_data():
     region_map = {}
     cp_model_map = {}
 
-    # 1. Đọc JSON lấy tọa độ
-    try:
-        if os.path.exists("station_info.json"):
-            with open("station_info.json", "r", encoding="utf-8") as f:
-                station_data = json.load(f)
-                for entry in station_data:
-                    store_id = entry.get("store_id")
-                    lat = entry.get("lat")
-                    lng = entry.get("lng")
-                    if store_id and lat and lng:
-                        core_code = extract_core_station_code(store_id)
-                        coords_map[core_code] = {"lat": float(lat), "lng": float(lng)}
-    except Exception as e:
-        print(f"Lỗi đọc station_info.json: {e}")
+    # # 1. Đọc JSON lấy tọa độ
+    # try:
+    #     if os.path.exists("station_info.json"):
+    #         with open("station_info.json", "r", encoding="utf-8") as f:
+    #             station_data = json.load(f)
+    #             for entry in station_data:
+    #                 store_id = entry.get("store_id")
+    #                 lat = entry.get("lat")
+    #                 lng = entry.get("lng")
+    #                 if store_id and lat and lng:
+    #                     core_code = extract_core_station_code(store_id)
+    #                     coords_map[core_code] = {"lat": float(lat), "lng": float(lng)}
+    # except Exception as e:
+    #     print(f"Lỗi đọc station_info.json: {e}")
 
     # 2. Đọc Excel listLongLat.xlsx làm dự phòng
     try:
@@ -201,27 +216,47 @@ async def build_station_markers():
 
             rows_html = ""
             for _, row in group.iterrows():
+                status_color = _status_color(row["Ticket Status"])
                 rows_html += f"""
-                <div style="background:#f9f9f9;border-left:4px solid {color};border-radius:4px;
-                            padding:6px 8px;margin-bottom:6px;">
-                    <b>CP ID:</b> {row['Charge Point ID']} ({row['Model Name']})<br>
-                    <b>Trạng thái:</b> {row['Ticket Status']} (ID: {row['Ticket ID']})<br>
-                    <b>Thời gian:</b> {row['Ticket Duration']}<br>
-                    <i style="color:#666;">{row['Problem Description']}</i>
+                <div style="background:#fff;border:1px solid #eee;border-left:4px solid {status_color};
+                            border-radius:6px;padding:8px 10px;margin-bottom:8px;
+                            box-shadow:0 1px 3px rgba(0,0,0,.06);">
+                    <div style="display:flex;justify-content:space-between;align-items:center;
+                                gap:6px;margin-bottom:4px;">
+                        <span style="font-weight:700;color:#2c3e50;font-size:12.5px;">⚡ {row['Charge Point ID']}</span>
+                        <span style="background:{status_color};color:#fff;font-size:10px;
+                                    padding:2px 8px;border-radius:10px;font-weight:600;white-space:nowrap;">
+                            {row['Ticket Status']}
+                        </span>
+                    </div>
+                    <div style="color:#999;font-size:11px;margin-bottom:5px;">
+                        {row['Model Name']} &nbsp;·&nbsp; ID {row['Ticket ID']}
+                    </div>
+                    <div style="color:{color if color != 'green' else '#2ca02c'};font-size:12px;
+                                font-weight:700;margin-bottom:5px;">
+                        🕐 {row['Ticket Duration']}
+                    </div>
+                    <div style="color:#555;font-size:12px;line-height:1.45;">
+                        {row['Problem Description']}
+                    </div>
                 </div>
                 """
 
             gmap_url = f"https://www.google.com/maps?q={lat},{lng}"
+            header_color = {"darkred": "#8b0000", "orange": "#e67e22", "green": "#219150"}.get(color, "#3498db")
             popup_html = f"""
-            <div style="font-family:Arial;font-size:12px;width:280px;">
-                <h4 style="margin:0 0 5px 0;">
-                    Trạm: <a href="{gmap_url}" target="_blank" rel="noopener noreferrer"
-                    style="color:#1f77b4;text-decoration:none;">{station_code} 🗺️</a>
-                </h4>
-                <div style="margin-bottom:5px;"><b>Kỹ thuật viên:</b>
-                    <span style="color:#2ca02c;">{tech_name}</span></div>
-                <hr style="margin:5px 0;">
-                <div style="max-height:230px;overflow-y:auto;padding-right:6px;margin-right:-6px;">
+            <div style="font-family:'Segoe UI',Arial,sans-serif;width:270px;max-width:82vw;box-sizing:border-box;">
+                <div style="background:{header_color};margin:-13px -13px 10px -13px;padding:10px 14px;
+                            border-radius:5px 5px 0 0;">
+                    <a href="{gmap_url}" target="_blank" rel="noopener noreferrer"
+                       style="color:#fff;text-decoration:none;font-size:15px;font-weight:700;">
+                        📍 {station_code}
+                    </a>
+                    <div style="color:rgba(255,255,255,.92);font-size:12px;margin-top:3px;">
+                        🧑‍🔧 {tech_name}
+                    </div>
+                </div>
+                <div style="max-height:250px;overflow-y:auto;padding-right:4px;margin-right:-4px;">
                     {rows_html}
                 </div>
             </div>

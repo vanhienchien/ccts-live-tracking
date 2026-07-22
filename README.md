@@ -148,13 +148,13 @@ diện thật của app):**
    | Mục trong app | Giá trị cần điền | Ghi chú |
    |---|---|---|
    | **Device identifier** | Đúng bằng **username** của kỹ thuật viên đó | Phải khớp *chính xác* (phân biệt hoa/thường) với cột `username` trong Sheet Users, ví dụ `vana`. Bấm vào dòng "17055581" hiện tại để sửa. |
-   | **Server URL** | `https://<domain-của-bạn>/api/traccar?token=<TRACCAR_TOKEN>` | Thay `<domain-của-bạn>` bằng domain Render thật (vd `ccts-live-tracking.onrender.com`), và `<TRACCAR_TOKEN>` bằng đúng chuỗi bạn đặt ở bước 1. **Dùng `https://`, không phải `http://` và không cần `:5055`** (khác với server URL demo mặc định trong ảnh — đó là port riêng của Traccar Server, còn app của bạn dùng chung 1 domain/port với web luôn). |
+   | **Server URL** : https://ccts-live-tracking.onrender.com/api/traccar?token=%3Copenssl%20rand%20-hex%203893%3E
    | **Location accuracy** | Đổi từ "Medium" → **"High"** | Vì mình đang dùng ngưỡng phát hiện "đang ở tại trạm" rất gần (10 mét), cần độ chính xác GPS cao hơn mức mặc định để nhận diện đúng. |
    | **Distance (meters)** | Đổi từ 75 → **20** (hoặc thấp hơn) | Đây là "cứ di chuyển bao nhiêu mét thì gửi 1 lần cập nhật". Để 75m thì lúc kỹ thuật viên tiến gần vào 1 trạm (bán kính chỉ 10m) có thể bị "nhảy cóc" qua mà server không kịp ghi nhận. |
    | **Stationary heartbeat (seconds)** | Bật lên, đặt **60** (hiện đang "Disabled") | **⚠️ QUAN TRỌNG NHẤT** — xem giải thích riêng ngay bên dưới bảng này. |
    | **Advanced settings** | Không cần bật | Để mặc định là được. |
 
-4. Bấm mũi tên **"<"** quay lại màn hình chính, bấm nút **Start/Bật dịch vụ**
+4. Bấm mũi tên **"<"** quay lại màn hình chính, bấm nút **Continuous tracking**
    (nút lớn ở màn hình chính, không phải trong Settings). Từ lúc này app sẽ tự
    gửi vị trí định kỳ, kể cả khi tắt màn hình hoặc chuyển sang app khác.
 

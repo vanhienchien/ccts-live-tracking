@@ -129,17 +129,25 @@ function formatDuration(sinceEpochSeconds) {
 
 function buildStaffPopup(loc) {
     const gmapUrl = `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
+    const color = ROLE_COLORS[(loc.role || '').trim().toLowerCase()] || '#7f8c8d';
     let workingNote = '';
     if (loc.nearby_station) {
         const durationText = loc.nearby_since ? formatDuration(loc.nearby_since) : '';
-        workingNote = `<div style="margin-top:4px;padding:4px 6px;background:#fff3cd;border-radius:4px;">
-            🔧 Đang sửa trạm <b>${loc.nearby_station}</b>${durationText ? ` — đã ${durationText}` : ''}</div>`;
+        workingNote = `<div style="margin-top:8px;padding:7px 10px;background:#fff3cd;border-radius:6px;
+                    border-left:3px solid #e67e22;font-size:12px;">
+            🔧 Đang sửa trạm <b>${loc.nearby_station}</b>${durationText ? `<br><span style="color:#8a6d3b;">Đã ${durationText}</span>` : ''}
+        </div>`;
     }
     return `
-    <div style="font-family:Arial;font-size:12px;min-width:200px;">
-        <b>${loc.full_name}</b><br>
-        ${loc.role || ''}${loc.region ? ' · ' + loc.region : ''}<br>
-        <a href="${gmapUrl}" target="_blank" rel="noopener noreferrer">Xem trên Google Maps</a>
+    <div style="font-family:'Segoe UI',Arial,sans-serif;width:220px;max-width:78vw;box-sizing:border-box;">
+        <div style="background:${color};margin:-13px -13px 10px -13px;padding:9px 12px;border-radius:5px 5px 0 0;">
+            <div style="color:#fff;font-weight:700;font-size:14px;">${loc.full_name}</div>
+            <div style="color:rgba(255,255,255,.9);font-size:11.5px;margin-top:2px;">
+                ${loc.role || ''}${loc.region ? ' · ' + loc.region : ''}
+            </div>
+        </div>
+        <a href="${gmapUrl}" target="_blank" rel="noopener noreferrer"
+           style="font-size:12px;color:#3498db;text-decoration:none;">🗺️ Xem trên Google Maps</a>
         ${workingNote}
     </div>`;
 }
@@ -212,12 +220,20 @@ function renderTechPanel(data) {
     const regions = data.regions || {};
     let html = '';
     Object.keys(regions).sort().forEach((region) => {
-        html += `<div class="region-group"><div class="region-title">📍 ${region}</div>`;
+        const techNames = regions[region].map((item) => item.tech_name);
+        html += `
+        <div class="region-group">
+            <div class="region-title">
+                <label style="padding:0;margin:0;display:flex;align-items:center;gap:6px;">
+                    <input type="checkbox" class="region-checkbox" data-region="${region}">
+                    <span>📍 ${region}</span>
+                </label>
+            </div>`;
         regions[region].forEach((item) => {
             const uname = (item.username || '').toLowerCase();
             html += `
             <label data-tech="${item.tech_name}" ${uname ? `data-username="${uname}"` : ''}>
-                <input type="checkbox" class="tech-checkbox" value="${item.tech_name}">
+                <input type="checkbox" class="tech-checkbox" data-region="${region}" value="${item.tech_name}">
                 ${techDotHtml(item.online)} ${item.tech_name}
             </label>`;
         });
@@ -246,6 +262,21 @@ function renderTechPanel(data) {
         cb.addEventListener('change', () => {
             if (cb.checked) selectedTechs.add(cb.value);
             else selectedTechs.delete(cb.value);
+            syncRegionCheckboxState(cb.dataset.region);
+            applyStationFilter();
+        });
+    });
+
+    // Đồng bộ trạng thái tick ban đầu của checkbox "chọn cả khu vực"
+    techPanel.querySelectorAll('.region-checkbox').forEach((regionCb) => {
+        syncRegionCheckboxState(regionCb.dataset.region);
+        regionCb.addEventListener('change', () => {
+            const region = regionCb.dataset.region;
+            techPanel.querySelectorAll(`.tech-checkbox[data-region="${region}"]`).forEach((cb) => {
+                cb.checked = regionCb.checked;
+                if (regionCb.checked) selectedTechs.add(cb.value);
+                else selectedTechs.delete(cb.value);
+            });
             applyStationFilter();
         });
     });
@@ -258,18 +289,33 @@ function renderTechPanel(data) {
                 cb.checked = true;
                 selectedTechs.add(cb.value);
             });
+            techPanel.querySelectorAll('.region-checkbox').forEach((cb) => { cb.checked = true; });
             applyStationFilter();
         });
     }
     if (clearAllBtn) {
         clearAllBtn.addEventListener('click', () => {
             techPanel.querySelectorAll('.tech-checkbox').forEach((cb) => { cb.checked = false; });
+            techPanel.querySelectorAll('.region-checkbox').forEach((cb) => { cb.checked = false; cb.indeterminate = false; });
             selectedTechs.clear();
             applyStationFilter();
         });
     }
 
     updateTechPanelPresence();
+}
+
+// Checkbox "chọn cả khu vực" tự động: tick nếu TẤT CẢ kỹ thuật trong khu vực
+// đó đang được chọn, bỏ tick nếu KHÔNG CÓ ai được chọn, và ở trạng thái
+// "một phần" (indeterminate) nếu chỉ chọn 1 số người trong khu vực.
+function syncRegionCheckboxState(region) {
+    if (!region) return;
+    const regionCb = techPanel.querySelector(`.region-checkbox[data-region="${region}"]`);
+    if (!regionCb) return;
+    const techCbs = [...techPanel.querySelectorAll(`.tech-checkbox[data-region="${region}"]`)];
+    const checkedCount = techCbs.filter((cb) => cb.checked).length;
+    regionCb.checked = techCbs.length > 0 && checkedCount === techCbs.length;
+    regionCb.indeterminate = checkedCount > 0 && checkedCount < techCbs.length;
 }
 
 function updateTechPanelPresence() {
@@ -295,7 +341,8 @@ function loadTechnicianPanel() {
 }
 
 if (techFilterBtn) {
-    techFilterBtn.addEventListener('click', () => {
+    techFilterBtn.addEventListener('click', (e) => {
+        e.stopPropagation(); // để listener "click ra ngoài" bên dưới không đóng lại ngay lập tức
         const isOpen = techPanel.style.display === 'block';
         techPanel.style.display = isOpen ? 'none' : 'block';
         if (!isOpen && !techPanel.dataset.loaded) {
@@ -304,6 +351,13 @@ if (techFilterBtn) {
         }
     });
 }
+
+// Bấm ra ngoài tag lọc kỹ thuật viên -> chỉ ẨN panel, KHÔNG xoá bộ lọc đã chọn
+document.addEventListener('click', (e) => {
+    if (techPanel && techPanel.style.display === 'block' && !techPanel.contains(e.target) && e.target !== techFilterBtn) {
+        techPanel.style.display = 'none';
+    }
+});
 
 // ---------- Tìm kiếm trạm / kỹ thuật viên ----------
 const searchInput = document.getElementById('search-input');
