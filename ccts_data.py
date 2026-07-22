@@ -235,18 +235,23 @@ async def build_station_markers():
 
             rows_html = ""
             for _, row in group.iterrows():
-                status_color = _status_color(row["Ticket Status"])
+                color_ticket = "darkred" if row["Hours"] > 48 else ("orange" if row["Hours"] >= 24 else "green")
+                status_color = {"darkred": "#8b0000", "orange": "#e67e22", "green": "#219150"}.get(color_ticket, "#3498db")
+                bg_color = {"darkred": "#ffb5b5", "orange": "#ffd398", "green": "#d4ffce"}.get(color_ticket, "#e7f3fa")
                 rows_html += f"""
-                <div style="background:#fff;border:1px solid #eee;border-left:4px solid {status_color};
+                <div style="background:{bg_color};border:1px solid #eee;border-left:4px solid {status_color};
                             border-radius:6px;padding:8px 10px;margin-bottom:8px;
                             box-shadow:0 1px 3px rgba(0,0,0,.06);">
                     <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:4px;">
-                        <span style="font-weight:700;color:#2c3e50;font-size:12.5px;">⚡ {row['Charge Point ID']}({row['Model Name']})</span>
                         <span style="background:{status_color};color:#fff;font-size:10px;padding:2px 8px;border-radius:10px;font-weight:600;">
                             {row['Ticket Status']}
                         </span>
                     </div>
-                    <div style="color:#999;font-size:11px;margin-bottom:5px;">
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:6px;margin-bottom:4px;">
+                        <span style="font-weight:700;color:#2c3e50;font-size:12.5px;">⚡ {row['Charge Point ID']}({row['Model Name']})</span>
+                    </div>
+
+                    <div style="display:flex;justify-content:space-between;align-items:center;gap:5px;margin-bottom:3px;">
                          Ticket ID: {row['Ticket ID']} · Creator: {row.get('Creator', 'N/A')}
                     </div>
                     <div style="color:{color if color != 'green' else '#2ca02c'};font-size:12px;font-weight:700;margin-bottom:5px;">
@@ -259,8 +264,8 @@ async def build_station_markers():
                 """
 
             gmap_url = f"https://www.google.com/maps?q={lat},{lng}"
-            header_color = {"darkred": "#8b0000", "orange": "#e67e22", "green": "#219150"}.get(color, "#3498db")
             
+            header_color = {"darkred": "#a10000", "orange": "#e67e22", "green": "#1E9428"}.get(color, "#3498db")
             popup_html = f"""
             <div style="font-family:'Segoe UI',Arial,sans-serif;width:270px;max-width:82vw;box-sizing:border-box;">
                 <div style="background:{header_color};margin:-13px -13px 10px -13px;padding:10px 14px;border-radius:5px 5px 0 0;">
