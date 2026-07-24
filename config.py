@@ -25,9 +25,9 @@ CCTS_ACCOUNTS = [
         "role": "esmanager"   # để phân biệt nếu cần
     },
     {
-        "username": os.environ.get("CCTS_USERNAME_ITS", "its_frontdesk 01"),
-        "password": os.environ.get("CCTS_PASSWORD", "Ccts123."),
-        "role": "itsmanager"
+        "username": os.environ.get("CCTS_USERNAME_ITS", "its_frontdesk 04"),
+        "password": os.environ.get("CCTS_PASSWORD_its", "Duynam123."),
+        "role": "its_frontdesk 04"
     }
 ]
 SESSION_COOKIE_NAME = "session_token"

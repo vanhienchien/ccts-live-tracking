@@ -39,6 +39,12 @@ ROLE_LEVELS = {
     "admin": 5,
 }
 
+# Nhãn hiển thị đúng chuẩn (chữ hoa/thường) - dùng cho dropdown chọn vai trò
+# trong bảng cấp quyền Admin, và để LUÔN GHI ĐÚNG 1 CÁCH VIẾT thống nhất
+# xuống Sheet dù người dùng gõ hoa/thường lẫn lộn.
+ROLE_LABELS = ["Kỹ thuật", "Điều phối khu vực", "Điều hành", "Giám đốc", "Admin"]
+_ROLE_LABEL_BY_LOWER = {r.lower(): r for r in ROLE_LABELS}
+
 CACHE_TTL_SECONDS = 60  # cache danh sách user để tránh gọi Google Sheets liên tục
 
 _cache = {"df": None, "ts": 0.0}
@@ -132,3 +138,36 @@ def can_view(viewer_role, target_role):
     if str(viewer_role or "").strip().lower() == "admin":
         return True
     return _role_level(target_role) < _role_level(viewer_role)
+
+
+def update_user_role(username, new_role):
+    """Cập nhật CHỈ cột 'role' (cột D) cho 1 tài khoản đã tồn tại - ghi trực
+    tiếp vào đúng 1 ô bằng update_cell(), KHÔNG đọc/ghi đè cả sheet (an toàn
+    hơn nhiều, tránh mất dữ liệu khác nếu ai đó đang sửa Sheet cùng lúc).
+
+    Đây là hàm ĐẦU TIÊN của "bảng điều khiển Admin" - thiết kế để các tính
+    năng admin sau này (sửa region, khoá tài khoản, tạo mới...) chỉ cần thêm
+    hàm mới tương tự, không cần sửa hàm này hay cấu trúc hiện có."""
+    username = (username or "").strip()
+    if not username:
+        raise ValueError("Tên đăng nhập không được để trống")
+
+    canonical_role = _ROLE_LABEL_BY_LOWER.get((new_role or "").strip().lower())
+    if not canonical_role:
+        raise ValueError(f"Vai trò không hợp lệ: '{new_role}'. Chỉ chấp nhận: {', '.join(ROLE_LABELS)}")
+
+    ws = _get_worksheet()
+    usernames_col = ws.col_values(2)  # cột B = username (theo đúng thứ tự USERS_COLUMNS)
+
+    row_idx = None
+    for i, val in enumerate(usernames_col):
+        if val.strip().lower() == username.lower():
+            row_idx = i + 1  # gspread dùng chỉ số dòng 1-based
+            break
+
+    if row_idx is None:
+        raise ValueError(f"Không tìm thấy tài khoản '{username}' trong Sheet Users")
+
+    ws.update_cell(row_idx, 4, canonical_role)  # cột D = role
+    _cache["ts"] = 0.0  # buộc lần đọc kế tiếp phải lấy dữ liệu mới, không dùng cache cũ
+    return canonical_role
