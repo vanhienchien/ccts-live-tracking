@@ -3,13 +3,23 @@
 // ==========================================
 
 const CURRENT_USERNAME = (document.body.dataset.username || '').trim();
+const CURRENT_ROLE = (document.body.dataset.role || '').trim().toLowerCase();
+const CAN_EDIT_ASSIGNMENT = ['điều phối khu vực', 'điều hành', 'giám đốc', 'admin'].includes(CURRENT_ROLE);
+
+if (!CAN_EDIT_ASSIGNMENT) {
+    const style = document.createElement('style');
+    style.textContent = '.edit-tech-btn { display: none !important; }';
+    document.head.appendChild(style);
+}
 
 const map = L.map('map').setView([12.25, 108.5], 6.3);
+// Nền bản đồ Esri/ArcGIS World Street Map
 L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
     subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
     attribution: '&copy; Google Maps',
     maxZoom: 20,
 }).addTo(map);
+
 const stationLayer = L.layerGroup().addTo(map);
 const staffMarkers = {}; // username -> { marker, wrenchMarker }
 
@@ -19,10 +29,10 @@ let onlineUsernames = new Set(); // username (chữ thường) đang online
 
 // ---------- Icon trạm sạc: ghim giọt nước cổ điển (giống Folium mặc định) ----------
 function stationIcon(color) {
-    const colorMap = { darkred: '#8b0000', orange: '#e67e22', green: '#2ca02c' };
-    const fill = colorMap[color] || '#3498db';
+    const colorMap = { red: '#a10000', orange: '#e27414', green: '#30b430' };
+    const fill = colorMap[color] || '#db34b7';
     const svg = `
-        <svg width="30" height="42" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
+        <svg width="20" height="28" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
             <path d="M15 0C6.7 0 0 6.7 0 15c0 11.25 15 27 15 27s15-15.75 15-27C30 6.7 23.3 0 15 0z"
                   fill="${fill}" stroke="rgba(0,0,0,.35)" stroke-width="1"/>
             <circle cx="15" cy="15" r="9.5" fill="#ffffff"/>
@@ -32,11 +42,28 @@ function stationIcon(color) {
     return L.divIcon({
         className: '',
         html: svg,
-        iconSize: [30, 42],
-        iconAnchor: [15, 42],
-        popupAnchor: [0, -38],
+        iconSize: [10, 18],      // Kích thước hiển thị mới
+        iconAnchor: [5, 18],    // Neo đúng chóp nhọn bên dưới (10 = 20/2, 28 = chiều cao)
+        popupAnchor: [0, -25],   // Vị trí mở popup nằm ngay trên đầu gim
     });
 }
+function unassignedStationIcon() {
+    const svg = `
+        <div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;
+                    color:#e74c3c;font-size:32px;font-weight:900;line-height:1;
+                    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+                    animation: unassigned-pulse 1.5s infinite;">
+            !
+        </div>`;
+    return L.divIcon({
+        className: '',
+        html: svg,
+        iconSize: [20, 30],
+        iconAnchor: [15, 15],
+        popupAnchor: [0, -15],
+    });
+}
+
 async function triggerManualRefresh() {
     const btn = document.getElementById('btn-manual-refresh');
     if (btn) {
@@ -68,7 +95,8 @@ function applyStationFilter() {
         : allStations.filter((s) => selectedTechs.has(s.tech_name || 'Unassigned'));
 
     stations.forEach((s) => {
-        const marker = L.marker([s.lat, s.lng], { icon: stationIcon(s.color) });
+        const icon = s.is_unassigned ? unassignedStationIcon() : stationIcon(s.color);
+        const marker = L.marker([s.lat, s.lng], { icon });
         marker.bindPopup(s.popup_html, { maxWidth: 320, maxHeight: 340 });
         marker._stationCode = s.station_code;
         marker.addTo(stationLayer);
@@ -197,6 +225,104 @@ function upsertStaffMarker(loc) {
     }
 }
 
+// ---------- Modal đổi kỹ thuật viên phụ trách ----------
+const assignOverlay = document.getElementById('assign-tech-overlay');
+const assignSearch = document.getElementById('assign-tech-search');
+const assignResults = document.getElementById('assign-tech-results');
+const assignCancelBtn = document.getElementById('assign-tech-cancel');
+const assignTitle = document.getElementById('assign-tech-title');
+
+let assignTargetStation = null;
+let assignTechCache = null; // cache danh sách kỹ thuật viên (tên hiển thị) lấy từ /api/technicians
+
+function closeAssignModal() {
+    assignOverlay.classList.remove('open');
+    assignTargetStation = null;
+    assignSearch.value = '';
+}
+
+async function loadAssignTechCache() {
+    if (assignTechCache) return assignTechCache;
+    const res = await fetch('/api/technicians');
+    const data = await res.json();
+    const names = [];
+    Object.values(data.regions || {}).forEach((list) => {
+        list.forEach((item) => names.push(item.tech_name));
+    });
+    assignTechCache = names;
+    return names;
+}
+
+function renderAssignResults(names, query) {
+    const q = (query || '').trim().toLowerCase();
+    const filtered = q ? names.filter((n) => n.toLowerCase().includes(q)) : names;
+
+    let html = `<div class="opt unassign-opt" data-name="Unassigned">🚫 Unassigned (bỏ gán)</div>`;
+    html += filtered.map((n) => `<div class="opt" data-name="${n}">🧑‍🔧 ${n}</div>`).join('');
+    assignResults.innerHTML = html || '<div style="padding:10px;color:#999;font-size:13px;">Không tìm thấy</div>';
+
+    assignResults.querySelectorAll('.opt').forEach((el) => {
+        el.addEventListener('click', () => submitAssignment(el.dataset.name));
+    });
+}
+
+async function openAssignModal(stationCode, currentTech) {
+    if (!CAN_EDIT_ASSIGNMENT) return;
+    assignTargetStation = stationCode;
+    assignTitle.textContent = `Đổi kỹ thuật viên - Trạm ${stationCode}`;
+    assignOverlay.classList.add('open');
+    assignSearch.focus();
+
+    const names = await loadAssignTechCache();
+    renderAssignResults(names, '');
+}
+
+async function submitAssignment(engineerName) {
+    if (!assignTargetStation) return;
+    const stationCode = assignTargetStation;
+    closeAssignModal();
+
+    try {
+        const res = await fetch('/api/assign-technician', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ station_code: stationCode, engineer_name: engineerName }),
+        });
+        const data = await res.json();
+        if (res.ok) {
+            // Bản đồ sẽ tự cập nhật qua WebSocket (server broadcast) trong giây lát
+        } else {
+            alert('❌ ' + (data.error || 'Không thể đổi kỹ thuật viên.'));
+        }
+    } catch (e) {
+        alert('❌ Không kết nối được server.');
+    }
+}
+
+if (assignSearch) {
+    assignSearch.addEventListener('input', () => {
+        if (assignTechCache) renderAssignResults(assignTechCache, assignSearch.value);
+    });
+}
+if (assignCancelBtn) assignCancelBtn.addEventListener('click', closeAssignModal);
+if (assignOverlay) {
+    assignOverlay.addEventListener('click', (e) => {
+        if (e.target === assignOverlay) closeAssignModal();
+    });
+}
+
+// Nút "✏️" nằm BÊN TRONG popup Leaflet (HTML được chèn động) -> dùng event
+// delegation trên toàn document để bắt click, thay vì gắn listener trực tiếp.
+document.addEventListener('click', (e) => {
+    const btn = e.target.closest('.edit-tech-btn');
+    if (!btn) return;
+    if (!CAN_EDIT_ASSIGNMENT) {
+        alert('Chỉ Điều phối khu vực trở lên mới được đổi kỹ thuật viên phụ trách.');
+        return;
+    }
+    openAssignModal(btn.dataset.station, btn.dataset.currentTech);
+});
+
 // ---------- Tag lọc theo kỹ thuật viên (gom theo khu vực + chấm online/offline) ----------
 const techPanel = document.getElementById('tech-filter-panel');
 const techFilterBtn = document.getElementById('tech-filter-btn');
@@ -216,9 +342,20 @@ function techDotHtml(online) {
     return '<span class="conn-dot" style="background:#bbb;" title="Không xác định"></span>';
 }
 
+function techStatsHtml(item) {
+    const open = item.open_count ?? 0;
+    const y = item.closed_yesterday ?? 0;
+    const t = item.closed_today ?? 0;
+    return `<span style="margin-left:auto;font-size:10.5px;color:#777;white-space:nowrap;">
+        🔧${open} · ✅${y}/${t}
+    </span>`;
+}
+
 function renderTechPanel(data) {
     const regions = data.regions || {};
-    let html = '';
+    let html = `<div style="padding:6px 10px;font-size:10.5px;color:#999;border-bottom:1px solid #eee;margin-bottom:4px;">
+        🔧 đang tồn &nbsp;·&nbsp; ✅ đã đóng (hôm qua/hôm nay)
+    </div>`;
     Object.keys(regions).sort().forEach((region) => {
         const techNames = regions[region].map((item) => item.tech_name);
         html += `
@@ -235,6 +372,7 @@ function renderTechPanel(data) {
             <label data-tech="${item.tech_name}" ${uname ? `data-username="${uname}"` : ''}>
                 <input type="checkbox" class="tech-checkbox" data-region="${region}" value="${item.tech_name}">
                 ${techDotHtml(item.online)} ${item.tech_name}
+                ${techStatsHtml(item)}
             </label>`;
         });
         html += `</div>`;
@@ -246,6 +384,7 @@ function renderTechPanel(data) {
             <label data-tech="Unassigned">
                 <input type="checkbox" class="tech-checkbox" value="Unassigned">
                 ${techDotHtml(null)} Unassigned
+                ${techStatsHtml(data.unassigned)}
             </label>
         </div>`;
     }
@@ -330,7 +469,12 @@ function updateTechPanelPresence() {
         dot.title = online ? 'Đang online' : 'Đang offline';
     });
 }
-
+function toggleRegionGroup(element) {
+  const group = element.closest('.region-group');
+  if (group) {
+    group.classList.toggle('collapsed');
+  }
+}
 function loadTechnicianPanel() {
     fetch('/api/technicians')
         .then((r) => r.json())
@@ -472,6 +616,118 @@ if (myLocationBtn) {
             alert('Chưa xác định được vị trí của bạn. Hãy đảm bảo đã cấp quyền định vị cho trình duyệt và đợi vài giây.');
         }
     });
+}
+
+// ---------- Panel "Danh sách Ticket" (thu gọn bên phải) ----------
+const ticketPanel = document.getElementById('ticket-panel');
+const ticketPanelHandle = document.getElementById('ticket-panel-handle');
+const ticketPanelClose = document.getElementById('ticket-panel-close');
+const ticketPanelTechList = document.getElementById('ticket-panel-tech-list');
+const ticketPanelTableWrap = document.getElementById('ticket-panel-table-wrap');
+
+if (ticketPanel) {
+    L.DomEvent.disableScrollPropagation(ticketPanel);
+    L.DomEvent.disableClickPropagation(ticketPanel);
+}
+
+function toggleTicketPanel(forceOpen) {
+    const shouldOpen = forceOpen !== undefined ? forceOpen : !ticketPanel.classList.contains('open');
+    ticketPanel.classList.toggle('open', shouldOpen);
+    ticketPanelHandle.style.display = shouldOpen ? 'none' : 'block';
+    if (shouldOpen && !ticketPanelTechList.dataset.loaded) {
+        ticketPanelTechList.dataset.loaded = '1';
+        loadTicketPanelTechList();
+    }
+}
+
+if (ticketPanelHandle) ticketPanelHandle.addEventListener('click', () => toggleTicketPanel(true));
+if (ticketPanelClose) ticketPanelClose.addEventListener('click', () => toggleTicketPanel(false));
+
+function renderTicketTable(tickets, techName) {
+    if (!tickets || tickets.length === 0) {
+        ticketPanelTableWrap.innerHTML = `<div id="ticket-panel-empty">Không có ticket nào cho "${techName}".</div>`;
+        return;
+    }
+    const rowsHtml = tickets.map((t) => `
+        <tr>
+            <td>${t.ticket_id ?? ''}</td>
+            <td>${t.duration ?? ''}</td>
+            <td>${t.station_code ?? ''}</td>
+            <td>${t.is_bss ? '🔋' : '⚡'} ${t.cp_id ?? ''}</td>
+            <td>${t.status ?? ''}</td>
+            <td style="max-width:220px;white-space:normal;">${t.description ?? ''}</td>
+        </tr>
+    `).join('');
+
+    ticketPanelTableWrap.innerHTML = `
+        <table>
+            <thead>
+                <tr>
+                    <th>Mã Ticket</th>
+                    <th>Thời gian tồn</th>
+                    <th>Mã Trạm</th>
+                    <th>SN Trụ</th>
+                    <th>Trạng thái</th>
+                    <th>Mô tả lỗi</th>
+                </tr>
+            </thead>
+            <tbody>${rowsHtml}</tbody>
+        </table>
+    `;
+}
+
+function loadTechTickets(techName, rowEl) {
+    ticketPanelTechList.querySelectorAll('.tech-row').forEach((r) => r.classList.remove('active'));
+    if (rowEl) rowEl.classList.add('active');
+
+    ticketPanelTableWrap.innerHTML = '<div id="ticket-panel-empty">Đang tải...</div>';
+    fetch(`/api/tech-tickets/${encodeURIComponent(techName)}`)
+        .then((r) => r.json())
+        .then((data) => renderTicketTable(data.tickets, techName))
+        .catch(() => {
+            ticketPanelTableWrap.innerHTML = '<div id="ticket-panel-empty">Không tải được danh sách ticket.</div>';
+        });
+}
+
+function loadTicketPanelTechList() {
+    fetch('/api/technicians')
+        .then((r) => r.json())
+        .then((data) => {
+            const regions = data.regions || {};
+            let html = '';
+            Object.keys(regions).sort().forEach((region) => {
+                html += `<div class="region-label">📍 ${region}</div>`;
+                regions[region].forEach((item) => {
+                    html += `
+                    <div class="tech-row" data-tech="${item.tech_name}">
+                        <span>${techDotHtml(item.online)} ${item.tech_name}</span>
+                        <span class="stats">🔧${item.open_count ?? 0}</span>
+                    </div>`;
+                });
+            });
+            if (data.unassigned) {
+                html += `<div class="region-label">🆕 Khác</div>
+                    <div class="tech-row" data-tech="Unassigned">
+                        <span>Unassigned</span>
+                        <span class="stats">🔧${data.unassigned.open_count ?? 0}</span>
+                    </div>`;
+            }
+            ticketPanelTechList.innerHTML = html;
+
+            ticketPanelTechList.querySelectorAll('.tech-row').forEach((row) => {
+                row.addEventListener('click', () => loadTechTickets(row.dataset.tech, row));
+            });
+
+            // Kỹ thuật viên chỉ quản lý chính mình -> tự động mở luôn ticket của họ
+            const allTechNames = Object.values(regions).flat().map((i) => i.tech_name);
+            if (allTechNames.length === 1) {
+                const onlyRow = ticketPanelTechList.querySelector('.tech-row');
+                if (onlyRow) loadTechTickets(onlyRow.dataset.tech, onlyRow);
+            }
+        })
+        .catch(() => {
+            ticketPanelTechList.innerHTML = '<div style="padding:12px;font-size:13px;color:#999;">Không tải được danh sách kỹ thuật viên.</div>';
+        });
 }
 
 // ---------- WebSocket ----------
