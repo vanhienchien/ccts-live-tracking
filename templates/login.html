@@ -3,47 +3,142 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Đăng nhập - CCTS Live Map</title>
+<title>Đăng nhập - CCTS Live Map</title> <!-- -->
 <style>
-  * { box-sizing: border-box; }
+  * { 
+    box-sizing: border-box; 
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  }
+  
   body {
-    font-family: Arial, sans-serif;
-    background: linear-gradient(135deg, #2c3e50, #4a6580);
-    display: flex; align-items: center; justify-content: center;
-    min-height: 100vh; margin: 0; padding: 24px 0;
+    /* Nền công nghệ tối màu, tạo sự tập trung vào form */
+    background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
+    display: flex; 
+    align-items: center; 
+    justify-content: center;
+    min-height: 100vh; 
+    margin: 0; 
+    padding: 24px 0;
   }
+
   .card {
-    background: #fff; padding: 36px 32px; border-radius: 12px;
-    box-shadow: 0 10px 30px rgba(0,0,0,.25); width: 320px; max-width: 90vw;
+    background: #ffffff; 
+    padding: 40px 32px; 
+    border-radius: 12px;
+    box-shadow: 0 20px 40px rgba(0,0,0,0.4); 
+    width: 360px; 
+    max-width: 90vw;
+    /* Dải màu "năng lượng" ở viền trên */
+    border-top: 4px solid #10b981; 
+    position: relative;
   }
-  h2 { text-align: center; margin: 0 0 24px; color: #2c3e50; }
-  label { font-size: 13px; color: #555; display: block; margin-bottom: 4px; }
+
+  /* Căn chỉnh lại phần Header chứa Logo */
+  .brand-header {
+    text-align: center;
+    margin-bottom: 30px;
+  }
+
+  .brand-logo {
+    height: 50px;
+    width: auto;
+    object-fit: contain;
+    margin-bottom: 12px;
+  }
+
+  h2 { 
+    margin: 0; 
+    color: #1e293b; 
+    font-size: 22px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+  }
+
+  .subtitle {
+    color: #64748b;
+    font-size: 13px;
+    margin-top: 6px;
+  }
+
+  label { 
+    font-size: 13px; 
+    color: #475569; 
+    display: block; 
+    margin-bottom: 6px; 
+    font-weight: 500;
+  }
+
   input {
-    width: 100%; padding: 12px; margin-bottom: 18px; border: 1px solid #ddd;
-    border-radius: 6px; font-size: 16px; /* >=16px để iOS Safari không tự zoom khi bấm vào ô nhập */
+    width: 100%; 
+    padding: 12px 14px; 
+    margin-bottom: 20px; 
+    border: 1.5px solid #cbd5e1;
+    border-radius: 8px; 
+    font-size: 16px; /*[cite: 1] */
+    background-color: #f8fafc;
+    transition: all 0.2s ease;
+    color: #1e293b;
   }
-  input:focus { outline: none; border-color: #2c3e50; }
+
+  input:focus { 
+    outline: none; 
+    border-color: #10b981; /* Đổi sang màu xanh năng lượng khi click */
+    background-color: #ffffff;
+    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
+  }
+
   button {
-    width: 100%; padding: 11px; background: #2c3e50; color: #fff; border: none;
-    border-radius: 6px; font-size: 15px; cursor: pointer; font-weight: 600;
+    width: 100%; 
+    padding: 13px; 
+    background: #1e293b; 
+    color: #ffffff; 
+    border: none;
+    border-radius: 8px; 
+    font-size: 15px; 
+    cursor: pointer; 
+    font-weight: 600;
+    transition: background-color 0.2s, transform 0.1s;
+    margin-top: 10px;
   }
-  button:hover { background: #1a252f; }
+
+  button:hover { 
+    background: #10b981; /* Nút sáng lên màu năng lượng khi hover */
+  }
+
+  button:active {
+    transform: scale(0.98);
+  }
+
   .error {
-    color: #e74c3c; font-size: 13px; margin-bottom: 14px; text-align: center;
-    background: #fdecea; padding: 8px; border-radius: 6px;
+    color: #ef4444; 
+    font-size: 13px; 
+    margin-bottom: 20px; 
+    text-align: center;
+    background: #fef2f2; 
+    padding: 10px; 
+    border-radius: 8px;
+    border: 1px solid #fecaca;
+    font-weight: 500;
   }
 </style>
 </head>
 <body>
   <div class="card">
-    <h2>🔐 CCTS Live Map</h2>
-    {% if error %}<div class="error">{{ error }}</div>{% endif %}
-    <form method="post" action="/login">
-      <label>Tên đăng nhập</label>
-      <input type="text" name="username" required autofocus autocomplete="username">
-      <label>Mật khẩu</label>
-      <input type="password" name="password" required autocomplete="current-password">
-      <button type="submit">Đăng nhập</button>
+    <div class="brand-header">
+      <!-- Thay url_for nếu dùng Flask, hoặc giữ đường dẫn này -->
+      <img src="{{ url_for('static', path='images/logo.jpg') }}" alt="CCTS Logo" class="brand-logo">
+    </div>
+
+    {% if error %}<div class="error">{{ error }}</div>{% endif %} <!--[cite: 1] -->
+    
+    <form method="post" action="/login"> <!--[cite: 1] -->
+      <label>Tên đăng nhập</label> <!--[cite: 1] -->
+      <input type="text" name="username" placeholder="Nhập tài khoản kỹ thuật viên..." required autofocus autocomplete="username"> <!--[cite: 1] -->
+      
+      <label>Mật khẩu</label> <!--[cite: 1] -->
+      <input type="password" name="password" placeholder="Nhập mật khẩu..." required autocomplete="current-password"> <!--[cite: 1] -->
+      
+      <button type="submit">Đăng nhập hệ thống</button> <!--[cite: 1] -->
     </form>
   </div>
 </body>

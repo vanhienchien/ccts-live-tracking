@@ -30,9 +30,9 @@ let onlineUsernames = new Set(); // username (chữ thường) đang online
 // ---------- Icon trạm sạc: ghim giọt nước cổ điển (giống Folium mặc định) ----------
 function stationIcon(color) {
     const colorMap = { red: '#a10000', orange: '#e27414', green: '#30b430' };
-    const fill = colorMap[color] || '#db34b7';
+    const fill = colorMap[color] || '#b3329d';
     const svg = `
-        <svg width="20" height="28" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
+        <svg width="15" height="21" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
             <path d="M15 0C6.7 0 0 6.7 0 15c0 11.25 15 27 15 27s15-15.75 15-27C30 6.7 23.3 0 15 0z"
                   fill="${fill}" stroke="rgba(0,0,0,.35)" stroke-width="1"/>
             <circle cx="15" cy="15" r="9.5" fill="#ffffff"/>
@@ -42,9 +42,9 @@ function stationIcon(color) {
     return L.divIcon({
         className: '',
         html: svg,
-        iconSize: [10, 18],      // Kích thước hiển thị mới
-        iconAnchor: [5, 18],    // Neo đúng chóp nhọn bên dưới (10 = 20/2, 28 = chiều cao)
-        popupAnchor: [0, -25],   // Vị trí mở popup nằm ngay trên đầu gim
+        iconSize: [15, 21],      // Kích thước hiển thị siêu nhỏ
+        iconAnchor: [7.5, 21],   // Neo đúng chóp nhọn (7.5 = 15/2, 21 = chiều cao)
+        popupAnchor: [0, -19],   // Vị trí mở popup nằm ngay trên đầu gim
     });
 }
 function unassignedStationIcon() {
@@ -58,8 +58,8 @@ function unassignedStationIcon() {
     return L.divIcon({
         className: '',
         html: svg,
-        iconSize: [20, 30],
-        iconAnchor: [15, 15],
+        iconSize: [20, 20],
+        iconAnchor: [10, 10],
         popupAnchor: [0, -15],
     });
 }
@@ -68,7 +68,7 @@ async function triggerManualRefresh() {
     const btn = document.getElementById('btn-manual-refresh');
     if (btn) {
         btn.disabled = true;
-        btn.textContent = '⏳ Đang cào dữ liệu...';
+        btn.textContent = '⏳';
     }
     try {
         const res = await fetch('/api/admin/refresh-stations', { method: 'POST' });
@@ -88,11 +88,17 @@ async function triggerManualRefresh() {
     }
 }
 // Vẽ marker trạm dựa trên allStations + bộ lọc kỹ thuật viên hiện tại (selectedTechs)
+// + bộ lọc loại trạm (showChargers/showBss)
+let showChargerStations = true;
+let showBssStations = true;
+
 function applyStationFilter() {
     stationLayer.clearLayers();
-    const stations = selectedTechs.size === 0
+    let stations = selectedTechs.size === 0
         ? allStations
         : allStations.filter((s) => selectedTechs.has(s.tech_name || 'Unassigned'));
+
+    stations = stations.filter((s) => (s.is_bss_station ? showBssStations : showChargerStations));
 
     stations.forEach((s) => {
         const icon = s.is_unassigned ? unassignedStationIcon() : stationIcon(s.color);
@@ -100,6 +106,21 @@ function applyStationFilter() {
         marker.bindPopup(s.popup_html, { maxWidth: 320, maxHeight: 340 });
         marker._stationCode = s.station_code;
         marker.addTo(stationLayer);
+    });
+}
+
+const chargerTypeCheckbox = document.getElementById('filter-charger');
+const bssTypeCheckbox = document.getElementById('filter-bss');
+if (chargerTypeCheckbox) {
+    chargerTypeCheckbox.addEventListener('change', () => {
+        showChargerStations = chargerTypeCheckbox.checked;
+        applyStationFilter();
+    });
+}
+if (bssTypeCheckbox) {
+    bssTypeCheckbox.addEventListener('change', () => {
+        showBssStations = bssTypeCheckbox.checked;
+        applyStationFilter();
     });
 }
 
@@ -166,8 +187,28 @@ function buildStaffPopup(loc) {
             🔧 Đang sửa trạm <b>${loc.nearby_station}</b>${durationText ? `<br><span style="color:#8a6d3b;">Đã ${durationText}</span>` : ''}
         </div>`;
     }
+
+    let statsHtml = '';
+    if ((loc.role || '').trim().toLowerCase() === 'kỹ thuật') {
+        statsHtml = `
+        <div style="margin-top:8px;display:flex;gap:6px;">
+            <div style="flex:1;background:#f4f6f8;border-radius:6px;padding:6px;text-align:center;">
+                <div style="font-size:15px;font-weight:700;color:#2c3e50;">${loc.open_count ?? 0}</div>
+                <div style="font-size:10px;color:#888;">🔧 Đang tồn</div>
+            </div>
+            <div style="flex:1;background:#f4f6f8;border-radius:6px;padding:6px;text-align:center;">
+                <div style="font-size:15px;font-weight:700;color:#27ae60;">${loc.closed_today ?? 0}</div>
+                <div style="font-size:10px;color:#888;">✅ Hôm nay</div>
+            </div>
+            <div style="flex:1;background:#f4f6f8;border-radius:6px;padding:6px;text-align:center;">
+                <div style="font-size:15px;font-weight:700;color:#888;">${loc.closed_yesterday ?? 0}</div>
+                <div style="font-size:10px;color:#888;">✅ Hôm qua</div>
+            </div>
+        </div>`;
+    }
+
     return `
-    <div style="font-family:'Segoe UI',Arial,sans-serif;width:220px;max-width:78vw;box-sizing:border-box;">
+    <div style="font-family:'Segoe UI',Arial,sans-serif;width:230px;max-width:80vw;box-sizing:border-box;">
         <div style="background:${color};margin:-13px -13px 10px -13px;padding:9px 12px;border-radius:5px 5px 0 0;">
             <div style="color:#fff;font-weight:700;font-size:14px;">${loc.full_name}</div>
             <div style="color:rgba(255,255,255,.9);font-size:11.5px;margin-top:2px;">
@@ -176,6 +217,7 @@ function buildStaffPopup(loc) {
         </div>
         <a href="${gmapUrl}" target="_blank" rel="noopener noreferrer"
            style="font-size:12px;color:#3498db;text-decoration:none;">🗺️ Xem trên Google Maps</a>
+        ${statsHtml}
         ${workingNote}
     </div>`;
 }
@@ -243,14 +285,10 @@ function closeAssignModal() {
 
 async function loadAssignTechCache() {
     if (assignTechCache) return assignTechCache;
-    const res = await fetch('/api/technicians');
+    const res = await fetch('/api/assignable-technicians');
     const data = await res.json();
-    const names = [];
-    Object.values(data.regions || {}).forEach((list) => {
-        list.forEach((item) => names.push(item.tech_name));
-    });
-    assignTechCache = names;
-    return names;
+    assignTechCache = data.technicians || [];
+    return assignTechCache;
 }
 
 function renderAssignResults(names, query) {
@@ -342,20 +380,9 @@ function techDotHtml(online) {
     return '<span class="conn-dot" style="background:#bbb;" title="Không xác định"></span>';
 }
 
-function techStatsHtml(item) {
-    const open = item.open_count ?? 0;
-    const y = item.closed_yesterday ?? 0;
-    const t = item.closed_today ?? 0;
-    return `<span style="margin-left:auto;font-size:10.5px;color:#777;white-space:nowrap;">
-        🔧${open} · ✅${y}/${t}
-    </span>`;
-}
-
 function renderTechPanel(data) {
     const regions = data.regions || {};
-    let html = `<div style="padding:6px 10px;font-size:10.5px;color:#999;border-bottom:1px solid #eee;margin-bottom:4px;">
-        🔧 đang tồn &nbsp;·&nbsp; ✅ đã đóng (hôm qua/hôm nay)
-    </div>`;
+    let html = '';
     Object.keys(regions).sort().forEach((region) => {
         const techNames = regions[region].map((item) => item.tech_name);
         html += `
@@ -372,7 +399,6 @@ function renderTechPanel(data) {
             <label data-tech="${item.tech_name}" ${uname ? `data-username="${uname}"` : ''}>
                 <input type="checkbox" class="tech-checkbox" data-region="${region}" value="${item.tech_name}">
                 ${techDotHtml(item.online)} ${item.tech_name}
-                ${techStatsHtml(item)}
             </label>`;
         });
         html += `</div>`;
@@ -384,7 +410,6 @@ function renderTechPanel(data) {
             <label data-tech="Unassigned">
                 <input type="checkbox" class="tech-checkbox" value="Unassigned">
                 ${techDotHtml(null)} Unassigned
-                ${techStatsHtml(data.unassigned)}
             </label>
         </div>`;
     }
@@ -469,12 +494,7 @@ function updateTechPanelPresence() {
         dot.title = online ? 'Đang online' : 'Đang offline';
     });
 }
-function toggleRegionGroup(element) {
-  const group = element.closest('.region-group');
-  if (group) {
-    group.classList.toggle('collapsed');
-  }
-}
+
 function loadTechnicianPanel() {
     fetch('/api/technicians')
         .then((r) => r.json())
@@ -648,16 +668,22 @@ function renderTicketTable(tickets, techName) {
         ticketPanelTableWrap.innerHTML = `<div id="ticket-panel-empty">Không có ticket nào cho "${techName}".</div>`;
         return;
     }
-    const rowsHtml = tickets.map((t) => `
-        <tr>
+    const rowsHtml = tickets.map((t) => {
+        const warnStyle = t.is_near_overdue ? 'background:#fff0d9 !important;' : '';
+        const warnBadge = t.is_near_overdue
+            ? `<br><span style="color:#d35400;font-weight:700;font-size:10.5px;">⏰ Sắp quá hạn (còn ~${(48 - t.hours).toFixed(1)}h)</span>`
+            : '';
+        return `
+        <tr style="${warnStyle}">
             <td>${t.ticket_id ?? ''}</td>
-            <td>${t.duration ?? ''}</td>
-            <td>${t.station_code ?? ''}</td>
+            <td>${t.duration ?? ''}${warnBadge}</td>
+            <td>${t.is_bss_station ? '🔋' : '⚡'} ${t.station_code ?? ''}</td>
             <td>${t.is_bss ? '🔋' : '⚡'} ${t.cp_id ?? ''}</td>
             <td>${t.status ?? ''}</td>
             <td style="max-width:220px;white-space:normal;">${t.description ?? ''}</td>
         </tr>
-    `).join('');
+    `;
+    }).join('');
 
     ticketPanelTableWrap.innerHTML = `
         <table>

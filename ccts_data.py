@@ -46,13 +46,13 @@ def _status_color(status):
 
 def _severity_color(hours):
     """Trả về (key, mã_màu_nền_nhạt, mã_màu_viền/đậm, màu_chữ) theo số giờ
-    tồn đọng của MỘT ticket cụ thể - thang màu vàng (mới) -> cam -> đỏ (tồn lâu)."""
+    tồn đọng của MỘT ticket cụ thể - thang màu xanh (mới) -> cam -> đỏ (tồn lâu)."""
     if hours > 48:
-        return "red", "#fab5b5", "#c0392b", "#c0392b"
+        return "red", "#fab9b9", "#bd1f1f", "#bd1f1f"
     elif hours >= 24:
-        return "orange", "#ffd9ae", "#e67e22", "#b9650a"
+        return "orange", "#ffd0b5", "#d4611e", "#d4611e"
     else:
-        return "green", "#b8ffb2", "#34c02f", "#34c02f"
+        return "green", "#b6ffc0", "#32b343", "#32b343"
 
 
 def get_static_data():
@@ -211,6 +211,19 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
 
                 cp_id = str(row["Charge Point ID"])
 
+                # Cảnh báo riêng cho ticket SẮP quá hạn (45h <= tồn < 48h) - còn ~3h
+                # nữa sẽ chuyển sang mức "đỏ quá hạn", cần Điều phối thúc kỹ thuật xử lý gấp
+                near_overdue_html = ""
+                if 45 <= row["Hours"] < 48:
+                    remaining = 48 - row["Hours"]
+                    near_overdue_html = f"""
+                    <div style="margin-top:5px;padding:4px 8px;background:#2c3e50;color:#ffd166;
+                                border-radius:4px;font-size:11px;font-weight:700;
+                                animation:unassigned-pulse 1.5s infinite;">
+                        ⏰ Sắp quá hạn - còn ~{remaining:.1f}h!
+                    </div>
+                    """
+
                 rows_html += f"""
                 <div style="background:{bg_color};border:1px solid {border_color}55;border-left:4px solid {border_color};
                             border-radius:6px;padding:8px 10px;margin-bottom:8px;
@@ -233,11 +246,12 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
                     <div style="color:#555;font-size:12px;line-height:1.45;">
                         {row['Problem Description']}
                     </div>
+                    {near_overdue_html}
                 </div>
                 """
 
             gmap_url = f"https://www.google.com/maps?q={lat},{lng}"
-            header_color = {"red": "#a10000", "orange": "#e67e22", "green": "#39aa2f"}.get(color, "#3498db")
+            header_color = {"red": "#bd1f1f", "orange": "#d4611e", "green": "#32b343"}.get(color, "#3498db")
             popup_html = f"""
             <div style="font-family:'Segoe UI',Arial,sans-serif;width:270px;max-width:82vw;box-sizing:border-box;">
                 <div style="background:{header_color};margin:-13px -13px 10px -13px;padding:10px 14px;
@@ -274,6 +288,8 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
                 "region": region,
                 "tech_name": tech_name,
                 "is_unassigned": (not tech_name) or tech_name.strip().lower() == "unassigned",
+                "is_bss_station": str(station_code).strip().upper().startswith("B."),
+                "has_near_overdue": bool(((group_sorted["Hours"] >= 45) & (group_sorted["Hours"] < 48)).any()),
             })
 
     return {
@@ -304,11 +320,13 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
         tech_name = tech_map.get(core_code, "Unassigned") if core_code else "Unassigned"
         region = region_map.get(core_code, "Unknown") if core_code else "Unknown"
         cp_id = str(row.get("Charge Point ID") or "")
+        hours = float(row.get("Hours") or 0)
         rows.append({
             "ticket_id": row.get("Ticket ID"),
             "duration": row.get("Ticket Duration"),
-            "hours": float(row.get("Hours") or 0),
+            "hours": hours,
             "station_code": station_code,
+            "is_bss_station": str(station_code or "").strip().upper().startswith("B."),
             "cp_id": cp_id,
             "is_bss": cp_id.strip().upper().startswith("BSS"),
             "model_name": row.get("Model Name"),
@@ -317,6 +335,7 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
             "creator": row.get("Creator"),
             "tech_name": tech_name,
             "region": region,
+            "is_near_overdue": 45 <= hours < 48,
         })
     return rows
 

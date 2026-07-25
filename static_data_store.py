@@ -38,39 +38,21 @@ _cache = {"data": None, "ts": 0.0}
 
 
 def _read_sheet_df(sheet_name, columns):
-    """Đọc sheet với debug tốt hơn."""
-    try:
-        sh = get_spreadsheet()
-        ws = sh.worksheet(sheet_name)
+    sh = get_spreadsheet()
+    ws = sh.worksheet(sheet_name)
+    df = get_as_dataframe(ws, evaluate_formulas=True)
 
-        # Lấy raw data để debug
-        values = ws.get_all_values()
-        print(f"   Số dòng dữ liệu: {len(values)}")
-        if values:
-            print(f"   Header mẫu: {values[0][:5] if len(values[0]) > 0 else 'Empty'}")
-
-        df = get_as_dataframe(ws, evaluate_formulas=True)
-
-        if df is None or df.empty:
-            print(f"   ⚠️ DataFrame rỗng sau get_as_dataframe cho {sheet_name}")
-            return pd.DataFrame(columns=columns)
-
-        print(f"   DataFrame shape: {df.shape}, columns: {list(df.columns)}")
-
-        df = df.dropna(how="all")
-        for col in columns:
-            if col not in df.columns:
-                print(f"   ⚠️ Cột '{col}' không tồn tại, thêm cột rỗng")
-                df[col] = ""
-        df = df[columns].fillna("")
-        for col in columns:
-            df[col] = df[col].astype(str).str.strip()
-        return df
-    except Exception as e:
-        print(f"❌ Lỗi khi đọc sheet '{sheet_name}': {e}")
-        import traceback
-        traceback.print_exc()
+    if df is None or df.empty:
         return pd.DataFrame(columns=columns)
+
+    df = df.dropna(how="all")
+    for col in columns:
+        if col not in df.columns:
+            df[col] = ""
+    df = df[columns].fillna("")
+    for col in columns:
+        df[col] = df[col].astype(str).str.strip()
+    return df
 
 
 def load_static_data(force=False):
@@ -111,7 +93,6 @@ def load_static_data(force=False):
             region_map[core_code] = region
             if eng and eng.strip().lower() != "unassigned":
                 tech_by_region_set.setdefault(region, set()).add(eng)
-        
     except Exception as e:
         print(f"⚠️ Lỗi đọc sheet '{ASSIGNMENTS_SHEET}': {e}")
 
@@ -133,60 +114,30 @@ def reload_static_data():
     return load_static_data(force=True)
 
 
-def update_station_assignment(station_code, new_engineer_name):
-    """Cập nhật engineer_name và region (lấy từ sheet Users).
-    Nếu trạm chưa tồn tại → thêm dòng mới."""
+def update_station_assignment(station_code, new_engineer_name, region=None):
+    """Ghi TRỰC TIẾP vào đúng 1 dòng trên sheet StationAssignments - đổi kỹ
+    thuật viên phụ trách 1 trạm cụ thể. Nếu `region` được truyền vào (khu vực
+    của kỹ thuật viên mới), cũng cập nhật luôn cột 'region' cho khớp - tránh
+    tình trạng trạm bị lệch khu vực so với người phụ trách mới. Nếu trạm chưa
+    từng có dòng nào, tự thêm 1 dòng mới."""
     target_core = extract_core_station_code(station_code)
 
     sh = get_spreadsheet()
-    ws_assign = sh.worksheet(ASSIGNMENTS_SHEET)
-    
-    # ==================== LẤY REGION TỪ SHEET USERS ====================
-    new_region = "Unknown"
-    try:
-        ws_users = sh.worksheet("Users")
-        users_data = ws_users.get_all_values()
-        
-        if users_data and len(users_data) > 1:
-            # Giả sử cột engineer_name ở cột B hoặc tìm theo tên cột
-            headers = [str(h).strip().lower() for h in users_data[0]]
-            name_col_idx = None
-            region_col_idx = None
-            
-            for i, h in enumerate(headers):
-                if 'name' in h or 'technician' in h or 'engineer' in h:
-                    name_col_idx = i
-                if 'region' in h or 'khu vực' in h or 'mien' in h:
-                    region_col_idx = i
-            
-            if name_col_idx is not None and region_col_idx is not None:
-                for row in users_data[1:]:
-                    if len(row) > max(name_col_idx, region_col_idx):
-                        if str(row[name_col_idx]).strip() == new_engineer_name.strip():
-                            new_region = str(row[region_col_idx]).strip()
-                            break
-    except Exception as e:
-        print(f"⚠️ Không tìm thấy region từ Users sheet: {e}")
-
-    # ==================== CẬP NHẬT / THÊM VÀO ASSIGNMENTS ====================
-    station_col = ws_assign.col_values(1)  # Cột A = station_code
+    ws = sh.worksheet(ASSIGNMENTS_SHEET)
+    station_col = ws.col_values(1)  # cột A = station_code
 
     row_idx = None
     for i, val in enumerate(station_col):
-        if extract_core_station_code(str(val)) == target_core:
-            row_idx = i + 1
+        if extract_core_station_code(val) == target_core:
+            row_idx = i + 1  # gspread dùng chỉ số dòng 1-based
             break
 
     if row_idx is None:
-        # Thêm dòng mới
-        ws_assign.append_row([station_code, new_region, new_engineer_name], 
-                            value_input_option="USER_ENTERED")
-        print(f"✅ Thêm trạm mới: {station_code} → {new_engineer_name} ({new_region})")
+        ws.append_row([station_code, region or "", new_engineer_name], value_input_option="USER_ENTERED")
     else:
-        # Cập nhật
-        ws_assign.update_cell(row_idx, 2, new_region)   # Cột B = region
-        ws_assign.update_cell(row_idx, 3, new_engineer_name)  # Cột C = engineer_name
-        print(f"✅ Cập nhật trạm {station_code}: {new_engineer_name} ({new_region})")
+        ws.update_cell(row_idx, 3, new_engineer_name)  # cột C = engineer_name
+        if region:
+            ws.update_cell(row_idx, 2, region)  # cột B = region
 
-    _cache["ts"] = 0.0  # Buộc reload
+    _cache["ts"] = 0.0  # buộc đọc lại dữ liệu MỚI ở lần gọi kế tiếp, không dùng cache cũ
     return target_core
