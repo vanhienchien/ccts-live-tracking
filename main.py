@@ -197,16 +197,6 @@ async def api_assign_technician(request: Request):
     if not new_engineer_name:
         return JSONResponse({"error": "Thiếu tên kỹ thuật viên."}, status_code=400)
 
-    # Điều phối khu vực chỉ được sửa trạm trong khu vực của chính họ
-    if role == "điều phối khu vực":
-        target_station = next(
-            (s for s in _latest_station_payload["stations"] if s.get("code") == station_code), None
-        )
-        user_region = (user.get("region") or "").strip().lower()
-        target_region = (target_station.get("region") or "").strip().lower() if target_station else ""
-        if not target_station or target_region != user_region:
-            return JSONResponse({"error": "Bạn chỉ được đổi kỹ thuật viên cho trạm trong khu vực của mình."}, status_code=403)
-
     # Xác thực engineer_name: phải là "Unassigned" hoặc đúng 1 tài khoản có
     # role "Kỹ thuật" trong danh sách nhân sự thật (không cho gõ tên tuỳ ý)
     if new_engineer_name.strip().lower() != "unassigned":
