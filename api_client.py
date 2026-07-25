@@ -67,8 +67,7 @@ class CCTSClient:
 
     async def login(self):
         """Đăng nhập thuần API."""
-        print("[+] Đang lấy Public Key...")
-        
+      
         def _fetch_key():
             return self.session.get(f"{self.base_url}/authen/index/getPublicKey")
         
@@ -79,7 +78,6 @@ class CCTSClient:
             raise Exception(f"[-] Không lấy được Public Key: {key_data}")
             
         pub_key_raw = key_data.get("data")
-        print("[+] Đang mã hóa mật khẩu (MD5 + RSA)...")
         
         encrypted_pw = self._encrypt_password(pub_key_raw, self.password)
 
@@ -91,7 +89,6 @@ class CCTSClient:
         def _post_login():
             return self.session.post(f"{self.base_url}/authen/login/validate", json=payload)
         
-        print("[+] Gọi API login...")
         res_login = await asyncio.to_thread(_post_login)
         login_data = res_login.json()
 

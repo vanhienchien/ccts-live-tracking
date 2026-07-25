@@ -87,12 +87,16 @@ class LocationHub:
                 result.append({"username": username, **loc})
         return result
 
-    async def update_location(self, username, user_info, lat, lng, accuracy, stations=None):
+    async def update_location(self, username, user_info, lat, lng, accuracy, stations=None, tech_stats=None):
         """`stations` PHẢI là danh sách trạm đang có sự cố hiện tại (từ
         _latest_station_payload["stations"] trong main.py) - đây chính là
         điểm sửa quan trọng: trước đây tính khoảng cách tới TOÀN BỘ trạm tĩnh
         (coords_map), giờ chỉ tính tới các trạm đang thực sự hiển thị lỗi
-        trên bản đồ, đúng yêu cầu."""
+        trên bản đồ, đúng yêu cầu.
+
+        `tech_stats` (tuỳ chọn): dict {closed_yesterday, closed_today,
+        open_count} của CHÍNH người này (main.py tra theo full_name) - để
+        hiển thị ngay trong popup vị trí của họ trên bản đồ."""
         nearby_code, _ = find_nearby_station_among(lat, lng, stations)
 
         now = time.time()
@@ -118,6 +122,9 @@ class LocationHub:
             "updated_at": now,
             "nearby_station": nearby_code,
             "nearby_since": started_at,  # epoch giây - frontend tự tính + hiển thị thời lượng đang sửa trạm
+            "closed_yesterday": (tech_stats or {}).get("closed_yesterday", 0),
+            "closed_today": (tech_stats or {}).get("closed_today", 0),
+            "open_count": (tech_stats or {}).get("open_count", 0),
         }
         async with self.lock:
             self.locations[username] = loc
