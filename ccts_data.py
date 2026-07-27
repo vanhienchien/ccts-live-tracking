@@ -145,6 +145,8 @@ async def fetch_live_tickets():
         return pd.DataFrame(), any_success
 
     df = pd.DataFrame(processed)
+    df = df.fillna("")
+
     if "Ticket ID" in df.columns:
         df = df.drop_duplicates(subset=["Ticket ID"]).reset_index(drop=True)
     if "Problem Description" in df.columns:
@@ -155,13 +157,6 @@ async def fetch_live_tickets():
 
 
 def _apply_south_filter_and_coords(df_tickets, coords_map):
-    """Gán toạ độ, tách riêng 2 nhóm bị loại khỏi bản đồ:
-    1. Trạm THIẾU TOẠ ĐỘ hoàn toàn (chưa có trong sheet StationCoords) - đây
-       là vấn đề chất lượng dữ liệu cần Điều phối bổ sung, có danh sách chi tiết.
-    2. Trạm CÓ toạ độ nhưng thuộc miền Bắc (lat >= NORTH_LAT_THRESHOLD) - đây
-       là lọc theo chủ đích (ngoài phạm vi quản lý), không phải lỗi dữ liệu.
-
-    Trả về (df_miền_nam_có_toạ_độ, số_lượng_bị_lọc_miền_bắc, list_ticket_thiếu_toạ_độ)."""
     def get_coords(station_code):
         core_code = extract_core_station_code(station_code)
         return coords_map.get(core_code)
@@ -171,16 +166,18 @@ def _apply_south_filter_and_coords(df_tickets, coords_map):
 
     missing_mask = df["coords"].isna()
     missing_df = df[missing_mask]
+
     missing_coord_tickets = [
         {
-            "ticket_id": row.get("Ticket ID"),
-            "station_code": row.get("Station Code"),
-            "cp_id": row.get("Charge Point ID"),
+            "ticket_id": str(row.get("Ticket ID") or ""),
+            "station_code": str(row.get("Station Code") or ""),
+            "cp_id": str(row.get("Charge Point ID") or ""),
         }
         for _, row in missing_df.iterrows()
     ]
     if missing_coord_tickets:
         print(f"[+] Có {len(missing_coord_tickets)} ticket thuộc trạm CHƯA CÓ toạ độ trong StationCoords.")
+
 
     with_coords_df = df[~missing_mask].copy()
     before = len(with_coords_df)
