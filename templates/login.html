@@ -1,145 +1,216 @@
 <!DOCTYPE html>
 <html lang="vi">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Đăng nhập - CCTS Live Map</title> <!-- -->
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CCTS Live Map - Login</title>
 <style>
-  * { 
-    box-sizing: border-box; 
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  }
-  
-  body {
-    /* Nền công nghệ tối màu, tạo sự tập trung vào form */
-    background: linear-gradient(135deg, #0f2027, #203a43, #2c5364);
-    display: flex; 
-    align-items: center; 
+*{box-sizing:border-box}
+body{margin:0;font-family:Inter,Segoe UI,Arial,sans-serif;background:#071627;color:#fff;min-height:100vh;display:flex;position:relative;}
+
+/* --- PHẦN ĐĂNG NHẬP (BÊN TRÁI TRÊN DESKTOP) --- */
+.left-login {
+    width: 460px;
+    display: flex;
+    align-items: center;
     justify-content: center;
-    min-height: 100vh; 
-    margin: 0; 
-    padding: 24px 0;
-  }
+    padding: 40px;
+    background: rgba(3, 12, 22, 0.95);
+    z-index: 2;
+    box-shadow: 10px 0 30px rgba(0, 0, 0, 0.5);
+}
 
-  .card {
-    background: #ffffff; 
-    padding: 40px 32px; 
+.card {
+    width: 100%;
+    max-width: 360px;
+    padding: 35px;
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 22px;
+    background: rgba(255, 255, 255, 0.08);
+    backdrop-filter: blur(16px);
+    box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
+}
+
+.logo { text-align: center; }
+.logo img { max-width: 250px; width: 100%; }
+h2 { text-align: center; margin: 12px 0 4px; }
+.sub { text-align: center; color: #b6c9d8; font-size: 13px; margin-bottom: 24px; }
+label { display: block; margin: 12px 0 6px; color: #cfe6f5; }
+
+.input {
+    display: flex;
+    align-items: center;
+    background: #0d2238;
+    border: 1px solid #244c69;
     border-radius: 12px;
-    box-shadow: 0 20px 40px rgba(0,0,0,0.4); 
-    width: 360px; 
-    max-width: 90vw;
-    /* Dải màu "năng lượng" ở viền trên */
-    border-top: 4px solid #10b981; 
-    position: relative;
-  }
-
-  /* Căn chỉnh lại phần Header chứa Logo */
-  .brand-header {
-    text-align: center;
-    margin-bottom: 30px;
-  }
-
-  .brand-logo {
-    height: 50px;
-    width: auto;
-    object-fit: contain;
-    margin-bottom: 12px;
-  }
-
-  h2 { 
-    margin: 0; 
-    color: #1e293b; 
-    font-size: 22px;
-    font-weight: 700;
-    letter-spacing: -0.5px;
-  }
-
-  .subtitle {
-    color: #64748b;
-    font-size: 13px;
-    margin-top: 6px;
-  }
-
-  label { 
-    font-size: 13px; 
-    color: #475569; 
-    display: block; 
-    margin-bottom: 6px; 
-    font-weight: 500;
-  }
-
-  input {
-    width: 100%; 
-    padding: 12px 14px; 
-    margin-bottom: 20px; 
-    border: 1.5px solid #cbd5e1;
-    border-radius: 8px; 
-    font-size: 16px; /*[cite: 1] */
-    background-color: #f8fafc;
-    transition: all 0.2s ease;
-    color: #1e293b;
-  }
-
-  input:focus { 
-    outline: none; 
-    border-color: #10b981; /* Đổi sang màu xanh năng lượng khi click */
-    background-color: #ffffff;
-    box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.1);
-  }
-
-  button {
-    width: 100%; 
-    padding: 13px; 
-    background: #1e293b; 
-    color: #ffffff; 
+    padding: 0 12px;
+}
+.input span { margin-right: 8px; }
+.input input {
+    flex: 1;
+    background: transparent;
     border: none;
-    border-radius: 8px; 
-    font-size: 15px; 
-    cursor: pointer; 
-    font-weight: 600;
-    transition: background-color 0.2s, transform 0.1s;
-    margin-top: 10px;
-  }
+    color: #fff;
+    padding: 14px 0;
+    outline: none;
+}
 
-  button:hover { 
-    background: #10b981; /* Nút sáng lên màu năng lượng khi hover */
-  }
+/* Fix lỗi autofill bị bôi trắng */
+input:-webkit-autofill,
+input:-webkit-autofill:hover, 
+input:-webkit-autofill:focus, 
+input:-webkit-autofill:active {
+    -webkit-box-shadow: 0 0 0 30px #0d2238 inset !important;
+    -webkit-text-fill-color: #ffffff !important;
+    transition: background-color 5000s ease-in-out 0s;
+}
 
-  button:active {
-    transform: scale(0.98);
-  }
+button {
+    width: 100%;
+    margin-top: 22px;
+    padding: 14px;
+    border: none;
+    border-radius: 12px;
+    background: linear-gradient(90deg, #00d4ff, #00a0ff);
+    font-weight: 700;
+    color: #fff;
+    cursor: pointer;
+    box-shadow: 0 0 20px rgba(0, 212, 255, 0.35);
+    transition: transform 0.2s;
+}
+button:hover { transform: translateY(-2px); }
 
-  .error {
-    color: #ef4444; 
-    font-size: 13px; 
-    margin-bottom: 20px; 
-    text-align: center;
-    background: #fef2f2; 
-    padding: 10px; 
-    border-radius: 8px;
-    border: 1px solid #fecaca;
-    font-weight: 500;
-  }
+.error { background: #4a1116; color: #ffd2d2; padding: 10px; border-radius: 10px; margin-bottom: 15px; }
+.footer { display: flex; justify-content: space-between; font-size: 12px; color: #98b6c7; margin-top: 18px; }
+.online { color: #22c55e; }
+
+/* --- PHẦN BẢN ĐỒ NỀN & INFO (BÊN PHẢI TRÊN DESKTOP) --- */
+.right-map {
+    flex: 1;
+    position: relative;
+    background: url('/static/images/background.png') no-repeat center center;
+    background-size: cover;
+    overflow: hidden;
+}
+
+.info {
+    position: absolute;
+    right: 40px;
+    bottom: 50px;
+    max-width: 380px;
+    background: linear-gradient(135deg, rgba(0, 212, 255, 0.08) 0%, rgba(7, 22, 39, 0) 100%);
+    padding: 18px 24px;
+    border-radius: 12px;
+    backdrop-filter: blur(3px);
+    border: 1px solid rgba(0, 212, 255, 0.15);
+    border-right: 4px solid #00d4ff; /* Viền nhấn chuyển sang phải */
+}
+
+.info h1 {
+    font-size: 24px;
+    margin: 0 0 8px;
+    color: #00d4ff;
+    text-shadow: 0 0 15px rgba(0, 212, 255, 0.4);
+    letter-spacing: 1px;
+}
+
+.info p {
+    color: #98b6c7;
+    font-size: 13px;
+    line-height: 1.6;
+    margin: 0;
+}
+
+/* Dấu ấn tác giả */
+.creator-watermark {
+    position: fixed;
+    bottom: 12px;
+    right: 15px;
+    font-size: 11px;
+    color: rgba(255, 255, 255, 0.35);
+    letter-spacing: 0.5px;
+    pointer-events: none;
+    z-index: 1000;
+}
+
+/* --- TỐI ƯU HÓA TRÊN ĐIỆN THOẠI (MOBILE RESPONSIVE) --- */
+@media(max-width: 900px) {
+    body {
+        flex-direction: column; /* Xếp dọc trên mobile */
+    }
+    .left-login {
+        width: 100%;
+        min-height: auto;
+        padding: 30px 20px;
+        background: #071627;
+    }
+    .card {
+        max-width: 100%;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.3);
+    }
+    .right-map {
+        min-height: 280px; /* Hiển thị gọn bản đồ phía dưới khung đăng nhập */
+        width: 100%;
+    }
+    .info {
+        right: 20px;
+        left: 20px;
+        bottom: 20px;
+        max-width: none;
+        padding: 15px;
+        border-right: none;
+        border-left: 4px solid #00d4ff; /* Đổi lại viền sang trái trên mobile cho thuận mắt */
+    }
+    .info h1 {
+        font-size: 20px;
+    }
+}
 </style>
 </head>
 <body>
-  <div class="card">
-    <div class="brand-header">
-      <!-- Thay url_for nếu dùng Flask, hoặc giữ đường dẫn này -->
-      <img src="{{ url_for('static', path='images/logo.jpg') }}" alt="CCTS Logo" class="brand-logo">
-    </div>
 
-    {% if error %}<div class="error">{{ error }}</div>{% endif %} <!--[cite: 1] -->
-    
-    <form method="post" action="/login"> <!--[cite: 1] -->
-      <label>Tên đăng nhập</label> <!--[cite: 1] -->
-      <input type="text" name="username" placeholder="Nhập tài khoản kỹ thuật viên..." required autofocus autocomplete="username"> <!--[cite: 1] -->
-      
-      <label>Mật khẩu</label> <!--[cite: 1] -->
-      <input type="password" name="password" placeholder="Nhập mật khẩu..." required autocomplete="current-password"> <!--[cite: 1] -->
-      
-      <button type="submit">Đăng nhập hệ thống</button> <!--[cite: 1] -->
-    </form>
-  </div>
+<!-- Phần Đăng nhập chuyển sang bên trái -->
+<div class="left-login">
+    <div class="card">
+        <div class="logo"><img src="{{ url_for('static', path='images/logo-remove.png') }}" alt="logo"></div>
+        <h2>Control Center</h2>
+        <div class="sub">Secure access to EV Charging Monitoring System</div>
+        
+        {% if error %}<div class="error">{{ error }}</div>{% endif %}
+        
+        <form method="post" action="/login">
+            <label>Tên đăng nhập</label>
+            <div class="input">
+                <span>👤</span>
+                <input type="text" name="username" required autofocus autocomplete="username">
+            </div>
+            
+            <label>Mật khẩu</label>
+            <div class="input">
+                <span>🔒</span>
+                <input type="password" name="password" required autocomplete="current-password">
+            </div>
+            
+            <button type="submit">ĐĂNG NHẬP HỆ THỐNG</button>
+        </form>
+        
+        <div class="footer">
+            <span class="online">● System Online</span>
+            <span>Version 2.0</span>
+        </div>
+    </div>
+</div>
+
+<!-- Phần Bản đồ & Khối CCTS LIVE MAP chuyển sang bên phải -->
+<div class="right-map">
+    <div class="info">
+        <h1>CCTS LIVE MAP</h1>
+        <p>Real-time EV Charging Station Monitoring Platform<br>Fault Detection • Technician Dispatch • Live Tracking</p>
+    </div>
+</div>
+
+<!-- Dấu ấn tác giả -->
+<div class="creator-watermark">Created by Van Hien Chien</div>
+
 </body>
 </html>

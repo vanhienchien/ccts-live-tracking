@@ -46,7 +46,7 @@ CCTS_ACCOUNTS = [
     {
         "username": os.environ.get("CCTS_USERNAME_ITS", "its_frontdesk 04"),
         "password": os.environ.get("CCTS_PASSWORD_its", "Duynam123."),
-        "role": "itsmanager"
+        "role": "itsmanagerfrondesk"
     }
 ]
 SESSION_COOKIE_NAME = "session_token"
@@ -57,7 +57,7 @@ SESSION_COOKIE_NAME = "session_token"
 TRACCAR_TOKEN = os.environ.get("TRACCAR_TOKEN", "").strip()
 
 # Số giây làm mới dữ liệu ticket từ CCTS (mặc định 15 phút)
-TICKET_REFRESH_SECONDS = int(os.environ.get("TICKET_REFRESH_SECONDS", 900))
+TICKET_REFRESH_SECONDS = int(os.environ.get("TICKET_REFRESH_SECONDS", 600))
 
 _gc = None
 

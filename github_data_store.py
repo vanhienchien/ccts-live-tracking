@@ -80,9 +80,18 @@ def load_static_data(force=False):
                 continue
             core_code = extract_core_station_code(station_code)
             try:
-                coords_map[core_code] = {"lat": float(c["lat"]), "lng": float(c["lng"])}
+                lat = float(c["lat"])
+                lng = float(c["lng"])
             except (KeyError, TypeError, ValueError):
                 continue
+            # float("nan")/float("inf") KHÔNG raise exception ở trên (Python chấp
+            # nhận chuỗi "NaN"/"Infinity" khi ép kiểu) nhưng JSON response của
+            # FastAPI/Starlette lại KHÔNG chấp nhận các giá trị này (allow_nan=False)
+            # -> phải tự kiểm tra isfinite() và loại bỏ tại đây, tránh cả app crash sau này.
+            if not (math.isfinite(lat) and math.isfinite(lng)):
+                print(f"⚠️ Bỏ qua toạ độ không hợp lệ (NaN/Infinity) cho trạm '{station_code}'.")
+                continue
+            coords_map[core_code] = {"lat": lat, "lng": lng}
     except Exception as e:
         print(f"⚠️ Lỗi tải/đọc '{GITHUB_COORDS_JSON_PATH}' từ GitHub: {e}")
 
