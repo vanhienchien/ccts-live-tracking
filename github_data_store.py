@@ -41,9 +41,8 @@ _cache = {"data": None, "ts": 0.0}
 
 
 def _github_headers():
-    # Accept: raw -> GitHub trả thẳng nội dung file gốc (bytes), không cần tự
-    # giải mã base64.
-    headers = {"Accept": "application/vnd.github.v3.raw"}
+    headers = {}
+    # Nếu repo là private, bạn vẫn cần truyền Token để có quyền đọc file
     if GITHUB_TOKEN:
         headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
     return headers
@@ -53,9 +52,12 @@ def _fetch_github_json(path):
     if not GITHUB_DATA_REPO:
         raise RuntimeError("Chưa cấu hình biến môi trường GITHUB_DATA_REPO (dạng 'ten-tai-khoan/ten-repo').")
 
-    url = f"https://api.github.com/repos/{GITHUB_DATA_REPO}/contents/{path}"
-    params = {"ref": GITHUB_DATA_BRANCH} if GITHUB_DATA_BRANCH else {}
-    res = requests.get(url, headers=_github_headers(), params=params, timeout=20)
+    # Chuyển sang dùng Raw URL thay vì gọi qua GitHub Contents API để tránh rate limit
+    branch = GITHUB_DATA_BRANCH if GITHUB_DATA_BRANCH else "main"
+    url = f"https://raw.githubusercontent.com/{GITHUB_DATA_REPO}/{branch}/{path}"
+    
+    # Bỏ params={"ref": ...} vì nhánh đã được chỉ định thẳng vào URL
+    res = requests.get(url, headers=_github_headers(), timeout=20)
     res.raise_for_status()
     return json.loads(res.content.decode("utf-8"))
 
