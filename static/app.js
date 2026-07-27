@@ -24,28 +24,33 @@ let onlineUsernames = new Set(); // username (chữ thường) đang online
 function stationIcon(color, hasNearOverdue) {
     const colorMap = { red: '#b32a1b', orange: '#ce6b15', green: '#26ac43' };
     const fill = colorMap[color] || '#3498db';
+
+    // Icon đồng hồ to hơn: width/height: 22px, font-size: 13px
     const warningBadge = hasNearOverdue ? `
-        <div style="position:absolute;top:-3px;right:-7px;width:17px;height:17px;border-radius:50%;
-                    background:#2c3e50;color:#ffd166;display:flex;align-items:center;justify-content:center;
-                    font-size:10px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5);
-                    animation:unassigned-pulse 1.4s infinite;">⏰</div>
+        <div style="position:absolute; top:-8px; right:-10px; width:22px; height:22px; border-radius:50%;
+                    background:#2c3e50; color:#ffd166; display:flex; align-items:center; justify-content:center;
+                    font-size:13px; border:2px solid #fff; box-shadow:0 2px 5px rgba(0,0,0,.5);
+                    animation:unassigned-pulse 1.4s infinite; z-index:10;">⏰</div>
     ` : '';
-    const svg = `
-        <svg width="15" height="21" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
-            <path d="M15 0C6.7 0 0 6.7 0 15c0 11.25 15 27 15 27s15-15.75 15-27C30 6.7 23.3 0 15 0z"
-                  fill="${fill}" stroke="rgba(0,0,0,.35)" stroke-width="1"/>
-            <circle cx="15" cy="15" r="9.5" fill="#ffffff"/>
-            <text x="15" y="19.5" font-size="13" font-weight="700" text-anchor="middle"
-                  font-family="Georgia, serif" fill="${fill}">i</text>
-        </svg>
+
+    const htmlContent = `
+        <div style="position:relative; width:15px; height:21px;">
+            <svg width="15" height="21" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
+                <path d="M15 0C6.7 0 0 6.7 0 15c0 11.25 15 27 15 27s15-15.75 15-27C30 6.7 23.3 0 15 0z"
+                      fill="${fill}" stroke="rgba(0,0,0,.35)" stroke-width="1"/>
+                <circle cx="15" cy="15" r="9.5" fill="#ffffff"/>
+                <text x="15" y="19.5" font-size="13" font-weight="700" text-anchor="middle"
+                      font-family="Georgia, serif" fill="${fill}">i</text>
+            </svg>
             ${warningBadge}
         </div>`;
+
     return L.divIcon({
         className: '',
-        html: svg,
-        iconSize: [15, 21],      // Kích thước hiển thị siêu nhỏ
-        iconAnchor: [7.5, 21],   // Neo đúng chóp nhọn (7.5 = 15/2, 21 = chiều cao)
-        popupAnchor: [0, -19],   // Vị trí mở popup nằm ngay trên đầu gim
+        html: htmlContent,
+        iconSize: [15, 21],      // Kích thước ghim giữ nguyên
+        iconAnchor: [7.5, 21],   // Neo đúng chân ghim
+        popupAnchor: [0, -19],   // Vị trí mở popup
     });
 }
 function unassignedStationIcon(hasNearOverdue) {
