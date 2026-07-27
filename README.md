@@ -6,12 +6,15 @@ tự làm mới mỗi 10 phút.
 
 ## 1. Các file cần bạn tự chép vào (chưa có sẵn ở đây)
 
-Copy nguyên các file sau từ project Streamlit cũ của bạn vào thư mục này:
+Copy nguyên các file sau từ project cũ của bạn vào thư mục này:
 
-- `api_client.py`
 - `utils.py`
-- `station_info.json`, `listLongLat.xlsx`, `list_Stations.json`, `ChargePoint_Model.xlsx`
-  (các file dữ liệu tĩnh — file nào không có thì bỏ qua, code đã có try/except)
+
+> `api_client.py` đã có sẵn trong project này (bản API thuần, không dùng
+> Playwright). `station_info.json`, `listLongLat.xlsx`, `list_Stations.json`,
+> `ChargePoint_Model.xlsx` **không cần copy vào đây nữa** — 3 file
+> `listLongLat.xlsx`, `list_Stations.json`, `ChargePoint_Model.xlsx` giờ được
+> đọc trực tiếp từ GitHub tại runtime, xem mục 9 bên dưới.
 
 ## 2. Cài đặt
 
@@ -147,14 +150,14 @@ diện thật của app):**
 
    | Mục trong app | Giá trị cần điền | Ghi chú |
    |---|---|---|
-   | **Device identifier** | Đúng bằng **username** của kỹ thuật viên đó | Phải khớp *chính xác* (phân biệt hoa/thường) với cột `username` trong Sheet Users.
-   | **Server URL** : https://ccts-live-tracking.onrender.com/api/traccar?token=%3Copenssl%20rand%20-hex%203893%3E
-   | **Location accuracy** | Đổi từ "Medium" → **"High"** 
-   | **Distance (meters)** | Đổi từ 75 → **20** (hoặc thấp hơn)
-   | **Stationary heartbeat (seconds)** | Bật lên, đặt **60** (hiện đang "Disabled") 
+   | **Device identifier** | Đúng bằng **username** của kỹ thuật viên đó | Phải khớp *chính xác* (phân biệt hoa/thường) với cột `username` trong Sheet Users, ví dụ `vana`. Bấm vào dòng "17055581" hiện tại để sửa. |
+   | **Server URL** | `https://<domain-của-bạn>/api/traccar?token=<TRACCAR_TOKEN>` | Thay `<domain-của-bạn>` bằng domain Render thật (vd `ccts-live-tracking.onrender.com`), và `<TRACCAR_TOKEN>` bằng đúng chuỗi bạn đặt ở bước 1. **Dùng `https://`, không phải `http://` và không cần `:5055`** (khác với server URL demo mặc định trong ảnh — đó là port riêng của Traccar Server, còn app của bạn dùng chung 1 domain/port với web luôn). |
+   | **Location accuracy** | Đổi từ "Medium" → **"High"** | Vì mình đang dùng ngưỡng phát hiện "đang ở tại trạm" rất gần (10 mét), cần độ chính xác GPS cao hơn mức mặc định để nhận diện đúng. |
+   | **Distance (meters)** | Đổi từ 75 → **20** (hoặc thấp hơn) | Đây là "cứ di chuyển bao nhiêu mét thì gửi 1 lần cập nhật". Để 75m thì lúc kỹ thuật viên tiến gần vào 1 trạm (bán kính chỉ 10m) có thể bị "nhảy cóc" qua mà server không kịp ghi nhận. |
+   | **Stationary heartbeat (seconds)** | Bật lên, đặt **60** (hiện đang "Disabled") | **⚠️ QUAN TRỌNG NHẤT** — xem giải thích riêng ngay bên dưới bảng này. |
    | **Advanced settings** | Không cần bật | Để mặc định là được. |
 
-4. Bấm mũi tên **"<"** quay lại màn hình chính, bấm nút **Continuous tracking**
+4. Bấm mũi tên **"<"** quay lại màn hình chính, bấm nút **Start/Bật dịch vụ**
    (nút lớn ở màn hình chính, không phải trong Settings). Từ lúc này app sẽ tự
    gửi vị trí định kỳ, kể cả khi tắt màn hình hoặc chuyển sang app khác.
 
@@ -176,10 +179,47 @@ cả dùng cả 2 cùng lúc (server sẽ chỉ giữ lại lần cập nhật m
 > Không bắt buộc dùng Traccar Client — nếu kỹ thuật viên chỉ mở web trong lúc
 > đang thao tác (không cần theo dõi khi màn hình tắt), cách lấy vị trí qua
 > trình duyệt hiện tại vẫn hoạt động bình thường.
-Hướng dẫn cài đặt app  Traccar Client để lấy vị trí. Vào setting:
-|Device identifier| Đúng bằng **username** của kỹ thuật viên đó | Phải khớp *chính xác* (phân biệt hoa/thường) với cột `username` trong Sheet Users.
-|Server URL: https://ccts-live-tracking.onrender.com/api/traccar?token=e0336745e57763553e1637b4f672e331
-|Location accuracy| Đổi từ "Medium" → **"High"** 
-|Distance (meters)| Đổi từ 75 → **20** (hoặc thấp hơn)
-|Stationary heartbeat (seconds)| Bật lên, đặt **60** (hiện đang "Disabled") 
-|Advanced settings| Không cần bật | Để mặc định là được. |
+
+## 9. Toạ độ trạm / phân công kỹ thuật viên / model trụ sạc - đọc trực tiếp từ GitHub
+
+Trước đây 3 file này (`listLongLat.xlsx`, `list_Stations.json`,
+`ChargePoint_Model.xlsx`) được đóng gói cùng code khi deploy, hoặc thử
+nghiệm qua Google Sheets (chậm hơn nhiều do phải gọi Google Sheets API). Giờ
+`github_data_store.py` đọc 3 file này **trực tiếp từ GitHub qua GitHub
+Contents API** tại runtime — bạn sửa file trên máy, `git push`, app tự nhận
+dữ liệu mới ở lần làm mới kế tiếp (cache 5 phút), **không cần deploy lại**
+project trên Render.
+
+**Cách thiết lập:**
+
+1. **Khuyến nghị mạnh: tạo 1 repo GitHub RIÊNG** chỉ chứa 3 file data này,
+   KHÔNG kết nối với Render. Đây là điểm quan trọng nhất: nếu 3 file này nằm
+   chung repo với code app, mỗi lần bạn push cập nhật data vẫn có thể vô tình
+   kích hoạt Render tự động deploy lại (tuỳ cấu hình Auto-Deploy) — tách repo
+   riêng loại bỏ hoàn toàn rủi ro này.
+2. Đặt biến môi trường trên Render:
+   ```env
+   GITHUB_DATA_REPO=ten-tai-khoan/ten-repo-data
+   GITHUB_DATA_BRANCH=main
+   ```
+3. Nếu repo đó **public**: không cần thêm gì. Nếu **private**: tạo GitHub
+   Personal Access Token (Settings → Developer settings → Fine-grained
+   tokens), chỉ cấp quyền **Contents: Read-only** trên đúng repo đó, rồi đặt:
+   ```env
+   GITHUB_TOKEN=github_pat_xxx...
+   ```
+4. Nếu tên file khác mặc định, chỉnh thêm (không bắt buộc):
+   ```env
+   GITHUB_STATIONS_JSON_PATH=list_Stations.json
+   GITHUB_LONGLAT_XLSX_PATH=listLongLat.xlsx
+   GITHUB_CP_MODEL_XLSX_PATH=ChargePoint_Model.xlsx
+   ```
+
+Từ giờ, quy trình cập nhật của bạn chỉ còn: sửa file trên máy → `git push` →
+đợi tối đa 5 phút (hoặc bấm nút 🔄 làm mới thủ công nếu là Admin) → xong,
+không đụng gì tới Render.
+
+> Tính năng "chỉnh sửa kỹ thuật viên phụ trách trực tiếp trên bản đồ" đã được
+> **gỡ bỏ** theo yêu cầu (đi kèm với việc bỏ Google Sheets cho dữ liệu này) —
+> giờ việc đổi kỹ thuật viên phụ trách chỉ thực hiện bằng cách sửa
+> `list_Stations.json` rồi push lên GitHub như trên.

@@ -88,25 +88,25 @@
 
   /* Nút mở panel nằm ở mép BÊN TRÁI màn hình */
   #ticket-panel-handle {
-  position: fixed; top: 50%; left: 0; transform: translateY(-50%);
-  background: #2c3e50; color: #fff; border: none; 
-  border-radius: 0 8px 8px 0; /* Bo tròn góc bên phải */
-  padding: 14px 6px; cursor: pointer; z-index: 1400; font-size: 15px;
-  box-shadow: 2px 0 8px rgba(0,0,0,.2);
-}
+    position: fixed; top: 50%; left: 0; transform: translateY(-50%);
+    background: #2c3e50; color: #fff; border: none; 
+    border-radius: 0 8px 8px 0; /* Bo tròn góc bên phải */
+    padding: 14px 6px; cursor: pointer; z-index: 1400; font-size: 15px;
+    box-shadow: 2px 0 8px rgba(0,0,0,.2);
+  }
 
-/* Panel trượt từ BÊN TRÁI ra */
-#ticket-panel {
-  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-  width: 100vw; height: 100vh; max-width: 100vw;
-  background: #fff; z-index: 2500;
-  display: flex; flex-direction: column;
-  transform: translateX(-100%); /* Ẩn sang bên trái */
-  transition: transform .25s ease;
-}
-#ticket-panel.open { 
-  transform: translateX(0); /* Trượt ra toàn màn hình */
-}
+  /* Panel trượt từ BÊN TRÁI ra */
+  #ticket-panel {
+    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+    width: 100vw; height: 100vh; max-width: 100vw;
+    background: #fff; z-index: 2500;
+    display: flex; flex-direction: column;
+    transform: translateX(-100%); /* Ẩn sang bên trái */
+    transition: transform .25s ease;
+  }
+  #ticket-panel.open { 
+    transform: translateX(0); /* Trượt ra toàn màn hình */
+  }
   #ticket-panel-header {
     background: #2c3e50; color: #fff; padding: 12px 18px; font-weight: 700; font-size: 16px;
     display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;
@@ -140,7 +140,6 @@
   #ticket-panel-tech-list .tech-row.active { background: #e3f2fd; font-weight: 700; color: #1976d2; }
   #ticket-panel-tech-list .tech-row .stats { font-size: 11px; color: #666; }
 
-  /* Bảng Ticket chiếm phần diện tích rộng còn lại bên phải */
 /* Khung chứa bảng ticket */
 #ticket-panel-table-wrap { 
   flex: 1; 
@@ -155,7 +154,7 @@
   font-size: 13px; 
 }
 
-/* Tiêu đề cột chuẩn màu xanh, đè lên nội dung khi cuộn */
+  /* Tiêu đề cột chuẩn màu xanh, đè lên nội dung khi cuộn */
   #ticket-panel-table-wrap th {
     background-color: #2c3e50 !important; /* Màu xanh đậm đồng bộ */
     color: #ffffff !important;
@@ -177,6 +176,7 @@
   #ticket-panel-table-wrap tr:nth-child(even) td { 
     background: #fafafa; 
   }
+  #ticket-panel-empty { padding: 40px 16px; text-align: center; color: #999; font-size: 14px; }
 
   /* Responsive cho điện thoại (màn hình hẹp): Xếp dọc danh sách KTV lên trên, Bảng ticket xuống dưới */
   @media (max-width: 700px) {
@@ -188,6 +188,23 @@
       border-bottom: 1px solid #ddd;
     }
   }
+
+  /* --- Panel danh sách ticket thiếu toạ độ --- */
+  #missing-coord-panel {
+    position: absolute; top: 30px; left: 0; width: 280px; max-height: 320px;
+    overflow-y: auto; background: #fff; color: #222; border-radius: 8px;
+    box-shadow: 0 6px 20px rgba(0,0,0,.3); display: none; z-index: 2000; padding: 8px 0;
+  }
+  #missing-coord-panel .header {
+    padding: 6px 12px; font-weight: 700; font-size: 12.5px; color: #c0392b;
+    border-bottom: 1px solid #eee; margin-bottom: 4px; background: none;
+  }
+  #missing-coord-panel .item {
+    padding: 6px 12px; font-size: 12px; border-bottom: 1px solid #f5f5f5;
+  }
+  #missing-coord-panel .item .tid { font-weight: 700; color: #2c3e50; }
+  #missing-coord-panel .item .meta { color: #888; font-size: 11px; }
+  #missing-coord-panel .empty { padding: 12px; font-size: 12.5px; color: #999; }
 
   /* --- Nút "Vị trí của bạn" nổi trên bản đồ --- */
   #my-location-btn {
@@ -221,32 +238,6 @@
     0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(243,156,18,.6); }
     70% { transform: scale(1.12); box-shadow: 0 0 0 8px rgba(243,156,18,0); }
     100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(243,156,18,0); }
-}
-
-/* --- Modal đổi kỹ thuật viên phụ trách --- */
-#assign-tech-overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,.4); z-index: 3000;
-    display: none; align-items: center; justify-content: center; padding: 16px;
-}
-#assign-tech-overlay.open { display: flex; }
-#assign-tech-modal {
-    background: #fff; border-radius: 10px; width: 320px; max-width: 100%;
-    padding: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.3);
-}
-#assign-tech-modal h4 { margin: 0 0 10px; font-size: 15px; color: #2c3e50; }
-#assign-tech-search {
-    width: 100%; padding: 8px 10px; border: 1px solid #ddd; border-radius: 6px;
-    font-size: 14px; box-sizing: border-box; margin-bottom: 8px;
-}
-#assign-tech-results { max-height: 220px; overflow-y: auto; margin-bottom: 10px; }
-#assign-tech-results .opt {
-    padding: 8px 10px; font-size: 13px; cursor: pointer; border-radius: 6px;
-}
-#assign-tech-results .opt:hover { background: #f2f4f6; }
-#assign-tech-results .opt.unassign-opt { color: #e67e22; font-weight: 600; }
-#assign-tech-cancel {
-    width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 6px;
-    background: #fff; cursor: pointer; font-size: 13px;
 }
 
 /* ==========================================
@@ -284,24 +275,24 @@
 </head>
 <body data-username="{{ user.username }}" data-role="{{ user.role }}">
   <div class="header">
+    <img src="{{ url_for('static', path='images/logo.jpg') }}" alt="ELECSERVE Logo" style="height: 28px; width: auto; object-fit: contain; margin-right: 4px;">
     <div class="info">
-      
-      <!-- LOGO NHỎ NẰM NGAY BÊN TRÁI Ô TÌM KIẾM -->
-      <img src="{{ url_for('static', path='images/logo.jpg') }}" alt="ELECSERVE Logo" style="height: 28px; width: auto; object-fit: contain; margin-right: 4px;">
-
       <div class="search-wrap">
-        <input type="text" id="search-input" placeholder="🔍 Tìm trạm / kỹ thuật viên...">
+        <input type="text" id="search-input" placeholder="🔍Tìm trạm/kỹ thuật viên...">
         <div id="search-results"></div>
       </div>
-      <button class="hdr-btn" id="tech-filter-btn">🧑‍🔧 Lọc</button>
+      <button class="hdr-btn" id="tech-filter-btn">🧑‍🔧Lọc</button>
       <label style="display:flex;align-items:center;gap:4px;font-size:12.5px;cursor:pointer;">
-        <input type="checkbox" id="filter-charger" checked> ⚡ Trụ sạc
+        <input type="checkbox" id="filter-charger" checked> ⚡EV
       </label>
       <label style="display:flex;align-items:center;gap:4px;font-size:12.5px;cursor:pointer;">
-        <input type="checkbox" id="filter-bss" checked> 🔋 BSS
+        <input type="checkbox" id="filter-bss" checked> 🔋BSS
       </label>
-      <span class="user-detail">👋 {{ user.full_name }} · {{ user.role }}{% if user.region %} · {{ user.region }}{% endif %}</span>
-      <span>Sự cố đang mở: <span class="badge" id="ticket-count">–</span></span>
+      <span class="user-detail">{{ user.full_name }}:{{ user.role }}{% if user.region %} · {{ user.region }}{% endif %}</span>
+      <span style="position:relative;">Sự cố đang mở:
+        <span class="badge" id="ticket-count" style="cursor:pointer;" title="Bấm để xem danh sách trạm thiếu toạ độ">–</span>
+        <div id="missing-coord-panel"></div>
+      </span>
       <span><span class="conn-dot" id="conn-dot"></span><span class="conn-text-label" id="conn-text">Đang kết nối...</span></span>
       {% if user.role and user.role.strip().lower() == 'admin' %}
         <button id="btn-manual-refresh" onclick="triggerManualRefresh()" style="padding: 4px 10px; cursor: pointer; border-radius: 4px; border: 1px solid #1f77b4; background: #ffffff; color: #1f77b4; font-weight: bold; font-size: 13px; margin: 0 5px;">
@@ -330,15 +321,6 @@
       <div id="ticket-panel-table-wrap">
         <div id="ticket-panel-empty">Chọn 1 kỹ thuật viên ở trên để xem danh sách ticket.</div>
       </div>
-    </div>
-  </div>
-
-  <div id="assign-tech-overlay">
-    <div id="assign-tech-modal">
-      <h4 id="assign-tech-title">Đổi kỹ thuật viên phụ trách</h4>
-      <input type="text" id="assign-tech-search" placeholder="Tìm kỹ thuật viên...">
-      <div id="assign-tech-results"></div>
-      <button id="assign-tech-cancel">Huỷ</button>
     </div>
   </div>
 

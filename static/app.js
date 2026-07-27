@@ -4,13 +4,6 @@
 
 const CURRENT_USERNAME = (document.body.dataset.username || '').trim();
 const CURRENT_ROLE = (document.body.dataset.role || '').trim().toLowerCase();
-const CAN_EDIT_ASSIGNMENT = ['điều phối khu vực', 'điều hành', 'giám đốc', 'admin'].includes(CURRENT_ROLE);
-
-if (!CAN_EDIT_ASSIGNMENT) {
-    const style = document.createElement('style');
-    style.textContent = '.edit-tech-btn { display: none !important; }';
-    document.head.appendChild(style);
-}
 
 const map = L.map('map').setView([12.25, 108.5], 6.3);
 // Nền bản đồ Esri/ArcGIS World Street Map
@@ -28,9 +21,15 @@ let selectedTechs = new Set(); // tên kỹ thuật viên đang được TICK CH
 let onlineUsernames = new Set(); // username (chữ thường) đang online
 
 // ---------- Icon trạm sạc: ghim giọt nước cổ điển (giống Folium mặc định) ----------
-function stationIcon(color) {
-    const colorMap = { red: '#a10000', orange: '#e27414', green: '#30b430' };
-    const fill = colorMap[color] || '#b3329d';
+function stationIcon(color, hasNearOverdue) {
+    const colorMap = { red: '#b32a1b', orange: '#ce6b15', green: '#26ac43' };
+    const fill = colorMap[color] || '#3498db';
+    const warningBadge = hasNearOverdue ? `
+        <div style="position:absolute;top:-3px;right:-7px;width:17px;height:17px;border-radius:50%;
+                    background:#2c3e50;color:#ffd166;display:flex;align-items:center;justify-content:center;
+                    font-size:10px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5);
+                    animation:unassigned-pulse 1.4s infinite;">⏰</div>
+    ` : '';
     const svg = `
         <svg width="15" height="21" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
             <path d="M15 0C6.7 0 0 6.7 0 15c0 11.25 15 27 15 27s15-15.75 15-27C30 6.7 23.3 0 15 0z"
@@ -38,7 +37,9 @@ function stationIcon(color) {
             <circle cx="15" cy="15" r="9.5" fill="#ffffff"/>
             <text x="15" y="19.5" font-size="13" font-weight="700" text-anchor="middle"
                   font-family="Georgia, serif" fill="${fill}">i</text>
-        </svg>`;
+        </svg>
+            ${warningBadge}
+        </div>`;
     return L.divIcon({
         className: '',
         html: svg,
@@ -47,13 +48,19 @@ function stationIcon(color) {
         popupAnchor: [0, -19],   // Vị trí mở popup nằm ngay trên đầu gim
     });
 }
-function unassignedStationIcon() {
+function unassignedStationIcon(hasNearOverdue) {
+    const warningBadge = hasNearOverdue ? `
+        <div style="position:absolute;top:-3px;right:-5px;width:17px;height:17px;border-radius:50%;
+                    background:#2c3e50;color:#ffd166;display:flex;align-items:center;justify-content:center;
+                    font-size:10px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5);">⏰</div>
+    ` : '';
     const svg = `
         <div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;
                     color:#e74c3c;font-size:32px;font-weight:900;line-height:1;
                     filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
                     animation: unassigned-pulse 1.5s infinite;">
             !
+            ${warningBadge}
         </div>`;
     return L.divIcon({
         className: '',
@@ -68,7 +75,7 @@ async function triggerManualRefresh() {
     const btn = document.getElementById('btn-manual-refresh');
     if (btn) {
         btn.disabled = true;
-        btn.textContent = '⏳';
+        btn.textContent = '⏳ Đang cào dữ liệu...';
     }
     try {
         const res = await fetch('/api/admin/refresh-stations', { method: 'POST' });
@@ -101,7 +108,7 @@ function applyStationFilter() {
     stations = stations.filter((s) => (s.is_bss_station ? showBssStations : showChargerStations));
 
     stations.forEach((s) => {
-        const icon = s.is_unassigned ? unassignedStationIcon() : stationIcon(s.color);
+        const icon = s.is_unassigned ? unassignedStationIcon(s.has_near_overdue) : stationIcon(s.color, s.has_near_overdue);
         const marker = L.marker([s.lat, s.lng], { icon });
         marker.bindPopup(s.popup_html, { maxWidth: 320, maxHeight: 340 });
         marker._stationCode = s.station_code;
@@ -266,100 +273,6 @@ function upsertStaffMarker(loc) {
         entry.wrenchMarker = null;
     }
 }
-
-// ---------- Modal đổi kỹ thuật viên phụ trách ----------
-const assignOverlay = document.getElementById('assign-tech-overlay');
-const assignSearch = document.getElementById('assign-tech-search');
-const assignResults = document.getElementById('assign-tech-results');
-const assignCancelBtn = document.getElementById('assign-tech-cancel');
-const assignTitle = document.getElementById('assign-tech-title');
-
-let assignTargetStation = null;
-let assignTechCache = null; // cache danh sách kỹ thuật viên (tên hiển thị) lấy từ /api/technicians
-
-function closeAssignModal() {
-    assignOverlay.classList.remove('open');
-    assignTargetStation = null;
-    assignSearch.value = '';
-}
-
-async function loadAssignTechCache() {
-    if (assignTechCache) return assignTechCache;
-    const res = await fetch('/api/assignable-technicians');
-    const data = await res.json();
-    assignTechCache = data.technicians || [];
-    return assignTechCache;
-}
-
-function renderAssignResults(names, query) {
-    const q = (query || '').trim().toLowerCase();
-    const filtered = q ? names.filter((n) => n.toLowerCase().includes(q)) : names;
-
-    let html = `<div class="opt unassign-opt" data-name="Unassigned">🚫 Unassigned (bỏ gán)</div>`;
-    html += filtered.map((n) => `<div class="opt" data-name="${n}">🧑‍🔧 ${n}</div>`).join('');
-    assignResults.innerHTML = html || '<div style="padding:10px;color:#999;font-size:13px;">Không tìm thấy</div>';
-
-    assignResults.querySelectorAll('.opt').forEach((el) => {
-        el.addEventListener('click', () => submitAssignment(el.dataset.name));
-    });
-}
-
-async function openAssignModal(stationCode, currentTech) {
-    if (!CAN_EDIT_ASSIGNMENT) return;
-    assignTargetStation = stationCode;
-    assignTitle.textContent = `Đổi kỹ thuật viên - Trạm ${stationCode}`;
-    assignOverlay.classList.add('open');
-    assignSearch.focus();
-
-    const names = await loadAssignTechCache();
-    renderAssignResults(names, '');
-}
-
-async function submitAssignment(engineerName) {
-    if (!assignTargetStation) return;
-    const stationCode = assignTargetStation;
-    closeAssignModal();
-
-    try {
-        const res = await fetch('/api/assign-technician', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ station_code: stationCode, engineer_name: engineerName }),
-        });
-        const data = await res.json();
-        if (res.ok) {
-            // Bản đồ sẽ tự cập nhật qua WebSocket (server broadcast) trong giây lát
-        } else {
-            alert('❌ ' + (data.error || 'Không thể đổi kỹ thuật viên.'));
-        }
-    } catch (e) {
-        alert('❌ Không kết nối được server.');
-    }
-}
-
-if (assignSearch) {
-    assignSearch.addEventListener('input', () => {
-        if (assignTechCache) renderAssignResults(assignTechCache, assignSearch.value);
-    });
-}
-if (assignCancelBtn) assignCancelBtn.addEventListener('click', closeAssignModal);
-if (assignOverlay) {
-    assignOverlay.addEventListener('click', (e) => {
-        if (e.target === assignOverlay) closeAssignModal();
-    });
-}
-
-// Nút "✏️" nằm BÊN TRONG popup Leaflet (HTML được chèn động) -> dùng event
-// delegation trên toàn document để bắt click, thay vì gắn listener trực tiếp.
-document.addEventListener('click', (e) => {
-    const btn = e.target.closest('.edit-tech-btn');
-    if (!btn) return;
-    if (!CAN_EDIT_ASSIGNMENT) {
-        alert('Chỉ Điều phối khu vực trở lên mới được đổi kỹ thuật viên phụ trách.');
-        return;
-    }
-    openAssignModal(btn.dataset.station, btn.dataset.currentTech);
-});
 
 // ---------- Tag lọc theo kỹ thuật viên (gom theo khu vực + chấm online/offline) ----------
 const techPanel = document.getElementById('tech-filter-panel');
@@ -756,6 +669,58 @@ function loadTicketPanelTechList() {
         });
 }
 
+// ---------- Badge "Sự cố đang mở" + panel trạm thiếu toạ độ ----------
+let missingCoordTickets = [];
+
+function updateTicketBadge(data) {
+    const el = document.getElementById('ticket-count');
+    if (!el) return;
+    const total = data.total_tickets ?? 0;
+    const withCoords = data.with_coords_count ?? total;
+    el.textContent = withCoords === total ? `${total}` : `${withCoords}/${total}`;
+    missingCoordTickets = data.missing_coord_tickets || [];
+}
+
+const missingCoordPanel = document.getElementById('missing-coord-panel');
+if (missingCoordPanel) {
+    L.DomEvent.disableClickPropagation(missingCoordPanel);
+}
+
+function renderMissingCoordPanel() {
+    if (!missingCoordPanel) return;
+    if (missingCoordTickets.length === 0) {
+        missingCoordPanel.innerHTML = `<div class="header">✅ Trạm thiếu toạ độ</div>
+            <div class="empty">Không có ticket nào bị thiếu toạ độ trạm.</div>`;
+        return;
+    }
+    const itemsHtml = missingCoordTickets.map((t) => `
+        <div class="item">
+            <span class="tid">${t.ticket_id ?? ''}</span><br>
+            <span class="meta">Mã trạm: ${t.station_code ?? '—'} &nbsp;·&nbsp; SN trụ: ${t.cp_id ?? '—'}</span>
+        </div>
+    `).join('');
+    missingCoordPanel.innerHTML = `
+        <div class="header">⚠️ ${missingCoordTickets.length} ticket thuộc trạm thiếu toạ độ</div>
+        ${itemsHtml}
+    `;
+}
+
+const ticketCountBadge = document.getElementById('ticket-count');
+if (ticketCountBadge) {
+    ticketCountBadge.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const isOpen = missingCoordPanel.style.display === 'block';
+        if (!isOpen) renderMissingCoordPanel();
+        missingCoordPanel.style.display = isOpen ? 'none' : 'block';
+    });
+}
+document.addEventListener('click', (e) => {
+    if (missingCoordPanel && missingCoordPanel.style.display === 'block'
+        && !missingCoordPanel.contains(e.target) && e.target !== ticketCountBadge) {
+        missingCoordPanel.style.display = 'none';
+    }
+});
+
 // ---------- WebSocket ----------
 let ws;
 let reconnectDelay = 2000;
@@ -784,8 +749,7 @@ function connectWebSocket() {
             upsertStaffMarker(msg);
         } else if (msg.type === 'stations_update') {
             renderStations(msg.stations);
-            const el = document.getElementById('ticket-count');
-            if (el) el.textContent = msg.total_tickets ?? 0;
+            updateTicketBadge(msg);
         } else if (msg.type === 'presence_update') {
             onlineUsernames = new Set((msg.online_usernames || []).map((u) => u.toLowerCase()));
             updateTechPanelPresence();
@@ -809,8 +773,7 @@ fetch('/api/stations')
     .then((r) => r.json())
     .then((data) => {
         renderStations(data.stations);
-        const el = document.getElementById('ticket-count');
-        if (el) el.textContent = data.total_tickets ?? 0;
+        updateTicketBadge(data);
     })
     .catch(() => {});
 

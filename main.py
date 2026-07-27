@@ -14,10 +14,9 @@ from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
-from fastapi import FastAPI
+
 import users_store
 import ccts_data
-import static_data_store
 from ccts_data import get_static_data, filter_stations_for_user, filter_tech_by_region_for_user
 from location_hub import hub
 from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS, TRACCAR_TOKEN
@@ -173,85 +172,6 @@ async def api_stations(request: Request):
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     filtered = filter_stations_for_user(_latest_station_payload["stations"], user)
     return {**_latest_station_payload, "stations": filtered}
-
-
-@app.post("/api/assign-technician")
-async def api_assign_technician(request: Request):
-    """Đổi kỹ thuật viên phụ trách 1 trạm - Điều phối khu vực trở lên được
-    dùng, với quyền chỉnh sửa TOÀN BỘ trạm (giống Admin), không giới hạn theo
-    khu vực. Khi gán 1 kỹ thuật viên, khu vực (region) trên StationAssignments
-    cũng được cập nhật theo đúng khu vực của kỹ thuật viên đó (lấy từ Sheet Users)."""
-    user = get_current_user(request)
-    if not user:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    role = (user.get("role") or "").strip().lower()
-    if role not in ("điều phối khu vực", "điều hành", "giám đốc", "admin"):
-        return JSONResponse({"error": "Bạn không có quyền đổi kỹ thuật viên phụ trách."}, status_code=403)
-
-    body = await request.json()
-    station_code = (body.get("station_code") or "").strip()
-    new_engineer_name = (body.get("engineer_name") or "").strip()
-
-    if not station_code:
-        return JSONResponse({"error": "Thiếu mã trạm."}, status_code=400)
-    if not new_engineer_name:
-        return JSONResponse({"error": "Thiếu tên kỹ thuật viên."}, status_code=400)
-
-    all_users = users_store.list_users_public()
-    new_region = None
-
-    # Xác thực engineer_name: phải là "Unassigned" hoặc đúng 1 tài khoản có
-    # role "Kỹ thuật" trong danh sách nhân sự thật (không cho gõ tên tuỳ ý)
-    if new_engineer_name.strip().lower() != "unassigned":
-        matched_tech = next(
-            (u for u in all_users
-             if (u.get("role") or "").strip().lower() == "kỹ thuật"
-             and (u.get("full_name") or "").strip().lower() == new_engineer_name.strip().lower()),
-            None,
-        )
-        if not matched_tech:
-            return JSONResponse(
-                {"error": f"'{new_engineer_name}' không có trong danh sách kỹ thuật viên của công ty."},
-                status_code=400,
-            )
-        new_region = (matched_tech.get("region") or "").strip() or None
-
-    try:
-        static_data_store.update_station_assignment(station_code, new_engineer_name, region=new_region)
-    except Exception as e:
-        return JSONResponse({"error": f"Lỗi khi ghi vào Google Sheets: {e}"}, status_code=500)
-
-    # Nạp lại dữ liệu tĩnh (đã đổi) + cào lại để gắn tên kỹ thuật viên mới lên
-    # bản đồ ngay, rồi đẩy (broadcast) cho mọi người đang mở web
-    await refresh_stations_once()
-    await broadcast_stations_update()
-
-    return {"status": "ok", "station_code": station_code, "engineer_name": new_engineer_name}
-
-
-@app.get("/api/assignable-technicians")
-async def api_assignable_technicians(request: Request):
-    """Danh sách ĐẦY ĐỦ (không giới hạn khu vực) tên các kỹ thuật viên thật
-    trong công ty - dùng riêng cho modal đổi kỹ thuật viên phụ trách (Điều
-    phối khu vực trở lên). Khác với /api/technicians (dùng cho tag lọc + panel
-    Danh sách Ticket), endpoint này KHÔNG bị giới hạn theo khu vực của viewer,
-    vì giờ Điều phối khu vực có quyền sửa TOÀN BỘ trạm."""
-    user = get_current_user(request)
-    if not user:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    role = (user.get("role") or "").strip().lower()
-    if role not in ("điều phối khu vực", "điều hành", "giám đốc", "admin"):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-
-    all_users = users_store.list_users_public()
-    names = sorted({
-        (u.get("full_name") or "").strip()
-        for u in all_users
-        if (u.get("role") or "").strip().lower() == "kỹ thuật" and (u.get("full_name") or "").strip()
-    })
-    return {"technicians": names}
 
 
 @app.get("/api/technicians")
