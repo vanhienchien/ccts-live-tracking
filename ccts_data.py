@@ -19,7 +19,7 @@ import pandas as pd
 from api_client import CCTSClient
 from utils import extract_core_station_code, parse_duration_to_hours
 from config import CCTS_ACCOUNTS
-import static_data_store
+import github_data_store
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 CACHE_FILE = "last_known_data.json"
@@ -46,24 +46,24 @@ def _status_color(status):
 
 def _severity_color(hours):
     """Trả về (key, mã_màu_nền_nhạt, mã_màu_viền/đậm, màu_chữ) theo số giờ
-    tồn đọng của MỘT ticket cụ thể - thang màu xanh (mới) -> cam -> đỏ (tồn lâu)."""
+    tồn đọng của MỘT ticket cụ thể - thang màu vàng (mới) -> cam -> đỏ (tồn lâu)."""
     if hours > 48:
-        return "red", "#fab9b9", "#bd1f1f", "#bd1f1f"
+        return "red", "#ff9f94", "#b32a1b", "#b32a1b"
     elif hours >= 24:
-        return "orange", "#ffd0b5", "#d4611e", "#d4611e"
+        return "orange", "#ffca9c", "#ce6b15", "#ce6b15"
     else:
-        return "green", "#b6ffc0", "#32b343", "#32b343"
+        return "green", "#93ffab", "#26ac43", "#26ac43"
 
 
 def get_static_data():
-    """Toạ độ trạm / phân công kỹ thuật viên / model trụ sạc - giờ đọc từ
-    Google Sheets (static_data_store.py) thay vì file cục bộ, để Điều phối
-    có thể tự sửa mà không cần deploy lại."""
-    return static_data_store.load_static_data()
+    """Toạ độ trạm / phân công kỹ thuật viên / model trụ sạc - đọc trực tiếp
+    từ GitHub (github_data_store.py) tại runtime, không cần deploy lại khi
+    bạn cập nhật file và push lên."""
+    return github_data_store.load_static_data()
 
 
 def reload_static_data():
-    return static_data_store.reload_static_data()
+    return github_data_store.reload_static_data()
 
 
 # ==========================================
@@ -155,8 +155,13 @@ async def fetch_live_tickets():
 
 
 def _apply_south_filter_and_coords(df_tickets, coords_map):
-    """Gán toạ độ + lọc bỏ trạm miền Bắc (lat >= NORTH_LAT_THRESHOLD). Trả về
-    (df_đã_lọc, số_lượng_bị_lọc_bỏ)."""
+    """Gán toạ độ, tách riêng 2 nhóm bị loại khỏi bản đồ:
+    1. Trạm THIẾU TOẠ ĐỘ hoàn toàn (chưa có trong sheet StationCoords) - đây
+       là vấn đề chất lượng dữ liệu cần Điều phối bổ sung, có danh sách chi tiết.
+    2. Trạm CÓ toạ độ nhưng thuộc miền Bắc (lat >= NORTH_LAT_THRESHOLD) - đây
+       là lọc theo chủ đích (ngoài phạm vi quản lý), không phải lỗi dữ liệu.
+
+    Trả về (df_miền_nam_có_toạ_độ, số_lượng_bị_lọc_miền_bắc, list_ticket_thiếu_toạ_độ)."""
     def get_coords(station_code):
         core_code = extract_core_station_code(station_code)
         return coords_map.get(core_code)
@@ -164,18 +169,32 @@ def _apply_south_filter_and_coords(df_tickets, coords_map):
     df = df_tickets.copy()
     df["coords"] = df["Station Code"].apply(get_coords)
 
-    before = len(df)
-    df = df[
-        df["coords"].notna()
-        & (df["coords"].apply(lambda x: x["lat"] if x else 0) < NORTH_LAT_THRESHOLD)
+    missing_mask = df["coords"].isna()
+    missing_df = df[missing_mask]
+    missing_coord_tickets = [
+        {
+            "ticket_id": row.get("Ticket ID"),
+            "station_code": row.get("Station Code"),
+            "cp_id": row.get("Charge Point ID"),
+        }
+        for _, row in missing_df.iterrows()
+    ]
+    if missing_coord_tickets:
+        print(f"[+] Có {len(missing_coord_tickets)} ticket thuộc trạm CHƯA CÓ toạ độ trong StationCoords.")
+
+    with_coords_df = df[~missing_mask].copy()
+    before = len(with_coords_df)
+    south_df = with_coords_df[
+        with_coords_df["coords"].apply(lambda x: x["lat"]) < NORTH_LAT_THRESHOLD
     ].copy()
-    filtered_north_count = before - len(df)
+    filtered_north_count = before - len(south_df)
     if filtered_north_count:
         print(f"[+] Đã lọc bỏ {filtered_north_count} ticket thuộc miền Bắc (lat >= {NORTH_LAT_THRESHOLD})")
-    return df, filtered_north_count
+
+    return south_df, filtered_north_count, missing_coord_tickets
 
 
-def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_map, total_tickets_raw, missing_count, filtered_north_count, fetch_success):
+def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_map, total_tickets_raw, missing_count, filtered_north_count, fetch_success, missing_coord_tickets=None):
     """Phần TÍNH TOÁN THUẦN (không gọi mạng) - gộp ticket đang mở (đã lọc
     miền Nam) với toạ độ trạm, trả về JSON sẵn sàng cho frontend."""
     stations = []
@@ -199,7 +218,7 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
             tech_name = tech_map.get(core_code, "Unassigned")
             max_duration = group["Hours"].max()
             station_severity, _, _, _ = _severity_color(max_duration)
-            color = station_severity  # "red" / "orange" / "green" - màu marker trên bản đồ
+            color = station_severity  # "red" / "orange" / "yellow" - màu marker trên bản đồ
 
             # Sắp xếp theo thời gian tồn đọng CAO -> THẤP
             group_sorted = group.sort_values("Hours", ascending=False)
@@ -210,7 +229,6 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
                 _, bg_color, border_color, text_color = _severity_color(row["Hours"])
 
                 cp_id = str(row["Charge Point ID"])
-
                 # Cảnh báo riêng cho ticket SẮP quá hạn (45h <= tồn < 48h) - còn ~3h
                 # nữa sẽ chuyển sang mức "đỏ quá hạn", cần Điều phối thúc kỹ thuật xử lý gấp
                 near_overdue_html = ""
@@ -251,7 +269,7 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
                 """
 
             gmap_url = f"https://www.google.com/maps?q={lat},{lng}"
-            header_color = {"red": "#bd1f1f", "orange": "#d4611e", "green": "#32b343"}.get(color, "#3498db")
+            header_color = {"red": "#b32a1b", "orange": "#ce6b15", "green": "#26ac43"}.get(color, "#3498db")
             popup_html = f"""
             <div style="font-family:'Segoe UI',Arial,sans-serif;width:270px;max-width:82vw;box-sizing:border-box;">
                 <div style="background:{header_color};margin:-13px -13px 10px -13px;padding:10px 14px;
@@ -260,15 +278,8 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
                        style="color:#fff;text-decoration:none;font-size:15px;font-weight:700;">
                         📍 {station_code}
                     </a>
-                    <div style="color:rgba(255,255,255,.92);font-size:12px;margin-top:3px;
-                                display:flex;align-items:center;gap:6px;">
-                        <span>🧑‍🔧 {tech_name}</span>
-                        <button type="button" class="edit-tech-btn" data-station="{core_code}"
-                                data-current-tech="{tech_name}"
-                                style="background:rgba(255,255,255,.25);border:none;color:#fff;
-                                       border-radius:4px;padding:1px 6px;font-size:11px;cursor:pointer;">
-                            ✏️
-                        </button>
+                    <div style="color:rgba(255,255,255,.92);font-size:12px;margin-top:3px;">
+                        🧑‍🔧 {tech_name}
                     </div>
                 </div>
                 <div style="max-height:250px;overflow-y:auto;padding-right:4px;margin-right:-4px;">
@@ -295,7 +306,9 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
     return {
         "stations": stations,
         "total_tickets": total_tickets_raw,
+        "with_coords_count": total_tickets_raw - missing_count,
         "missing_count": missing_count,
+        "missing_coord_tickets": missing_coord_tickets or [],
         "filtered_north": filtered_north_count,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
         "fetch_success": fetch_success,
@@ -348,15 +361,16 @@ async def build_station_markers():
     df_tickets, any_success = await fetch_live_tickets()
 
     total_tickets = 0 if df_tickets.empty else len(df_tickets)
-    missing_count = 0
     filtered_north_count = 0
+    missing_coord_tickets = []
 
     if not df_tickets.empty:
-        df_tickets, filtered_north_count = _apply_south_filter_and_coords(df_tickets, coords_map)
+        df_tickets, filtered_north_count, missing_coord_tickets = _apply_south_filter_and_coords(df_tickets, coords_map)
 
     payload = _build_station_payload(
         df_tickets, cp_model_map, tech_map, region_map,
-        total_tickets, missing_count, filtered_north_count, any_success,
+        total_tickets, len(missing_coord_tickets), filtered_north_count, any_success,
+        missing_coord_tickets=missing_coord_tickets,
     )
     print(f"[+] Hoàn tất build markers: {len(payload['stations'])} trạm, {total_tickets} tickets ban đầu.")
     return payload
@@ -436,22 +450,24 @@ async def refresh_all_ccts_data():
     df_tickets, any_success = await fetch_live_tickets()
 
     total_tickets = 0 if df_tickets.empty else len(df_tickets)
-    missing_count = 0
     filtered_north_count = 0
+    missing_coord_tickets = []
     df_filtered = df_tickets
 
     if not df_tickets.empty:
-        df_filtered, filtered_north_count = _apply_south_filter_and_coords(df_tickets, coords_map)
+        df_filtered, filtered_north_count, missing_coord_tickets = _apply_south_filter_and_coords(df_tickets, coords_map)
 
     station_payload = _build_station_payload(
         df_filtered, cp_model_map, tech_map, region_map,
-        total_tickets, missing_count, filtered_north_count, any_success,
+        total_tickets, len(missing_coord_tickets), filtered_north_count, any_success,
+        missing_coord_tickets=missing_coord_tickets,
     )
     ticket_rows = _build_ticket_rows(df_filtered, cp_model_map, tech_map, region_map)
     tech_stats = await build_tech_performance_stats(station_payload["stations"])
 
     print(f"[+] Hoàn tất chu kỳ làm mới: {len(station_payload['stations'])} trạm, "
-          f"{total_tickets} ticket mở, {len(ticket_rows)} dòng ticket chi tiết.")
+          f"{total_tickets} ticket mở, {len(ticket_rows)} dòng ticket chi tiết, "
+          f"{len(missing_coord_tickets)} ticket thiếu toạ độ.")
 
     return station_payload, tech_stats, ticket_rows
 
