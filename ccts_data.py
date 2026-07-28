@@ -10,6 +10,7 @@ thay vì xoá sạch bản đồ.
 """
 
 import os
+import re
 import json
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -53,6 +54,8 @@ def _severity_color(hours):
         return "orange", "#ffca9c", "#ce6b15", "#ce6b15"
     else:
         return "green", "#93ffab", "#26ac43", "#26ac43"
+
+
 
 
 def get_static_data():
@@ -130,6 +133,7 @@ def _process_raw_tickets(raw_tickets):
             "Ticket Duration": item.get("duration"),
             "Creator": item.get("ticketCreator"),
             "Source_Account": item.get("_source_account"),
+            "Address": item.get("address") or item.get("stationAddress") or "",
         })
     return processed
 
@@ -346,6 +350,7 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
             "tech_name": tech_name,
             "region": region,
             "is_near_overdue": 45 <= hours < 48,
+            "address": row.get("Address") or "",
         })
     return rows
 

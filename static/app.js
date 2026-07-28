@@ -6,7 +6,7 @@ const CURRENT_USERNAME = (document.body.dataset.username || '').trim();
 const CURRENT_ROLE = (document.body.dataset.role || '').trim().toLowerCase();
 
 const map = L.map('map').setView([12.25, 108.5], 6.3);
-// Nền bản đồ Esri/ArcGIS World Street Map
+// Nền bản đồ Google Maps
 L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
     subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
     attribution: '&copy; Google Maps',
@@ -20,27 +20,26 @@ let allStations = [];          // cache toàn bộ trạm nhận được gần 
 let selectedTechs = new Set(); // tên kỹ thuật viên đang được TICK CHỌN trong tag lọc (rỗng = hiện tất cả)
 let onlineUsernames = new Set(); // username (chữ thường) đang online
 
-// ---------- Icon trạm sạc: ghim giọt nước cổ điển (giống Folium mặc định) ----------
+// ---------- Icon trạm sạc: ghim giọt nước cổ điển ----------
 function stationIcon(color, hasNearOverdue) {
-    const colorMap = { red: '#b32a1b', orange: '#ce6b15', green: '#26ac43' };
-    const fill = colorMap[color] || '#3498db';
+    const colorMap = { red: '#dc2626', orange: '#ea580c', green: '#16a34a' };
+    const fill = colorMap[color] || '#3b82f6';
 
-    // Icon đồng hồ to hơn: width/height: 22px, font-size: 13px
     const warningBadge = hasNearOverdue ? `
-        <div style="position:absolute; top:-8px; right:-10px; width:22px; height:22px; border-radius:50%;
-                    background:#2c3e50; color:#ffd166; display:flex; align-items:center; justify-content:center;
-                    font-size:13px; border:2px solid #fff; box-shadow:0 2px 5px rgba(0,0,0,.5);
+        <div style="position:absolute; top:-9px; right:-11px; width:20px; height:20px; border-radius:50%;
+                    background:#1e293b; color:#fbbf24; display:flex; align-items:center; justify-content:center;
+                    font-size:11px; border:2px solid #fff; box-shadow:0 2px 6px rgba(0,0,0,.45);
                     animation:unassigned-pulse 1.4s infinite; z-index:10;">⏰</div>
     ` : '';
 
     const htmlContent = `
-        <div style="position:relative; width:15px; height:21px;">
-            <svg width="15" height="21" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
+        <div style="position:relative; width:16px; height:22px;">
+            <svg width="16" height="22" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
                 <path d="M15 0C6.7 0 0 6.7 0 15c0 11.25 15 27 15 27s15-15.75 15-27C30 6.7 23.3 0 15 0z"
-                      fill="${fill}" stroke="rgba(0,0,0,.35)" stroke-width="1"/>
-                <circle cx="15" cy="15" r="9.5" fill="#ffffff"/>
-                <text x="15" y="19.5" font-size="13" font-weight="700" text-anchor="middle"
-                      font-family="Georgia, serif" fill="${fill}">i</text>
+                      fill="${fill}" stroke="rgba(0,0,0,.3)" stroke-width="1.2"/>
+                <circle cx="15" cy="15" r="9" fill="#ffffff"/>
+                <text x="15" y="19" font-size="12" font-weight="700" text-anchor="middle"
+                      font-family="Inter, system-ui, sans-serif" fill="${fill}">i</text>
             </svg>
             ${warningBadge}
         </div>`;
@@ -48,21 +47,22 @@ function stationIcon(color, hasNearOverdue) {
     return L.divIcon({
         className: '',
         html: htmlContent,
-        iconSize: [15, 21],      // Kích thước ghim giữ nguyên
-        iconAnchor: [7.5, 21],   // Neo đúng chân ghim
-        popupAnchor: [0, -19],   // Vị trí mở popup
+        iconSize: [16, 22],
+        iconAnchor: [8, 22],
+        popupAnchor: [0, -20],
     });
 }
+
 function unassignedStationIcon(hasNearOverdue) {
     const warningBadge = hasNearOverdue ? `
-        <div style="position:absolute;top:-3px;right:-5px;width:17px;height:17px;border-radius:50%;
-                    background:#2c3e50;color:#ffd166;display:flex;align-items:center;justify-content:center;
-                    font-size:10px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.5);">⏰</div>
+        <div style="position:absolute;top:-4px;right:-6px;width:16px;height:16px;border-radius:50%;
+                    background:#1e293b;color:#fbbf24;display:flex;align-items:center;justify-content:center;
+                    font-size:9px;border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.45);">⏰</div>
     ` : '';
     const svg = `
-        <div style="width:30px;height:30px;display:flex;align-items:center;justify-content:center;
-                    color:#e74c3c;font-size:32px;font-weight:900;line-height:1;
-                    filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+        <div style="width:28px;height:28px;display:flex;align-items:center;justify-content:center;
+                    color:#dc2626;font-size:28px;font-weight:900;line-height:1;
+                    filter: drop-shadow(0 2px 5px rgba(0,0,0,0.45));
                     animation: unassigned-pulse 1.5s infinite;">
             !
             ${warningBadge}
@@ -72,7 +72,7 @@ function unassignedStationIcon(hasNearOverdue) {
         html: svg,
         iconSize: [20, 20],
         iconAnchor: [10, 10],
-        popupAnchor: [0, -15],
+        popupAnchor: [0, -14],
     });
 }
 
@@ -80,7 +80,7 @@ async function triggerManualRefresh() {
     const btn = document.getElementById('btn-manual-refresh');
     if (btn) {
         btn.disabled = true;
-        btn.textContent = '⏳ Đang cào dữ liệu...';
+        btn.textContent = '⏳';
     }
     try {
         const res = await fetch('/api/admin/refresh-stations', { method: 'POST' });
@@ -99,6 +99,7 @@ async function triggerManualRefresh() {
         }
     }
 }
+
 // Vẽ marker trạm dựa trên allStations + bộ lọc kỹ thuật viên hiện tại (selectedTechs)
 // + bộ lọc loại trạm (showChargers/showBss)
 let showChargerStations = true;
@@ -115,7 +116,7 @@ function applyStationFilter() {
     stations.forEach((s) => {
         const icon = s.is_unassigned ? unassignedStationIcon(s.has_near_overdue) : stationIcon(s.color, s.has_near_overdue);
         const marker = L.marker([s.lat, s.lng], { icon });
-        marker.bindPopup(s.popup_html, { maxWidth: 320, maxHeight: 340 });
+        marker.bindPopup(s.popup_html, { maxWidth: 340, maxHeight: 360, className: 'station-popup' });
         marker._stationCode = s.station_code;
         marker.addTo(stationLayer);
     });
@@ -150,20 +151,20 @@ function initials(name) {
 }
 
 const ROLE_COLORS = {
-    'kỹ thuật': '#1f77b4',
-    'điều phối khu vực': '#2ca02c',
-    'điều hành': '#e67e22',
-    'giám đốc': '#8e44ad',
-    'admin': '#2c3e50',
+    'kỹ thuật': '#2563eb',
+    'điều phối khu vực': '#16a34a',
+    'điều hành': '#ea580c',
+    'giám đốc': '#7c3aed',
+    'admin': '#1e293b',
 };
 
 function staffIcon(name, role) {
-    const color = ROLE_COLORS[(role || '').trim().toLowerCase()] || '#7f8c8d';
+    const color = ROLE_COLORS[(role || '').trim().toLowerCase()] || '#64748b';
     return L.divIcon({
         className: '',
-        html: `<div class="staff-avatar" style="width:30px;height:30px;background:${color};">${initials(name)}</div>`,
-        iconSize: [30, 30],
-        iconAnchor: [15, 15],
+        html: `<div class="staff-avatar" style="width:32px;height:32px;background:${color};font-size:12px;">${initials(name)}</div>`,
+        iconSize: [32, 32],
+        iconAnchor: [16, 16],
     });
 }
 
@@ -190,51 +191,58 @@ function formatDuration(sinceEpochSeconds) {
 
 function buildStaffPopup(loc) {
     const gmapUrl = `https://www.google.com/maps?q=${loc.lat},${loc.lng}`;
-    const color = ROLE_COLORS[(loc.role || '').trim().toLowerCase()] || '#7f8c8d';
+    const color = ROLE_COLORS[(loc.role || '').trim().toLowerCase()] || '#64748b';
+
     let workingNote = '';
     if (loc.nearby_station) {
         const durationText = loc.nearby_since ? formatDuration(loc.nearby_since) : '';
-        workingNote = `<div style="margin-top:8px;padding:7px 10px;background:#fff3cd;border-radius:6px;
-                    border-left:3px solid #e67e22;font-size:12px;">
-            🔧 Đang sửa trạm <b>${loc.nearby_station}</b>${durationText ? `<br><span style="color:#8a6d3b;">Đã ${durationText}</span>` : ''}
+        workingNote = `
+        <div style="margin-top:10px;padding:10px 12px;background:#fff7ed;border-radius:8px;
+                    border-left:3px solid #ea580c;font-size:12.5px;line-height:1.45;">
+            <div style="font-weight:600;color:#c2410c;margin-bottom:2px;">🔧 Đang sửa chữa</div>
+            Trạm <b>${loc.nearby_station}</b>
+            ${durationText ? `<div style="color:#9a3412;margin-top:3px;font-size:12px;">Đã ${durationText}</div>` : ''}
         </div>`;
     }
 
     let statsHtml = '';
     if ((loc.role || '').trim().toLowerCase() === 'kỹ thuật') {
         statsHtml = `
-        <div style="margin-top:8px;display:flex;gap:6px;">
-            <div style="flex:1;background:#f4f6f8;border-radius:6px;padding:6px;text-align:center;">
-                <div style="font-size:15px;font-weight:700;color:#2c3e50;">${loc.open_count ?? 0}</div>
-                <div style="font-size:10px;color:#888;">🔧 Đang tồn</div>
+        <div style="margin-top:12px;display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;">
+            <div style="background:#f1f5f9;border-radius:8px;padding:8px 4px;text-align:center;">
+                <div style="font-size:16px;font-weight:700;color:#1e293b;line-height:1.2;">${loc.open_count ?? 0}</div>
+                <div style="font-size:10px;color:#64748b;margin-top:2px;">🔧 Đang tồn</div>
             </div>
-            <div style="flex:1;background:#f4f6f8;border-radius:6px;padding:6px;text-align:center;">
-                <div style="font-size:15px;font-weight:700;color:#27ae60;">${loc.closed_today ?? 0}</div>
-                <div style="font-size:10px;color:#888;">✅ Hôm nay</div>
+            <div style="background:#f0fdf4;border-radius:8px;padding:8px 4px;text-align:center;">
+                <div style="font-size:16px;font-weight:700;color:#16a34a;line-height:1.2;">${loc.closed_today ?? 0}</div>
+                <div style="font-size:10px;color:#64748b;margin-top:2px;">✅ Hôm nay</div>
             </div>
-            <div style="flex:1;background:#f4f6f8;border-radius:6px;padding:6px;text-align:center;">
-                <div style="font-size:15px;font-weight:700;color:#888;">${loc.closed_yesterday ?? 0}</div>
-                <div style="font-size:10px;color:#888;">✅ Hôm qua</div>
+            <div style="background:#f8fafc;border-radius:8px;padding:8px 4px;text-align:center;">
+                <div style="font-size:16px;font-weight:700;color:#64748b;line-height:1.2;">${loc.closed_yesterday ?? 0}</div>
+                <div style="font-size:10px;color:#94a3b8;margin-top:2px;">✅ Hôm qua</div>
             </div>
         </div>`;
     }
 
     return `
-    <div style="font-family:'Segoe UI',Arial,sans-serif;width:230px;max-width:80vw;box-sizing:border-box;">
-        <div style="background:${color};margin:-13px -13px 10px -13px;padding:9px 12px;border-radius:5px 5px 0 0;">
-            <div style="color:#fff;font-weight:700;font-size:14px;">${loc.full_name}</div>
-            <div style="color:rgba(255,255,255,.9);font-size:11.5px;margin-top:2px;">
+    <div style="font-family:Inter,system-ui,-apple-system,sans-serif;width:240px;max-width:85vw;box-sizing:border-box;padding:2px;">
+        <div style="background:${color};margin:-14px -14px 12px -14px;padding:12px 14px;border-radius:6px 6px 0 0;">
+            <div style="color:#fff;font-weight:600;font-size:14.5px;letter-spacing:-0.01em;">${loc.full_name}</div>
+            <div style="color:rgba(255,255,255,.85);font-size:12px;margin-top:3px;">
                 ${loc.role || ''}${loc.region ? ' · ' + loc.region : ''}
             </div>
         </div>
         <a href="${gmapUrl}" target="_blank" rel="noopener noreferrer"
-           style="font-size:12px;color:#3498db;text-decoration:none;">🗺️ Xem trên Google Maps</a>
+           style="display:inline-flex;align-items:center;gap:4px;font-size:12.5px;color:#2563eb;
+                  text-decoration:none;font-weight:500;padding:4px 0;">
+            🗺️ Xem trên Google Maps
+        </a>
         ${statsHtml}
         ${workingNote}
     </div>`;
 }
 
-// Di chuyển marker mượt bằng nội suy tuyến tính (giống hiệu ứng "lướt" của Google Maps)
+// Di chuyển marker mượt bằng nội suy tuyến tính
 function animateMarkerTo(marker, newLatLng, durationMs = 1200) {
     const start = marker.getLatLng();
     const startTime = performance.now();
@@ -262,7 +270,7 @@ function upsertStaffMarker(loc) {
         animateMarkerTo(entry.marker, latlng, 1200);
     }
 
-    entry.marker.bindPopup(buildStaffPopup(loc));
+    entry.marker.bindPopup(buildStaffPopup(loc), { maxWidth: 280, className: 'staff-popup' });
 
     if (loc.nearby_station) {
         const wrenchLatLng = L.latLng(loc.lat + 0.00015, loc.lng + 0.00015);
@@ -272,21 +280,21 @@ function upsertStaffMarker(loc) {
             animateMarkerTo(entry.wrenchMarker, wrenchLatLng, 1200);
         }
         const durationText = loc.nearby_since ? ` (đã ${formatDuration(loc.nearby_since)})` : '';
-        entry.wrenchMarker.bindTooltip(`🔧 ${loc.full_name} đang sửa trạm ${loc.nearby_station}${durationText}`);
+        entry.wrenchMarker.bindTooltip(`🔧 ${loc.full_name} đang sửa trạm ${loc.nearby_station}${durationText}`, {
+            className: 'wrench-tooltip',
+            direction: 'top',
+            offset: [0, -8],
+        });
     } else if (entry.wrenchMarker) {
         map.removeLayer(entry.wrenchMarker);
         entry.wrenchMarker = null;
     }
 }
 
-// ---------- Tag lọc theo kỹ thuật viên (gom theo khu vực + chấm online/offline) ----------
+// ---------- Tag lọc theo kỹ thuật viên (accordion theo khu vực) ----------
 const techPanel = document.getElementById('tech-filter-panel');
-const techFilterBtn = document.getElementById('tech-filter-btn');
+const techFilterHandle = document.getElementById('tech-filter-handle');
 
-// Panel này nằm ĐÈ LÊN bản đồ Leaflet, nên mặc định cuộn chuột (wheel) bên
-// trong nó sẽ bị Leaflet bắt và zoom bản đồ thay vì cuộn danh sách. Đây là
-// API chính thức của Leaflet dành riêng cho việc này (control/popup nổi trên
-// bản đồ cần tự cuộn nội bộ).
 if (techPanel) {
     L.DomEvent.disableScrollPropagation(techPanel);
     L.DomEvent.disableClickPropagation(techPanel);
@@ -295,49 +303,82 @@ if (techPanel) {
 function techDotHtml(online) {
     if (online === true) return '<span class="conn-dot ok" title="Đang online"></span>';
     if (online === false) return '<span class="conn-dot" title="Đang offline"></span>';
-    return '<span class="conn-dot" style="background:#bbb;" title="Không xác định"></span>';
+    return '<span class="conn-dot" style="background:#94a3b8;" title="Không xác định"></span>';
+}
+
+function isTechFilterOpen() {
+    return techPanel && techPanel.classList.contains('open');
+}
+
+function setTechFilterOpen(open) {
+    if (!techPanel) return;
+    techPanel.classList.toggle('open', open);
+    techPanel.style.display = open ? 'flex' : 'none';
+    if (techFilterHandle) techFilterHandle.classList.toggle('open', open);
 }
 
 function renderTechPanel(data) {
     const regions = data.regions || {};
-    let html = '';
+    let bodyHtml = '';
+
     Object.keys(regions).sort().forEach((region) => {
-        const techNames = regions[region].map((item) => item.tech_name);
-        html += `
-        <div class="region-group">
-            <div class="region-title">
-                <label style="padding:0;margin:0;display:flex;align-items:center;gap:6px;">
-                    <input type="checkbox" class="region-checkbox" data-region="${region}">
-                    <span>📍 ${region}</span>
-                </label>
-            </div>`;
-        regions[region].forEach((item) => {
+        const techs = regions[region];
+        const techNames = techs.map((item) => item.tech_name);
+        bodyHtml += `
+        <div class="region-group" data-region="${region}">
+            <div class="region-header">
+                <input type="checkbox" class="region-check region-checkbox" data-region="${region}" onclick="event.stopPropagation()">
+                <span>📍 ${region}</span>
+                <span style="font-size:11.5px;color:#94a3b8;font-weight:500;">${techs.length}</span>
+                <span class="chevron">▶</span>
+            </div>
+            <div class="region-techs">`;
+        techs.forEach((item) => {
             const uname = (item.username || '').toLowerCase();
-            html += `
-            <label data-tech="${item.tech_name}" ${uname ? `data-username="${uname}"` : ''}>
-                <input type="checkbox" class="tech-checkbox" data-region="${region}" value="${item.tech_name}">
-                ${techDotHtml(item.online)} ${item.tech_name}
-            </label>`;
+            bodyHtml += `
+                <label data-tech="${item.tech_name}" ${uname ? `data-username="${uname}"` : ''}>
+                    <input type="checkbox" class="tech-checkbox" data-region="${region}" value="${item.tech_name}">
+                    ${techDotHtml(item.online)} ${item.tech_name}
+                </label>`;
         });
-        html += `</div>`;
+        bodyHtml += `</div></div>`;
     });
 
-    // "Unassigned" chỉ 1 mục duy nhất, dùng chung cho toàn bộ khu vực (không lặp lại)
     if (data.unassigned) {
-        html += `<div class="region-group"><div class="region-title">🆕 Khác</div>
-            <label data-tech="Unassigned">
-                <input type="checkbox" class="tech-checkbox" value="Unassigned">
-                ${techDotHtml(null)} Unassigned
-            </label>
+        bodyHtml += `
+        <div class="region-group" data-region="__unassigned__">
+            <div class="region-header">
+                <input type="checkbox" class="region-check region-checkbox" data-region="__unassigned__" onclick="event.stopPropagation()">
+                <span>🆕 Khác</span>
+                <span class="chevron">▶</span>
+            </div>
+            <div class="region-techs">
+                <label data-tech="Unassigned">
+                    <input type="checkbox" class="tech-checkbox" data-region="__unassigned__" value="Unassigned">
+                    ${techDotHtml(null)} Unassigned
+                </label>
+            </div>
         </div>`;
     }
 
-    html += `
-    <div id="tech-filter-actions">
-        <button id="tech-select-all">Chọn tất cả</button>
-        <button id="tech-clear-all">Bỏ chọn</button>
-    </div>`;
-    techPanel.innerHTML = html;
+    techPanel.innerHTML = `
+        <div class="panel-head">
+            <h3>🧑‍🔧 Lọc kỹ thuật viên</h3>
+            <div class="sub">Chọn khu vực để mở danh sách · Tick để lọc bản đồ</div>
+        </div>
+        <div class="panel-body">${bodyHtml}</div>
+        <div id="tech-filter-actions">
+            <button id="tech-select-all">Chọn tất cả</button>
+            <button id="tech-clear-all">Bỏ chọn</button>
+        </div>`;
+
+    // Accordion: click region header (except checkbox) to expand/collapse
+    techPanel.querySelectorAll('.region-header').forEach((header) => {
+        header.addEventListener('click', (e) => {
+            if (e.target.classList.contains('region-check') || e.target.classList.contains('region-checkbox')) return;
+            header.parentElement.classList.toggle('expanded');
+        });
+    });
 
     techPanel.querySelectorAll('.tech-checkbox').forEach((cb) => {
         cb.checked = selectedTechs.has(cb.value);
@@ -349,7 +390,6 @@ function renderTechPanel(data) {
         });
     });
 
-    // Đồng bộ trạng thái tick ban đầu của checkbox "chọn cả khu vực"
     techPanel.querySelectorAll('.region-checkbox').forEach((regionCb) => {
         syncRegionCheckboxState(regionCb.dataset.region);
         regionCb.addEventListener('change', () => {
@@ -359,6 +399,11 @@ function renderTechPanel(data) {
                 if (regionCb.checked) selectedTechs.add(cb.value);
                 else selectedTechs.delete(cb.value);
             });
+            // Auto-expand when selecting whole region
+            if (regionCb.checked) {
+                const group = regionCb.closest('.region-group');
+                if (group) group.classList.add('expanded');
+            }
             applyStationFilter();
         });
     });
@@ -372,6 +417,7 @@ function renderTechPanel(data) {
                 selectedTechs.add(cb.value);
             });
             techPanel.querySelectorAll('.region-checkbox').forEach((cb) => { cb.checked = true; });
+            techPanel.querySelectorAll('.region-group').forEach((g) => g.classList.add('expanded'));
             applyStationFilter();
         });
     }
@@ -387,11 +433,8 @@ function renderTechPanel(data) {
     updateTechPanelPresence();
 }
 
-// Checkbox "chọn cả khu vực" tự động: tick nếu TẤT CẢ kỹ thuật trong khu vực
-// đó đang được chọn, bỏ tick nếu KHÔNG CÓ ai được chọn, và ở trạng thái
-// "một phần" (indeterminate) nếu chỉ chọn 1 số người trong khu vực.
 function syncRegionCheckboxState(region) {
-    if (!region) return;
+    if (!region || !techPanel) return;
     const regionCb = techPanel.querySelector(`.region-checkbox[data-region="${region}"]`);
     if (!regionCb) return;
     const techCbs = [...techPanel.querySelectorAll(`.tech-checkbox[data-region="${region}"]`)];
@@ -408,7 +451,7 @@ function updateTechPanelPresence() {
         if (!dot) return;
         const online = onlineUsernames.has(uname);
         dot.classList.toggle('ok', online);
-        dot.style.background = online ? '' : '#e74c3c';
+        dot.style.background = online ? '' : '#ef4444';
         dot.title = online ? 'Đang online' : 'Đang offline';
     });
 }
@@ -418,27 +461,28 @@ function loadTechnicianPanel() {
         .then((r) => r.json())
         .then(renderTechPanel)
         .catch(() => {
-            techPanel.innerHTML = '<div style="padding:10px;font-size:13px;color:#999;">Không tải được danh sách kỹ thuật viên.</div>';
+            techPanel.innerHTML = '<div style="padding:20px;font-size:13.5px;color:#94a3b8;text-align:center;">Không tải được danh sách kỹ thuật viên.</div>';
         });
 }
 
-if (techFilterBtn) {
-    techFilterBtn.addEventListener('click', (e) => {
-        e.stopPropagation(); // để listener "click ra ngoài" bên dưới không đóng lại ngay lập tức
-        const isOpen = techPanel.style.display === 'block';
-        techPanel.style.display = isOpen ? 'none' : 'block';
-        if (!isOpen && !techPanel.dataset.loaded) {
+if (techFilterHandle) {
+    techFilterHandle.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const willOpen = !isTechFilterOpen();
+        setTechFilterOpen(willOpen);
+        if (willOpen && !techPanel.dataset.loaded) {
             techPanel.dataset.loaded = '1';
             loadTechnicianPanel();
         }
     });
 }
 
-// Bấm ra ngoài tag lọc kỹ thuật viên -> chỉ ẨN panel, KHÔNG xoá bộ lọc đã chọn
+// Click outside closes panel (but not when clicking handle)
 document.addEventListener('click', (e) => {
-    if (techPanel && techPanel.style.display === 'block' && !techPanel.contains(e.target) && e.target !== techFilterBtn) {
-        techPanel.style.display = 'none';
-    }
+    if (!isTechFilterOpen()) return;
+    if (techPanel.contains(e.target)) return;
+    if (techFilterHandle && techFilterHandle.contains(e.target)) return;
+    setTechFilterOpen(false);
 });
 
 // ---------- Tìm kiếm trạm / kỹ thuật viên ----------
@@ -515,7 +559,6 @@ if (searchResults) {
         if (type === 'station') {
             flyToStation(value);
         } else if (type === 'tech') {
-            // Tìm 1 kỹ thuật đang online có tên trùng khớp để bay tới vị trí của họ
             const match = Object.entries(staffMarkers).find(([uname, entry]) => {
                 const popupContent = entry.marker.getPopup()?.getContent() || '';
                 return popupContent.includes(value);
@@ -527,7 +570,7 @@ if (searchResults) {
                 selectedTechs = new Set([value]);
                 applyStationFilter();
                 if (techPanel) {
-                    techPanel.style.display = 'block';
+                    setTechFilterOpen(true);
                     if (!techPanel.dataset.loaded) { techPanel.dataset.loaded = '1'; loadTechnicianPanel(); }
                 }
             }
@@ -556,12 +599,22 @@ if (myLocationBtn) {
     });
 }
 
-// ---------- Panel "Danh sách Ticket" (thu gọn bên phải) ----------
+// ---------- Panel "Danh sách Ticket" ----------
 const ticketPanel = document.getElementById('ticket-panel');
 const ticketPanelHandle = document.getElementById('ticket-panel-handle');
 const ticketPanelClose = document.getElementById('ticket-panel-close');
-const ticketPanelTechList = document.getElementById('ticket-panel-tech-list');
 const ticketPanelTableWrap = document.getElementById('ticket-panel-table-wrap');
+const ticketTechSearch = document.getElementById('ticket-tech-search');
+const ticketTechDropdown = document.getElementById('ticket-tech-dropdown');
+const ticketTechSelectWrap = document.getElementById('ticket-tech-select-wrap');
+const ticketTechClear = document.getElementById('ticket-tech-clear');
+const ticketSelectedInfo = document.getElementById('ticket-selected-info');
+const ticketSelName = document.getElementById('ticket-sel-name');
+const ticketSelCount = document.getElementById('ticket-sel-count');
+
+let ticketTechData = null;   // raw data from /api/technicians
+let ticketSelectedTech = null;
+let ticketPanelLoaded = false;
 
 if (ticketPanel) {
     L.DomEvent.disableScrollPropagation(ticketPanel);
@@ -572,8 +625,8 @@ function toggleTicketPanel(forceOpen) {
     const shouldOpen = forceOpen !== undefined ? forceOpen : !ticketPanel.classList.contains('open');
     ticketPanel.classList.toggle('open', shouldOpen);
     ticketPanelHandle.style.display = shouldOpen ? 'none' : 'block';
-    if (shouldOpen && !ticketPanelTechList.dataset.loaded) {
-        ticketPanelTechList.dataset.loaded = '1';
+    if (shouldOpen && !ticketPanelLoaded) {
+        ticketPanelLoaded = true;
         loadTicketPanelTechList();
     }
 }
@@ -581,24 +634,54 @@ function toggleTicketPanel(forceOpen) {
 if (ticketPanelHandle) ticketPanelHandle.addEventListener('click', () => toggleTicketPanel(true));
 if (ticketPanelClose) ticketPanelClose.addEventListener('click', () => toggleTicketPanel(false));
 
+function durationCellHtml(t) {
+    const hours = Number(t.hours) || 0;
+    let color = '#16a34a';      // < 24h green
+    let bg = '#f0fdf4';
+    let label = '';
+    if (hours > 48) {
+        color = '#dc2626';
+        bg = '#fef2f2';
+        label = 'Overdue';
+    } else if (hours >= 24) {
+        color = '#ea580c';
+        bg = '#fff7ed';
+        label = 'Nguy hiểm';
+    }
+    const warnBadge = t.is_near_overdue
+        ? `<div style="margin-top:3px;color:#c2410c;font-weight:600;font-size:10.5px;">⏰ Sắp quá hạn (~${(48 - hours).toFixed(1)}h)</div>`
+        : (label && hours > 48
+            ? `<div style="margin-top:3px;color:${color};font-weight:600;font-size:10.5px;">${label}</div>`
+            : '');
+    return `<td style="white-space:nowrap;background:${bg} !important;">
+        <span style="color:${color};font-weight:700;">${t.duration ?? ''}</span>
+        ${warnBadge}
+    </td>`;
+}
+
 function renderTicketTable(tickets, techName) {
     if (!tickets || tickets.length === 0) {
-        ticketPanelTableWrap.innerHTML = `<div id="ticket-panel-empty">Không có ticket nào cho "${techName}".</div>`;
+        ticketPanelTableWrap.innerHTML = `
+            <div id="ticket-panel-empty">
+                <div class="empty-icon">✅</div>
+                Không có ticket nào cho "<b>${techName}</b>".
+            </div>`;
         return;
     }
     const rowsHtml = tickets.map((t) => {
-        const warnStyle = t.is_near_overdue ? 'background:#fff0d9 !important;' : '';
-        const warnBadge = t.is_near_overdue
-            ? `<br><span style="color:#d35400;font-weight:700;font-size:10.5px;">⏰ Sắp quá hạn (còn ~${(48 - t.hours).toFixed(1)}h)</span>`
-            : '';
+        const hours = Number(t.hours) || 0;
+        const rowBg = hours > 48
+            ? 'background:#fef2f2 !important;'
+            : (hours >= 24 ? 'background:#fffbeb !important;' : '');
         return `
-        <tr style="${warnStyle}">
-            <td>${t.ticket_id ?? ''}</td>
-            <td>${t.duration ?? ''}${warnBadge}</td>
-            <td>${t.is_bss_station ? '🔋' : '⚡'} ${t.station_code ?? ''}</td>
-            <td>${t.is_bss ? '🔋' : '⚡'} ${t.cp_id ?? ''}</td>
-            <td>${t.status ?? ''}</td>
-            <td style="max-width:220px;white-space:normal;">${t.description ?? ''}</td>
+        <tr style="${rowBg}">
+            <td style="font-weight:500;white-space:nowrap;">${t.ticket_id ?? ''}</td>
+            ${durationCellHtml(t)}
+            <td style="white-space:nowrap;">${t.station_code ?? ''}</td>
+            <td style="white-space:nowrap;">${t.cp_id ?? ''}</td>
+            <td style="white-space:nowrap;">${t.status ?? ''}</td>
+            <td style="max-width:320px;white-space:normal;line-height:1.45;">${t.description ?? ''}</td>
+            <td style="max-width:280px;white-space:normal;line-height:1.45;">${t.address ?? ''}</td>
         </tr>
     `;
     }).join('');
@@ -613,6 +696,7 @@ function renderTicketTable(tickets, techName) {
                     <th>SN Trụ</th>
                     <th>Trạng thái</th>
                     <th>Mô tả lỗi</th>
+                    <th>Địa chỉ</th>
                 </tr>
             </thead>
             <tbody>${rowsHtml}</tbody>
@@ -620,70 +704,178 @@ function renderTicketTable(tickets, techName) {
     `;
 }
 
-function loadTechTickets(techName, rowEl) {
-    ticketPanelTechList.querySelectorAll('.tech-row').forEach((r) => r.classList.remove('active'));
-    if (rowEl) rowEl.classList.add('active');
+function selectTicketTech(techName, openCount) {
+    ticketSelectedTech = techName;
+    if (ticketTechSearch) ticketTechSearch.value = techName;
+    if (ticketTechSelectWrap) ticketTechSelectWrap.classList.add('has-value');
+    closeTicketTechDropdown();
 
-    ticketPanelTableWrap.innerHTML = '<div id="ticket-panel-empty">Đang tải...</div>';
+    if (ticketSelectedInfo) {
+        ticketSelectedInfo.style.display = 'flex';
+        if (ticketSelName) ticketSelName.textContent = techName;
+        if (ticketSelCount) ticketSelCount.textContent = `🔧 ${openCount ?? 0}`;
+    }
+
+    ticketPanelTableWrap.innerHTML = '<div id="ticket-panel-empty"><div class="empty-icon">⏳</div>Đang tải...</div>';
     fetch(`/api/tech-tickets/${encodeURIComponent(techName)}`)
         .then((r) => r.json())
-        .then((data) => renderTicketTable(data.tickets, techName))
+        .then((data) => {
+            renderTicketTable(data.tickets, techName);
+            // update count from actual tickets if available
+            if (ticketSelCount && data.tickets) {
+                ticketSelCount.textContent = `🔧 ${data.tickets.length}`;
+            }
+        })
         .catch(() => {
-            ticketPanelTableWrap.innerHTML = '<div id="ticket-panel-empty">Không tải được danh sách ticket.</div>';
+            ticketPanelTableWrap.innerHTML = '<div id="ticket-panel-empty"><div class="empty-icon">❌</div>Không tải được danh sách ticket.</div>';
         });
+}
+
+function closeTicketTechDropdown() {
+    if (ticketTechDropdown) ticketTechDropdown.classList.remove('open');
+}
+
+function renderTicketTechDropdown(filterText) {
+    if (!ticketTechDropdown || !ticketTechData) return;
+    const q = (filterText || '').trim().toLowerCase();
+    const regions = ticketTechData.regions || {};
+    let html = '';
+    let totalShown = 0;
+
+    Object.keys(regions).sort().forEach((region) => {
+        const items = regions[region].filter((item) => {
+            if (!q) return true;
+            return (item.tech_name || '').toLowerCase().includes(q);
+        });
+        if (items.length === 0) return;
+        html += `<div class="region-group-label">📍 ${region}</div>`;
+        items.forEach((item) => {
+            const selected = item.tech_name === ticketSelectedTech ? ' selected' : '';
+            html += `
+            <div class="tech-option${selected}" data-tech="${item.tech_name}" data-count="${item.open_count ?? 0}">
+                <span>${techDotHtml(item.online)} ${item.tech_name}</span>
+                <span class="opt-stats">🔧 ${item.open_count ?? 0}</span>
+            </div>`;
+            totalShown++;
+        });
+    });
+
+    if (ticketTechData.unassigned) {
+        const name = 'Unassigned';
+        if (!q || name.toLowerCase().includes(q)) {
+            const selected = name === ticketSelectedTech ? ' selected' : '';
+            html += `<div class="region-group-label">🆕 Khác</div>
+                <div class="tech-option${selected}" data-tech="${name}" data-count="${ticketTechData.unassigned.open_count ?? 0}">
+                    <span>${name}</span>
+                    <span class="opt-stats">🔧 ${ticketTechData.unassigned.open_count ?? 0}</span>
+                </div>`;
+            totalShown++;
+        }
+    }
+
+    if (totalShown === 0) {
+        html = '<div class="empty-msg">Không tìm thấy kỹ thuật viên</div>';
+    }
+    ticketTechDropdown.innerHTML = html;
+    ticketTechDropdown.classList.add('open');
+
+    ticketTechDropdown.querySelectorAll('.tech-option').forEach((opt) => {
+        opt.addEventListener('click', () => {
+            selectTicketTech(opt.dataset.tech, parseInt(opt.dataset.count, 10) || 0);
+        });
+    });
 }
 
 function loadTicketPanelTechList() {
     fetch('/api/technicians')
         .then((r) => r.json())
         .then((data) => {
+            ticketTechData = data;
+            // Auto-select if only one tech
             const regions = data.regions || {};
-            let html = '';
-            Object.keys(regions).sort().forEach((region) => {
-                html += `<div class="region-label">📍 ${region}</div>`;
-                regions[region].forEach((item) => {
-                    html += `
-                    <div class="tech-row" data-tech="${item.tech_name}">
-                        <span>${techDotHtml(item.online)} ${item.tech_name}</span>
-                        <span class="stats">🔧${item.open_count ?? 0}</span>
-                    </div>`;
-                });
-            });
-            if (data.unassigned) {
-                html += `<div class="region-label">🆕 Khác</div>
-                    <div class="tech-row" data-tech="Unassigned">
-                        <span>Unassigned</span>
-                        <span class="stats">🔧${data.unassigned.open_count ?? 0}</span>
-                    </div>`;
-            }
-            ticketPanelTechList.innerHTML = html;
-
-            ticketPanelTechList.querySelectorAll('.tech-row').forEach((row) => {
-                row.addEventListener('click', () => loadTechTickets(row.dataset.tech, row));
-            });
-
-            // Kỹ thuật viên chỉ quản lý chính mình -> tự động mở luôn ticket của họ
-            const allTechNames = Object.values(regions).flat().map((i) => i.tech_name);
-            if (allTechNames.length === 1) {
-                const onlyRow = ticketPanelTechList.querySelector('.tech-row');
-                if (onlyRow) loadTechTickets(onlyRow.dataset.tech, onlyRow);
+            const allItems = Object.values(regions).flat();
+            if (allItems.length === 1) {
+                selectTicketTech(allItems[0].tech_name, allItems[0].open_count);
             }
         })
         .catch(() => {
-            ticketPanelTechList.innerHTML = '<div style="padding:12px;font-size:13px;color:#999;">Không tải được danh sách kỹ thuật viên.</div>';
+            ticketPanelTableWrap.innerHTML = '<div id="ticket-panel-empty"><div class="empty-icon">❌</div>Không tải được danh sách kỹ thuật viên.</div>';
         });
 }
+
+// Tech search input interactions
+if (ticketTechSearch) {
+    ticketTechSearch.addEventListener('focus', () => {
+        if (ticketTechData) renderTicketTechDropdown(ticketTechSearch.value);
+        else loadTicketPanelTechList();
+    });
+    ticketTechSearch.addEventListener('input', () => {
+        if (ticketTechSelectWrap) {
+            ticketTechSelectWrap.classList.toggle('has-value', !!ticketTechSearch.value);
+        }
+        renderTicketTechDropdown(ticketTechSearch.value);
+    });
+    ticketTechSearch.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            closeTicketTechDropdown();
+            ticketTechSearch.blur();
+        }
+    });
+}
+if (ticketTechClear) {
+    ticketTechClear.addEventListener('click', () => {
+        ticketSelectedTech = null;
+        if (ticketTechSearch) ticketTechSearch.value = '';
+        if (ticketTechSelectWrap) ticketTechSelectWrap.classList.remove('has-value');
+        if (ticketSelectedInfo) ticketSelectedInfo.style.display = 'none';
+        closeTicketTechDropdown();
+        ticketPanelTableWrap.innerHTML = `
+            <div id="ticket-panel-empty">
+                <div class="empty-icon">🧑‍🔧</div>
+                Chọn kỹ thuật viên ở trên để xem danh sách ticket.
+            </div>`;
+        if (ticketTechSearch) ticketTechSearch.focus();
+    });
+}
+document.addEventListener('click', (e) => {
+    if (ticketTechSelectWrap && !ticketTechSelectWrap.contains(e.target)) {
+        closeTicketTechDropdown();
+    }
+});
 
 // ---------- Badge "Sự cố đang mở" + panel trạm thiếu toạ độ ----------
 let missingCoordTickets = [];
 
+function formatUpdatedAt(iso) {
+    if (!iso) return '—';
+    try {
+        const d = new Date(iso);
+        if (isNaN(d.getTime())) return iso;
+        const pad = (n) => String(n).padStart(2, '0');
+        return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+    } catch (_) {
+        return iso;
+    }
+}
+
 function updateTicketBadge(data) {
     const el = document.getElementById('ticket-count');
-    if (!el) return;
-    const total = data.total_tickets ?? 0;
-    const withCoords = data.with_coords_count ?? total;
-    el.textContent = withCoords === total ? `${total}` : `${withCoords}/${total}`;
+    if (el) {
+        const total = data.total_tickets ?? 0;
+        const withCoords = data.with_coords_count ?? total;
+        el.textContent = withCoords === total ? `${total}` : `${withCoords}/${total}`;
+    }
     missingCoordTickets = data.missing_coord_tickets || [];
+
+    const formatted = data.updated_at ? formatUpdatedAt(data.updated_at) : null;
+    const ticketUpdatedEl = document.getElementById('ticket-updated-at');
+    if (ticketUpdatedEl && formatted) {
+        ticketUpdatedEl.textContent = formatted;
+    }
+    const headerUpdatedEl = document.getElementById('header-updated-at');
+    if (headerUpdatedEl && formatted) {
+        headerUpdatedEl.textContent = '🕒 ' + formatted;
+    }
 }
 
 const missingCoordPanel = document.getElementById('missing-coord-panel');
@@ -700,8 +892,8 @@ function renderMissingCoordPanel() {
     }
     const itemsHtml = missingCoordTickets.map((t) => `
         <div class="item">
-            <span class="tid">${t.ticket_id ?? ''}</span><br>
-            <span class="meta">Mã trạm: ${t.station_code ?? '—'} &nbsp;·&nbsp; SN trụ: ${t.cp_id ?? '—'}</span>
+            <span class="tid">${t.ticket_id ?? ''}</span>
+            <span class="meta">Mã trạm: ${t.station_code ?? '—'}  ·  SN trụ: ${t.cp_id ?? '—'}</span>
         </div>
     `).join('');
     missingCoordPanel.innerHTML = `
@@ -773,7 +965,7 @@ function connectWebSocket() {
 }
 connectWebSocket();
 
-// Tải dữ liệu trạm ban đầu qua REST (không cần đợi WebSocket kết nối xong)
+// Tải dữ liệu trạm ban đầu qua REST
 fetch('/api/stations')
     .then((r) => r.json())
     .then((data) => {
@@ -782,9 +974,9 @@ fetch('/api/stations')
     })
     .catch(() => {});
 
-// ---------- Theo dõi vị trí liên tục (không cần bấm nút, mượt như Google Maps) ----------
+// ---------- Theo dõi vị trí liên tục ----------
 let lastSentAt = 0;
-const MIN_SEND_INTERVAL_MS = 3000; // gửi tối đa 1 lần / 3 giây - đủ mượt, không dội mạng/server
+const MIN_SEND_INTERVAL_MS = 3000;
 
 if (navigator.geolocation) {
     navigator.geolocation.watchPosition(
