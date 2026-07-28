@@ -3,328 +3,957 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CCTS Live Map</title>
+<title>CCTS Live Map · ELECSERVE</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
-  html, body { margin: 0; padding: 0; height: 100%; font-family: Arial, sans-serif; }
+  :root {
+    --primary: #1e293b;
+    --primary-light: #334155;
+    --accent: #f97316;
+    --accent-hover: #ea580c;
+    --success: #10b981;
+    --danger: #ef4444;
+    --warning: #f59e0b;
+    --bg: #f8fafc;
+    --surface: #ffffff;
+    --border: #e2e8f0;
+    --text: #0f172a;
+    --text-muted: #64748b;
+    --shadow-sm: 0 1px 2px rgba(0,0,0,.05);
+    --shadow: 0 4px 12px rgba(0,0,0,.08);
+    --shadow-lg: 0 10px 30px rgba(0,0,0,.12);
+    --radius: 10px;
+    --radius-sm: 6px;
+    --header-h: 56px;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    color: var(--text);
+    background: var(--bg);
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* ========== HEADER ========== */
   .header {
-    background: #2c3e50; color: #fff; padding: 10px 18px;
-    display: flex; justify-content: space-between; align-items: center;
-    flex-wrap: wrap; gap: 8px; position: relative; z-index: 1000;
+    background: #ffffff;
+    color: var(--text);
+    height: var(--header-h);
+    padding: 0 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    position: relative;
+    z-index: 1000;
+    box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    border-bottom: 1px solid var(--border);
   }
-  .header h2 { margin: 0; font-size: 17px; white-space: nowrap; }
-  .header .info { font-size: 13px; opacity: .92; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .badge { background: #e74c3c; padding: 3px 10px; border-radius: 12px; font-size: 13px; }
-  #map { width: 100%; height: calc(100vh - 54px); position: relative; }
-  .logout {
-    color: #fff; text-decoration: none; background: rgba(255,255,255,.15);
-    padding: 5px 12px; border-radius: 6px; font-size: 13px;
-  }
-  .logout:hover { background: rgba(255,255,255,.28); }
-  .staff-avatar {
-    border-radius: 50%; color: #fff; display: flex; align-items: center;
-    justify-content: center; font-weight: 700; font-size: 12px;
-    border: 2px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,.45);
-  }
-  .wrench-badge {
-    border-radius: 50%; background: #fff; color: #e67e22; display: flex;
-    align-items: center; justify-content: center; font-size: 13px;
-    border: 2px solid #e67e22; box-shadow: 0 2px 5px rgba(0,0,0,.4);
-  }
-  .conn-dot {
-    width: 9px; height: 9px; border-radius: 50%; display: inline-block;
-    background: #e74c3c; margin-right: 4px;
-  }
-  .conn-dot.ok { background: #2ecc71; }
 
-  /* --- Thanh tìm kiếm --- */
-  .search-wrap { position: relative; }
+  .header-logo {
+    height: 38px;
+    width: auto;
+    object-fit: contain;
+    flex-shrink: 0;
+  }
+
+  .header .info {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: 1;
+    flex-wrap: nowrap;
+    overflow: visible;
+    justify-content: flex-end;
+    min-width: 0;
+  }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-shrink: 0;
+    margin-left: 8px;
+  }
+  .header-logout-wrap {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 2px;
+    flex-shrink: 0;
+  }
+  .header-logout-wrap .logout {
+    line-height: 1.2;
+  }
+#header-updated-at {
+    position: fixed;
+    top: calc(var(--header-h) + 6px);
+    right: 14px;
+    z-index: 900;
+    font-size: 11px;
+    color: #64748b;
+    background: rgba(255,255,255,.95);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 9px;
+    white-space: nowrap;
+    line-height: 1.3;
+    font-weight: 500;
+    box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    pointer-events: none;
+  }
+
+  /* Search */
+  .search-wrap { position: relative; flex: 0 1 220px; min-width: 160px; }
   #search-input {
-    padding: 6px 10px; border-radius: 6px; border: none; font-size: 13px;
-    width: 190px; outline: none;
+    width: 100%;
+    padding: 8px 12px 8px 36px;
+    border-radius: 8px;
+    border: 1.5px solid var(--border);
+    font-size: 13.5px;
+    font-family: inherit;
+    background: #f8fafc;
+    color: var(--text);
+    outline: none;
+    transition: background .15s, border-color .15s, box-shadow .15s;
   }
+  #search-input::placeholder { color: #94a3b8; }
+  #search-input:focus {
+    background: #fff;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59,130,246,.12);
+  }
+  .search-wrap::before {
+    content: '🔍';
+    position: absolute;
+    left: 11px; top: 50%;
+    transform: translateY(-50%);
+    font-size: 13px;
+    pointer-events: none;
+    opacity: .7;
+  }
+
   #search-results {
-    position: absolute; top: 34px; left: 0; width: 260px; background: #fff;
-    color: #222; border-radius: 8px; box-shadow: 0 6px 20px rgba(0,0,0,.25);
-    max-height: 320px; overflow-y: auto; display: none; z-index: 2000;
+    position: absolute; top: calc(100% + 6px); left: 0;
+    width: 280px; max-width: 90vw;
+    background: var(--surface);
+    color: var(--text);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-lg);
+    max-height: 340px; overflow-y: auto;
+    display: none; z-index: 2000;
+    border: 1px solid var(--border);
   }
-  #search-results .item { padding: 8px 12px; font-size: 13px; cursor: pointer; border-bottom: 1px solid #eee; }
-  #search-results .item:hover { background: #f2f4f6; }
-  #search-results .item .tag { font-size: 11px; color: #888; }
-  #search-results .empty { padding: 10px 12px; font-size: 13px; color: #999; }
+  #search-results .item {
+    padding: 10px 14px; font-size: 13.5px; cursor: pointer;
+    border-bottom: 1px solid var(--border);
+    transition: background .12s;
+  }
+  #search-results .item:last-child { border-bottom: none; }
+  #search-results .item:hover { background: #f1f5f9; }
+  #search-results .item .tag { font-size: 11.5px; color: var(--text-muted); margin-top: 2px; }
+  #search-results .empty { padding: 14px; font-size: 13.5px; color: var(--text-muted); text-align: center; }
 
-  /* --- Nút header dạng toggle --- */
+  /* Buttons & toggles */
   .hdr-btn {
-    background: rgba(255,255,255,.15); color: #fff; border: none; border-radius: 6px;
-    padding: 6px 12px; font-size: 13px; cursor: pointer;
+    background: #f1f5f9;
+    color: var(--text);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 7px 12px;
+    font-size: 13px;
+    font-family: inherit;
+    font-weight: 500;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background .15s, border-color .15s;
   }
-  .hdr-btn:hover { background: rgba(255,255,255,.28); }
+  .hdr-btn:hover { background: #e2e8f0; border-color: #cbd5e1; }
 
-  /* --- Panel lọc kỹ thuật viên --- */
+  .filter-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 20px;
+    font-size: 12.5px;
+    font-weight: 500;
+    cursor: pointer;
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+    color: var(--text);
+    user-select: none;
+    transition: background .15s, border-color .15s;
+    white-space: nowrap;
+  }
+  .filter-chip:hover { background: #e2e8f0; }
+  .filter-chip input { display: none; }
+  .filter-chip.active {
+    background: #ecfdf5;
+    border-color: #6ee7b7;
+    color: #065f46;
+  }
+  .filter-chip .chip-dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #cbd5e1;
+  }
+  .filter-chip.active .chip-dot { background: var(--success); }
+
+  .user-detail {
+    font-size: 13px;
+    opacity: .9;
+    white-space: nowrap;
+    max-width: 180px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    background: var(--danger);
+    color: #fff;
+    padding: 4px 11px;
+    border-radius: 20px;
+    font-size: 12.5px;
+    font-weight: 600;
+    letter-spacing: .02em;
+    box-shadow: 0 2px 6px rgba(239,68,68,.35);
+    cursor: pointer;
+    transition: transform .12s, box-shadow .12s;
+  }
+  .badge:hover { transform: translateY(-1px); box-shadow: 0 4px 10px rgba(239,68,68,.4); }
+
+  .status-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+
+  .conn-dot {
+    width: 9px; height: 9px; border-radius: 50%;
+    display: inline-block;
+    background: var(--danger);
+    box-shadow: 0 0 0 2px rgba(239,68,68,.25);
+  }
+  .conn-dot.ok {
+    background: var(--success);
+    box-shadow: 0 0 0 2px rgba(16,185,129,.3);
+  }
+
+  .logout {
+    color: var(--text);
+    text-decoration: none;
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+    padding: 6px 12px;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+    transition: background .15s;
+  }
+  .logout:hover { background: #e2e8f0; }
+
+  #btn-manual-refresh {
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 14px;
+    transition: background .15s;
+  }
+  #btn-manual-refresh:hover { background: #e2e8f0; }
+  #btn-manual-refresh:disabled { opacity: .6; cursor: wait; }
+
+  /* ========== MAP ========== */
+  #map {
+    width: 100%;
+    height: calc(100vh - var(--header-h));
+    position: relative;
+    background: #e2e8f0;
+  }
+
+  /* Staff avatar on map */
+  .staff-avatar {
+    border-radius: 50%;
+    color: #fff;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 700;
+    font-size: 12px;
+    border: 2.5px solid #fff;
+    box-shadow: 0 2px 8px rgba(0,0,0,.4);
+  }
+
+  .wrench-badge {
+    border-radius: 50%;
+    background: #fff;
+    color: #e67e22;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    border: 2px solid #e67e22;
+    box-shadow: 0 2px 5px rgba(0,0,0,.4);
+  }
+
+  /* ========== TECH FILTER HANDLE (right edge) ========== */
+  #tech-filter-handle {
+    position: fixed;
+    top: 42%;
+    right: 0;
+    transform: translateY(-50%);
+    background: var(--primary);
+    color: #fff;
+    border: none;
+    border-radius: 10px 0 0 10px;
+    padding: 16px 8px;
+    cursor: pointer;
+    z-index: 1400;
+    font-size: 15px;
+    box-shadow: -3px 0 12px rgba(0,0,0,.15);
+    transition: background .15s, padding .15s;
+    writing-mode: horizontal-tb;
+  }
+  #tech-filter-handle:hover {
+    background: var(--primary-light);
+    padding-left: 12px;
+  }
+  #tech-filter-handle.open {
+    right: 320px;
+  }
+
+  /* ========== TECH FILTER PANEL ========== */
   #tech-filter-panel {
-    position: absolute; top: 60px; right: 12px; width: 300px; max-height: 70vh;
-    overflow-y: auto; background: #fff; border-radius: 10px;
-    box-shadow: 0 8px 26px rgba(0,0,0,.3); display: none; z-index: 1500; padding: 10px 4px;
+    position: fixed;
+    top: 0;
+    right: 0;
+    width: 320px;
+    height: 100vh;
+    max-height: 100vh;
+    overflow-y: auto;
+    background: var(--surface);
+    border-radius: 0;
+    box-shadow: -8px 0 28px rgba(0,0,0,.12);
+    display: none;
+    z-index: 1500;
+    padding: 0;
+    border: none;
+    border-left: 1px solid var(--border);
+    flex-direction: column;
   }
-  #tech-filter-panel .region-group { margin-bottom: 4px; }
-  #tech-filter-panel .region-title {
-    font-weight: 700; font-size: 13px; color: #2c3e50; padding: 6px 10px;
-    background: #f4f6f8; border-radius: 6px; margin: 4px 6px;
+  #tech-filter-panel.open {
+    display: flex;
   }
-  #tech-filter-panel label {
-    display: flex; align-items: center; gap: 6px; padding: 5px 16px;
-    font-size: 13px; cursor: pointer;
+  #tech-filter-panel .panel-head {
+    flex-shrink: 0;
+    padding: 16px 18px 12px;
+    border-bottom: 1px solid var(--border);
+    background: #fff;
   }
-  #tech-filter-panel label:hover { background: #f8f9fa; }
+  #tech-filter-panel .panel-head h3 {
+    margin: 0 0 4px;
+    font-size: 15px;
+    font-weight: 650;
+    color: var(--text);
+  }
+  #tech-filter-panel .panel-head .sub {
+    font-size: 12px;
+    color: var(--text-muted);
+  }
+  #tech-filter-panel .panel-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 0;
+  }
+  #tech-filter-panel .region-group {
+    margin-bottom: 2px;
+    border-bottom: 1px solid #f1f5f9;
+  }
+  #tech-filter-panel .region-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 11px 16px;
+    cursor: pointer;
+    user-select: none;
+    transition: background .12s;
+    font-weight: 600;
+    font-size: 13.5px;
+    color: var(--text);
+  }
+  #tech-filter-panel .region-header:hover {
+    background: #f8fafc;
+  }
+  #tech-filter-panel .region-header .chevron {
+    margin-left: auto;
+    font-size: 12px;
+    color: #94a3b8;
+    transition: transform .2s;
+  }
+  #tech-filter-panel .region-group.expanded .region-header .chevron {
+    transform: rotate(90deg);
+  }
+  #tech-filter-panel .region-header .region-check {
+    width: 15px; height: 15px;
+    accent-color: var(--accent);
+    flex-shrink: 0;
+  }
+  #tech-filter-panel .region-techs {
+    display: none;
+    padding: 0 0 6px 0;
+    background: #fafbfc;
+  }
+  #tech-filter-panel .region-group.expanded .region-techs {
+    display: block;
+  }
+  #tech-filter-panel .region-techs label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 16px 8px 36px;
+    font-size: 13.5px;
+    font-weight: 400;
+    cursor: pointer;
+    transition: background .1s;
+  }
+  #tech-filter-panel .region-techs label:hover { background: #f1f5f9; }
+  #tech-filter-panel input[type="checkbox"] {
+    width: 15px; height: 15px;
+    accent-color: var(--accent);
+  }
+
   #tech-filter-actions {
-    display: flex; justify-content: space-between; padding: 6px 10px; gap: 6px;
-    border-top: 1px solid #eee; margin-top: 4px;
+    flex-shrink: 0;
+    display: flex;
+    gap: 8px;
+    padding: 12px 14px;
+    border-top: 1px solid var(--border);
+    background: #fff;
   }
   #tech-filter-actions button {
-    flex: 1; font-size: 12px; padding: 6px; border: 1px solid #ddd; border-radius: 6px;
-    background: #fff; cursor: pointer;
+    flex: 1;
+    font-size: 12.5px;
+    font-family: inherit;
+    font-weight: 500;
+    padding: 9px;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    transition: background .12s, border-color .12s;
   }
-  #tech-filter-actions button:hover { background: #f2f4f6; }
+  #tech-filter-actions button:hover {
+    background: #f1f5f9;
+    border-color: #cbd5e1;
+  }
 
-  /* Nút mở panel nằm ở mép BÊN TRÁI màn hình */
+  /* ========== TICKET PANEL HANDLE ========== */
   #ticket-panel-handle {
-    position: fixed; top: 50%; left: 0; transform: translateY(-50%);
-    background: #2c3e50; color: #fff; border: none; 
-    border-radius: 0 8px 8px 0; /* Bo tròn góc bên phải */
-    padding: 14px 6px; cursor: pointer; z-index: 1400; font-size: 15px;
-    box-shadow: 2px 0 8px rgba(0,0,0,.2);
+    position: fixed;
+    top: 50%; left: 0;
+    transform: translateY(-50%);
+    background: var(--primary);
+    color: #fff;
+    border: none;
+    border-radius: 0 10px 10px 0;
+    padding: 16px 8px;
+    cursor: pointer;
+    z-index: 1400;
+    font-size: 16px;
+    box-shadow: 3px 0 12px rgba(0,0,0,.2);
+    transition: background .15s, padding .15s;
+  }
+  #ticket-panel-handle:hover {
+    background: var(--primary-light);
+    padding-right: 12px;
   }
 
-  /* Panel trượt từ BÊN TRÁI ra */
+  /* ========== TICKET PANEL ========== */
   #ticket-panel {
-    position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-    width: 100vw; height: 100vh; max-width: 100vw;
-    background: #fff; z-index: 2500;
-    display: flex; flex-direction: column;
-    transform: translateX(-100%); /* Ẩn sang bên trái */
-    transition: transform .25s ease;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    width: 100vw; height: 100vh;
+    background: var(--surface);
+    z-index: 2500;
+    display: flex;
+    flex-direction: column;
+    transform: translateX(-100%);
+    transition: transform .28s cubic-bezier(.4,0,.2,1);
   }
-  #ticket-panel.open { 
-    transform: translateX(0); /* Trượt ra toàn màn hình */
-  }
-  #ticket-panel-header {
-    background: #2c3e50; color: #fff; padding: 12px 18px; font-weight: 700; font-size: 16px;
-    display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;
-  }
-  #ticket-panel-header .close-btn { cursor: pointer; font-size: 20px; background:none; border:none; color:#fff; }
-  
-  /* Khung chứa nội dung full màn hình */
+  #ticket-panel.open { transform: translateX(0); }
+
   .ticket-panel-body {
     display: flex;
+    flex-direction: column;
     flex: 1;
     overflow: hidden;
+    background: #f8fafc;
   }
 
-  /* Danh sách kỹ thuật viên dạng cột bên trái (cho PC) */
-  #ticket-panel-tech-list {
-    width: 280px;
+  /* ---- Tech selector bar (top of panel) ---- */
+  .ticket-tech-bar {
     flex-shrink: 0;
+    background: #fff;
+    border-bottom: 1px solid var(--border);
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    box-shadow: 0 1px 3px rgba(0,0,0,.04);
+  }
+  .ticket-updated-inline {
+    font-size: 12.5px;
+    color: var(--text-muted);
+    white-space: nowrap;
+    margin-right: 4px;
+  }
+  .ticket-updated-inline strong {
+    color: var(--text);
+    font-weight: 600;
+  }
+  .ticket-tech-bar-label {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-muted);
+    white-space: nowrap;
+  }
+  .ticket-panel-close-btn {
+    flex-shrink: 0;
+    cursor: pointer;
+    font-size: 18px;
+    background: #f1f5f9;
+    border: 1px solid var(--border);
+    color: #64748b;
+    width: 38px; height: 38px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background .15s, color .15s, border-color .15s;
+    margin-left: 4px;
+  }
+  .ticket-panel-close-btn:hover {
+    background: #fee2e2;
+    color: #dc2626;
+    border-color: #fecaca;
+  }
+  .ticket-tech-select-wrap {
+    position: relative;
+    flex: 1;
+    max-width: 420px;
+  }
+  #ticket-tech-search {
+    width: 100%;
+    padding: 9px 36px 9px 38px;
+    border: 1.5px solid var(--border);
+    border-radius: 10px;
+    font-size: 13.5px;
+    font-family: inherit;
+    color: var(--text);
+    background: #f8fafc;
+    outline: none;
+    transition: border-color .15s, background .15s, box-shadow .15s;
+  }
+  #ticket-tech-search:focus {
+    border-color: #3b82f6;
+    background: #fff;
+    box-shadow: 0 0 0 3px rgba(59,130,246,.15);
+  }
+  #ticket-tech-search::placeholder { color: #94a3b8; }
+  .ticket-tech-select-wrap .search-icon {
+    position: absolute;
+    left: 12px; top: 50%;
+    transform: translateY(-50%);
+    font-size: 14px;
+    opacity: .55;
+    pointer-events: none;
+  }
+  .ticket-tech-select-wrap .clear-btn {
+    position: absolute;
+    right: 10px; top: 50%;
+    transform: translateY(-50%);
+    background: none; border: none;
+    color: #94a3b8; font-size: 16px;
+    cursor: pointer; padding: 2px 4px;
+    display: none; line-height: 1;
+  }
+  .ticket-tech-select-wrap .clear-btn:hover { color: #64748b; }
+  .ticket-tech-select-wrap.has-value .clear-btn { display: block; }
+
+  #ticket-tech-dropdown {
+    position: absolute;
+    top: calc(100% + 4px); left: 0; right: 0;
+    background: #fff;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    box-shadow: var(--shadow-lg);
+    max-height: 320px;
     overflow-y: auto;
-    border-right: 1px solid #eee;
-    background: #fafafa;
+    display: none;
+    z-index: 100;
   }
-  #ticket-panel-tech-list .region-label {
-    font-weight: 700; font-size: 12px; color: #2c3e50; background: #eaeded;
-    padding: 8px 14px;
+  #ticket-tech-dropdown.open { display: block; }
+  #ticket-tech-dropdown .region-group-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: #64748b;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    padding: 8px 14px 4px;
+    background: #f8fafc;
+    position: sticky;
+    top: 0;
   }
-  #ticket-panel-tech-list .tech-row {
-    padding: 10px 16px; font-size: 13px; cursor: pointer; display: flex;
-    justify-content: space-between; align-items: center; border-bottom: 1px solid #eee;
+  #ticket-tech-dropdown .tech-option {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    font-size: 13.5px;
+    cursor: pointer;
+    transition: background .1s;
+    gap: 8px;
   }
-  #ticket-panel-tech-list .tech-row:hover { background: #f0f4f8; }
-  #ticket-panel-tech-list .tech-row.active { background: #e3f2fd; font-weight: 700; color: #1976d2; }
-  #ticket-panel-tech-list .tech-row .stats { font-size: 11px; color: #666; }
+  #ticket-tech-dropdown .tech-option:hover { background: #f1f5f9; }
+  #ticket-tech-dropdown .tech-option.selected {
+    background: #eff6ff;
+    font-weight: 600;
+    color: #1d4ed8;
+  }
+  #ticket-tech-dropdown .tech-option .opt-stats {
+    font-size: 11.5px;
+    font-weight: 500;
+    color: #64748b;
+    background: #e2e8f0;
+    padding: 2px 8px;
+    border-radius: 10px;
+    white-space: nowrap;
+  }
+  #ticket-tech-dropdown .tech-option.selected .opt-stats {
+    background: #dbeafe;
+    color: #1d4ed8;
+  }
+  #ticket-tech-dropdown .empty-msg {
+    padding: 16px;
+    text-align: center;
+    color: #94a3b8;
+    font-size: 13px;
+  }
 
-/* Khung chứa bảng ticket */
-#ticket-panel-table-wrap { 
-  flex: 1; 
-  overflow: auto; 
-  padding: 0; /* Bỏ padding ngoài để bảng ôm sát, không bị hở chữ */
-  position: relative;
-}
+  .ticket-selected-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: auto;
+    font-size: 13px;
+    color: var(--text-muted);
+  }
+  .ticket-selected-info .sel-name {
+    font-weight: 600;
+    color: var(--text);
+  }
+  .ticket-selected-info .sel-count {
+    background: #fef2f2;
+    color: #dc2626;
+    font-weight: 600;
+    font-size: 12px;
+    padding: 3px 9px;
+    border-radius: 12px;
+  }
 
-#ticket-panel-table-wrap table { 
-  border-collapse: collapse; 
-  width: 100%; 
-  font-size: 13px; 
-}
-
-  /* Tiêu đề cột chuẩn màu xanh, đè lên nội dung khi cuộn */
+  /* ---- Full-width table ---- */
+  #ticket-panel-table-wrap {
+    flex: 1;
+    overflow: auto;
+    position: relative;
+    background: #fff;
+  }
+  #ticket-panel-table-wrap table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13.5px;
+  }
   #ticket-panel-table-wrap th {
-    background-color: #2c3e50 !important; /* Màu xanh đậm đồng bộ */
-    color: #ffffff !important;
-    padding: 10px 12px;
+    background: var(--primary) !important;
+    color: #fff !important;
+    padding: 13px 16px;
     text-align: left;
     position: sticky;
     top: 0;
-    z-index: 10; /* Đảm bảo header luôn nằm trên nội dung cuộn */
+    z-index: 10;
     white-space: nowrap;
-    box-shadow: 0 2px 2px -1px rgba(0,0,0,0.15); /* Tạo ranh giới rõ ràng */
+    font-weight: 600;
+    font-size: 12.5px;
+    letter-spacing: .02em;
+    box-shadow: 0 2px 4px rgba(0,0,0,.1);
+  }
+  #ticket-panel-table-wrap td {
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  #ticket-panel-table-wrap tr:nth-child(even) td { background: #f8fafc; }
+  #ticket-panel-table-wrap tr:hover td { background: #f1f5f9; }
+
+  #ticket-panel-empty {
+    padding: 64px 24px;
+    text-align: center;
+    color: var(--text-muted);
+    font-size: 15px;
+  }
+  #ticket-panel-empty .empty-icon {
+    font-size: 36px;
+    margin-bottom: 12px;
+    opacity: .5;
   }
 
-  #ticket-panel-table-wrap td { 
-    padding: 10px 12px; 
-    border-bottom: 1px solid #eee; 
-    vertical-align: top; 
-  }
-
-  #ticket-panel-table-wrap tr:nth-child(even) td { 
-    background: #fafafa; 
-  }
-  #ticket-panel-empty { padding: 40px 16px; text-align: center; color: #999; font-size: 14px; }
-
-  /* Responsive cho điện thoại (màn hình hẹp): Xếp dọc danh sách KTV lên trên, Bảng ticket xuống dưới */
-  @media (max-width: 700px) {
-    .ticket-panel-body { flex-direction: column; }
-    #ticket-panel-tech-list {
-      width: 100%;
-      max-height: 30vh;
-      border-right: none;
-      border-bottom: 1px solid #ddd;
-    }
-  }
-
-  /* --- Panel danh sách ticket thiếu toạ độ --- */
+  /* ========== MISSING COORD PANEL ========== */
   #missing-coord-panel {
-    position: absolute; top: 30px; left: 0; width: 280px; max-height: 320px;
-    overflow-y: auto; background: #fff; color: #222; border-radius: 8px;
-    box-shadow: 0 6px 20px rgba(0,0,0,.3); display: none; z-index: 2000; padding: 8px 0;
+    position: absolute;
+    top: 36px; left: 0;
+    width: 300px;
+    max-height: 340px;
+    overflow-y: auto;
+    background: var(--surface);
+    color: var(--text);
+    border-radius: 12px;
+    box-shadow: var(--shadow-lg);
+    display: none;
+    z-index: 2000;
+    padding: 0;
+    border: 1px solid var(--border);
   }
   #missing-coord-panel .header {
-    padding: 6px 12px; font-weight: 700; font-size: 12.5px; color: #c0392b;
-    border-bottom: 1px solid #eee; margin-bottom: 4px; background: none;
+    padding: 10px 14px;
+    font-weight: 600;
+    font-size: 13px;
+    color: #b91c1c;
+    border-bottom: 1px solid var(--border);
+    background: #fef2f2 !important;
+    height: auto;
+    box-shadow: none;
   }
   #missing-coord-panel .item {
-    padding: 6px 12px; font-size: 12px; border-bottom: 1px solid #f5f5f5;
+    padding: 10px 14px;
+    font-size: 13px;
+    border-bottom: 1px solid #f1f5f9;
   }
-  #missing-coord-panel .item .tid { font-weight: 700; color: #2c3e50; }
-  #missing-coord-panel .item .meta { color: #888; font-size: 11px; }
-  #missing-coord-panel .empty { padding: 12px; font-size: 12.5px; color: #999; }
+  #missing-coord-panel .item:last-child { border-bottom: none; }
+  #missing-coord-panel .item .tid { font-weight: 600; color: var(--primary); }
+  #missing-coord-panel .item .meta { color: var(--text-muted); font-size: 12px; margin-top: 2px; display: block; }
+  #missing-coord-panel .empty {
+    padding: 20px 14px;
+    font-size: 13.5px;
+    color: var(--text-muted);
+    text-align: center;
+  }
 
-  /* --- Nút "Vị trí của bạn" nổi trên bản đồ --- */
+  /* ========== MY LOCATION BTN ========== */
   #my-location-btn {
-    position: absolute; bottom: 24px; right: 12px; z-index: 900;
-    width: 42px; height: 42px; border-radius: 50%; background: #fff; border: none;
-    box-shadow: 0 3px 10px rgba(0,0,0,.35); font-size: 19px; cursor: pointer;
+    position: absolute;
+    bottom: 28px; right: 16px;
+    z-index: 900;
+    width: 46px; height: 46px;
+    border-radius: 50%;
+    background: var(--surface);
+    border: none;
+    box-shadow: var(--shadow);
+    font-size: 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: transform .15s, box-shadow .15s, background .15s;
   }
-  #my-location-btn:hover { background: #f2f4f6; }
+  #my-location-btn:hover {
+    background: #f1f5f9;
+    transform: scale(1.06);
+    box-shadow: var(--shadow-lg);
+  }
 
-/* Hiệu ứng xoay cà lê sửa chữa sinh động */
-@keyframes wrench-repair {
-    0% { transform: rotate(0deg); }
-    20% { transform: rotate(-35deg); }
-    40% { transform: rotate(20deg); }
-    60% { transform: rotate(-20deg); }
-    80% { transform: rotate(10deg); }
+  /* ========== ANIMATIONS ========== */
+  @keyframes wrench-repair {
+    0%   { transform: rotate(0deg); }
+    20%  { transform: rotate(-35deg); }
+    40%  { transform: rotate(20deg); }
+    60%  { transform: rotate(-20deg); }
+    80%  { transform: rotate(10deg); }
     100% { transform: rotate(0deg); }
-}
-
-.wrench-pure-icon {
+  }
+  .wrench-pure-icon {
     font-size: 24px;
     display: flex;
     align-items: center;
     justify-content: center;
-    filter: drop-shadow(0px 2px 4px rgba(0, 0, 0, 0.4));
+    filter: drop-shadow(0 2px 4px rgba(0,0,0,.4));
     animation: wrench-repair 1.2s infinite ease-in-out;
     transform-origin: center center;
-}
+  }
 
-@keyframes unassigned-pulse {
-    0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(243,156,18,.6); }
-    70% { transform: scale(1.12); box-shadow: 0 0 0 8px rgba(243,156,18,0); }
+  @keyframes unassigned-pulse {
+    0%   { transform: scale(1); box-shadow: 0 0 0 0 rgba(243,156,18,.55); }
+    70%  { transform: scale(1.12); box-shadow: 0 0 0 10px rgba(243,156,18,0); }
     100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(243,156,18,0); }
-}
+  }
 
-/* ==========================================
-   Responsive - đa số nhân viên dùng điện thoại
-   ========================================== */
-@media (max-width: 700px) {
-  .header {
-    flex-direction: column;
-    align-items: stretch;
-    padding: 8px 10px;
-    gap: 6px;
+  /* ========== RESPONSIVE ========== */
+  @media (max-width: 900px) {
+    .user-detail { display: none; }
   }
-  .header h2 { font-size: 15px; text-align: center; }
-  .header .info {
-    font-size: 12px;
-    justify-content: center;
-    gap: 6px;
+
+  @media (max-width: 700px) {
+    :root { --header-h: auto; }
+    .header {
+      flex-wrap: wrap;
+      height: auto;
+      padding: 10px 12px;
+      gap: 8px;
+    }
+    .header-logo { height: 28px; }
+    .header .info {
+      flex-wrap: wrap;
+      gap: 8px;
+      width: 100%;
+    }
+    .search-wrap {
+      flex: 1 1 100%;
+      order: -1;
+      min-width: 0;
+    }
+    #search-input { font-size: 16px; padding: 10px 12px 10px 36px; }
+    #search-results { width: 100%; max-width: calc(100vw - 24px); }
+    .conn-text-label { display: none; }
+    .hdr-btn, .filter-chip, .logout { font-size: 12.5px; padding: 6px 10px; }
+    #map { height: calc(100vh - 110px); }
+    #tech-filter-panel {
+      width: 100vw;
+      max-width: 100vw;
+    }
+    #tech-filter-handle.open { right: 0; }
+    #tech-filter-handle { top: 38%; }
+    #my-location-btn { bottom: 18px; right: 12px; width: 48px; height: 48px; }
+    #ticket-panel-handle { padding: 14px 6px; font-size: 14px; }
+    .ticket-tech-bar {
+      flex-wrap: wrap;
+      padding: 10px 12px;
+    }
+    .ticket-tech-select-wrap {
+      max-width: none;
+      flex: 1 1 auto;
+    }
+    .ticket-selected-info {
+      margin-left: 0;
+    }
+    .ticket-panel-close-btn {
+      margin-left: auto;
+    }
   }
-  .user-detail { display: none; } /* Ẩn dòng tên/chức vụ/khu vực trên di động để đỡ chật */
-  .conn-text-label { display: none; } /* Chỉ giữ chấm online, ẩn chữ "Đang kết nối..." */
-  .search-wrap { flex: 1 1 100%; order: 1; }
-  #search-input { width: 100%; box-sizing: border-box; font-size: 16px; }
-  #search-results { width: 100%; max-width: calc(100vw - 20px); }
-  .hdr-btn { font-size: 12px; padding: 6px 10px; }
-  #tech-filter-panel {
-    left: 10px; right: 10px; width: auto; top: auto; bottom: 10px;
-    max-height: 60vh;
-  }
-  #my-location-btn { bottom: 16px; right: 10px; width: 46px; height: 46px; }
-  #map { height: calc(100vh - 96px); }
-  #ticket-panel { width: 100vw; max-width: 100vw; top: 0; }
-  #ticket-panel-handle { padding: 12px 5px; font-size: 13px; }
-}
 </style>
 </head>
 <body data-username="{{ user.username }}" data-role="{{ user.role }}">
   <div class="header">
-    <img src="{{ url_for('static', path='images/logo-remove.png') }}" alt="ELECSERVE Logo" style="height: 35px; width: auto; object-fit: contain; margin-right: 4px;">
+    <img class="header-logo" src="{{ url_for('static', path='images/logo-remove.png') }}" alt="ELECSERVE">
     <div class="info">
       <div class="search-wrap">
-        <input type="text" id="search-input" placeholder="🔍Tìm trạm/kỹ thuật viên...">
+        <input type="text" id="search-input" placeholder="Tìm trạm / kỹ thuật viên..." autocomplete="off">
         <div id="search-results"></div>
       </div>
-      <button class="hdr-btn" id="tech-filter-btn">🧑‍🔧Lọc</button>
-      <label style="display:flex;align-items:center;gap:4px;font-size:12.5px;cursor:pointer;">
-        <input type="checkbox" id="filter-charger" checked> ⚡EV
+
+      <label class="filter-chip active" id="chip-charger">
+        <input type="checkbox" id="filter-charger" checked>
+        <span class="chip-dot"></span> ⚡ EV
       </label>
-      <label style="display:flex;align-items:center;gap:4px;font-size:12.5px;cursor:pointer;">
-        <input type="checkbox" id="filter-bss" checked> 🔋BSS
+      <label class="filter-chip active" id="chip-bss">
+        <input type="checkbox" id="filter-bss" checked>
+        <span class="chip-dot"></span> 🔋 BSS
       </label>
+
       <span class="user-detail">{{ user.full_name }}:{{ user.role }}{% if user.region %} · {{ user.region }}{% endif %}</span>
-      <span style="position:relative;">Sự cố đang mở:
-        <span class="badge" id="ticket-count" style="cursor:pointer;" title="Bấm để xem danh sách trạm thiếu toạ độ">–</span>
+
+      <span class="status-group" style="position:relative;">
+        Sự cố:
+        <span class="badge" id="ticket-count" title="Bấm để xem danh sách trạm thiếu toạ độ">–</span>
         <div id="missing-coord-panel"></div>
       </span>
-      <span><span class="conn-dot" id="conn-dot"></span><span class="conn-text-label" id="conn-text">Đang kết nối...</span></span>
-      {% if user.role and user.role.strip().lower() == 'admin' %}
-        <button id="btn-manual-refresh" onclick="triggerManualRefresh()" style="padding: 4px 10px; cursor: pointer; border-radius: 4px; border: 1px solid #1f77b4; background: #ffffff; color: #1f77b4; font-weight: bold; font-size: 13px; margin: 0 5px;">
-          🔄
-        </button>
-        <a class="logout" href="/admin">⚙️ Admin</a>
-      {% endif %}
-      <a class="logout" href="/logout">Đăng xuất</a>
+
+      <span class="status-group">
+        <span class="conn-dot" id="conn-dot"></span>
+        <span class="conn-text-label" id="conn-text">Đang kết nối...</span>
+      </span>
+
+      <div class="header-right">
+        {% if user.role and user.role.strip().lower() == 'admin' %}
+          <button id="btn-manual-refresh" onclick="triggerManualRefresh()" title="Làm mới dữ liệu trạm">🔄</button>
+          <a class="logout" href="/admin">⚙️ Admin</a>
+        {% endif %}
+        <a class="logout" href="/logout">Đăng xuất</a>
+      </div>
     </div>
   </div>
+  <div id="header-updated-at" title="Thời gian cập nhật dữ liệu gần nhất">—</div>
 
   <div id="map">
     <div id="tech-filter-panel"></div>
     <button id="my-location-btn" title="Vị trí của bạn">📍</button>
   </div>
 
+  <button id="tech-filter-handle" title="Lọc theo kỹ thuật viên">◀ 🧑‍🔧</button>
   <button id="ticket-panel-handle" title="Danh sách Ticket theo kỹ thuật viên">▶ 📋</button>
   <div id="ticket-panel">
-    <div id="ticket-panel-header">
-      <span>📋 Danh sách Ticket</span>
-      <button class="close-btn" id="ticket-panel-close">✕</button>
-    </div>
-    <!-- Thêm div.ticket-panel-body bọc 2 thành phần bên dưới -->
     <div class="ticket-panel-body">
-      <div id="ticket-panel-tech-list"></div>
+      <div class="ticket-tech-bar">
+        <span class="ticket-tech-bar-label">Kỹ thuật viên</span>
+        <div class="ticket-tech-select-wrap" id="ticket-tech-select-wrap">
+          <span class="search-icon">🔍</span>
+          <input type="text" id="ticket-tech-search" placeholder="Tìm hoặc chọn kỹ thuật viên..." autocomplete="off">
+          <button type="button" class="clear-btn" id="ticket-tech-clear" title="Xóa">×</button>
+          <div id="ticket-tech-dropdown"></div>
+        </div>
+        <span class="ticket-updated-inline">🕒 Cập nhật: <strong id="ticket-updated-at">—</strong></span>
+        <div class="ticket-selected-info" id="ticket-selected-info" style="display:none;">
+          <span class="sel-name" id="ticket-sel-name"></span>
+          <span class="sel-count" id="ticket-sel-count"></span>
+        </div>
+        <button class="ticket-panel-close-btn" id="ticket-panel-close" title="Đóng">✕</button>
+      </div>
       <div id="ticket-panel-table-wrap">
-        <div id="ticket-panel-empty">Chọn 1 kỹ thuật viên ở trên để xem danh sách ticket.</div>
+        <div id="ticket-panel-empty">
+          <div class="empty-icon">🧑‍🔧</div>
+          Chọn kỹ thuật viên ở trên để xem danh sách ticket.
+        </div>
       </div>
     </div>
   </div>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script src="/static/app.js"></script>
+  <script>
+    // Sync visual state of filter chips with checkbox (label already toggles the checkbox natively)
+    (function () {
+      function syncChip(chipId, checkboxId) {
+        const chip = document.getElementById(chipId);
+        const cb = document.getElementById(checkboxId);
+        if (!chip || !cb) return;
+        const update = () => chip.classList.toggle('active', cb.checked);
+        cb.addEventListener('change', update);
+        update();
+      }
+      syncChip('chip-charger', 'filter-charger');
+      syncChip('chip-bss', 'filter-bss');
+    })();
+  </script>
 </body>
 </html>
