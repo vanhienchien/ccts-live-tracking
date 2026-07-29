@@ -1,0 +1,781 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CCTS Thống kê · ELECSERVE</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>
+    :root {
+      --primary: #1e293b;
+      --accent: #f97316;
+      --bg: #f1f5f9;
+      --surface: #ffffff;
+      --border: #e2e8f0;
+      --text: #0f172a;
+      --text-muted: #64748b;
+      --radius: 12px;
+      --shadow: 0 4px 16px rgba(15, 23, 42, .08);
+    }
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0; padding: 0;
+      font-family: 'Inter', system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .topbar {
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+      color: #f8fafc;
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      box-shadow: 0 2px 12px rgba(0,0,0,.2);
+    }
+    .topbar h1 {
+      margin: 0;
+      font-size: 17px;
+      font-weight: 600;
+      letter-spacing: -.01em;
+    }
+    .topbar .meta {
+      margin-left: auto;
+      font-size: 12.5px;
+      color: #94a3b8;
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+    .topbar .badge {
+      background: rgba(249, 115, 22, .2);
+      color: #fdba74;
+      padding: 3px 10px;
+      border-radius: 20px;
+      font-weight: 600;
+      font-size: 12px;
+    }
+    .topbar a {
+      color: #cbd5e1;
+      text-decoration: none;
+      font-size: 13px;
+      padding: 6px 12px;
+      border-radius: 8px;
+      border: 1px solid rgba(255,255,255,.12);
+      transition: background .15s;
+    }
+    .topbar a:hover { background: rgba(255,255,255,.1); color: #fff; }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 24px 20px 40px;
+    }
+
+    .kpi-row {
+      display: flex;
+      flex-wrap: nowrap;
+      gap: 10px;
+      margin-bottom: 16px;
+      overflow-x: auto;
+    }
+    .kpi {
+      flex: 1 1 0;
+      min-width: 0;
+      background: var(--surface);
+      border-radius: 10px;
+      padding: 10px 14px;
+      box-shadow: var(--shadow);
+      border: 1px solid var(--border);
+      display: flex;
+      align-items: baseline;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .kpi .label {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: .03em;
+      margin: 0;
+      white-space: nowrap;
+    }
+    .kpi .value {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--primary);
+      line-height: 1.2;
+      white-space: nowrap;
+    }
+    .kpi .sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin: 0;
+      width: 100%;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    @media (max-width: 640px) {
+      .kpi-row { flex-wrap: wrap; }
+      .kpi { flex: 1 1 calc(50% - 10px); }
+    }
+
+    .card {
+      background: var(--surface);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      border: 1px solid var(--border);
+      padding: 20px 22px 16px;
+      margin-bottom: 20px;
+    }
+    .card-header {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .card-header h2 {
+      margin: 0;
+      font-size: 16px;
+      font-weight: 600;
+    }
+    .card-header .desc {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+    .legend-toggle {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .legend-chip {
+      font-size: 12px;
+      font-weight: 500;
+      padding: 4px 11px;
+      border-radius: 20px;
+      border: 1.5px solid var(--border);
+      background: #f8fafc;
+      cursor: pointer;
+      user-select: none;
+      transition: all .15s;
+      color: var(--text-muted);
+    }
+    .legend-chip.active {
+      border-color: transparent;
+      color: #fff;
+    }
+    .chart-wrap {
+      position: relative;
+      height: 380px;
+      width: 100%;
+    }
+    .source-note {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-align: right;
+      margin-top: 8px;
+    }
+    .source-note.sample { color: #d97706; }
+
+
+    .view-toggle {
+      display: flex;
+      gap: 6px;
+      background: rgba(255,255,255,.08);
+      padding: 4px;
+      border-radius: 10px;
+      border: 1px solid rgba(255,255,255,.12);
+    }
+    .view-toggle button {
+      border: none;
+      background: transparent;
+      color: #94a3b8;
+      font-family: inherit;
+      font-size: 12.5px;
+      font-weight: 500;
+      padding: 6px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: all .15s;
+      white-space: nowrap;
+    }
+    .view-toggle button.active {
+      background: #f97316;
+      color: #fff;
+    }
+    .view-toggle button:hover:not(.active) {
+      color: #e2e8f0;
+      background: rgba(255,255,255,.08);
+    }
+    .region-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-bottom: 14px;
+    }
+    .region-tab {
+      font-size: 12.5px;
+      font-weight: 600;
+      padding: 7px 14px;
+      border-radius: 20px;
+      border: 1.5px solid var(--border);
+      background: #f8fafc;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all .15s;
+      font-family: inherit;
+    }
+    .region-tab:hover { border-color: #cbd5e1; color: var(--text); }
+    .region-tab.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: #fff;
+    }
+
+    #heat-map {
+      height: 420px;
+      width: 100%;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      z-index: 1;
+    }
+    .heat-legend {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 10px;
+    }
+    .heat-legend .grad {
+      width: 120px; height: 10px; border-radius: 4px;
+      background: linear-gradient(90deg, #fef3c7, #f97316, #b91c1c);
+    }
+    .view-panel { display: none; }
+    .view-panel.active { display: block; }
+
+    .loading {
+      text-align: center;
+      padding: 80px 20px;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+
+    @media (max-width: 640px) {
+      .chart-wrap { height: 300px; }
+      .kpi .value { font-size: 22px; }
+      .container { padding: 16px 12px 32px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>📊 CCTS · Thống kê sự cố</h1>
+    <div class="view-toggle" id="view-toggle">
+      <button type="button" class="active" data-view="region">Theo khu vực</button>
+      <button type="button" data-view="tech">Theo kỹ thuật viên</button>
+      <button type="button" data-view="heat">Bản đồ nhiệt</button>
+    </div>
+    <div class="meta">
+      <span class="badge" id="source-badge">Đang tải…</span>
+      <span id="gen-at">—</span>
+      {% if user %}<span style="color:#94a3b8;font-size:12.5px;">{{ user.full_name or user.username }}</span>{% endif %}
+      <a href="/">← Bản đồ live</a>
+    </div>
+  </div>
+
+  <div class="container">
+    <div class="kpi-row">
+      <div class="kpi">
+        <div class="label">Tổng ticket</div>
+        <div class="value" id="kpi-total">—</div>
+        <div class="sub" id="kpi-range">—</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Số ngày</div>
+        <div class="value" id="kpi-days">—</div>
+        <div class="sub">trong khoảng thống kê</div>
+      </div>
+      <div class="kpi">
+        <div class="label">Khu vực</div>
+        <div class="value" id="kpi-regions">—</div>
+        <div class="sub">có phát sinh ticket</div>
+      </div>
+      <div class="kpi">
+        <div class="label">TB / ngày</div>
+        <div class="value" id="kpi-avg">—</div>
+        <div class="sub">ticket theo ngày tạo</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="region-tabs" id="region-tabs" style="display:none;"></div>
+      <div class="card-header">
+        <div>
+          <h2 id="chart-title">Số lượng sự cố theo ngày</h2>
+          <div class="desc" id="chart-desc">Đếm ticket theo <strong>Create Time</strong> · phân tách theo khu vực + tổng</div>
+        </div>
+        <div class="legend-toggle" id="legend-toggle"></div>
+      </div>
+      <div id="chart-loading" class="loading">⏳ Đang tải dữ liệu thống kê…</div>
+      <div class="chart-wrap" id="chart-wrap" style="display:none;">
+        <canvas id="dailyChart"></canvas>
+      </div>
+      <div class="source-note" id="source-note"></div>
+    </div>
+
+    <div class="card" id="heat-panel" style="display:none;">
+      <div class="card-header">
+        <div>
+          <h2>Bản đồ nhiệt · Ticket Overdue</h2>
+          <div class="desc">SLA Status = <strong>Overdue</strong> trong ~2 tháng cào · kích thước = số ticket · màu đỏ đậm = nhiều overdue hơn</div>
+        </div>
+      </div>
+      <div id="heat-map"></div>
+      <div class="heat-legend">
+        <span>Ít</span><span class="grad"></span><span>Nhiều overdue</span>
+        <span id="heat-stats" style="margin-left:auto;"></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const REGION_ORDER = ["DNA-QNA", "DNI-VTU", "LDO-BTH", "EC", "Mtay", "HCM"];
+    const REGION_COLORS = {
+      "DNA-QNA": { border: "#3b82f6", bg: "rgba(59,130,246,.12)" },
+      "DNI-VTU": { border: "#10b981", bg: "rgba(16,185,129,.12)" },
+      "LDO-BTH": { border: "#f59e0b", bg: "rgba(245,158,11,.12)" },
+      "EC":      { border: "#ef4444", bg: "rgba(239,68,68,.12)" },
+      "Mtay":    { border: "#8b5cf6", bg: "rgba(139,92,246,.12)" },
+      "HCM":     { border: "#0ea5e9", bg: "rgba(14,165,233,.12)" },
+      "Total":   { border: "#0f172a", bg: "rgba(15,23,42,.06)" },
+    };
+    const TECH_PALETTE = [
+      "#3b82f6","#10b981","#f59e0b","#ef4444","#8b5cf6","#0ea5e9",
+      "#ec4899","#14b8a6","#f97316","#6366f1","#84cc16","#a855f7"
+    ];
+
+    let chart = null;
+    let heatMap = null;
+    let heatLayer = null;
+    let currentPayload = null;
+    let currentView = "region";   // "region" | "tech"
+    let selectedRegion = "HCM";
+    let visibleSeries = {};
+
+    function colorFor(name, idx) {
+      if (REGION_COLORS[name]) return REGION_COLORS[name];
+      const c = TECH_PALETTE[idx % TECH_PALETTE.length];
+      return { border: c, bg: c + "22" };
+    }
+
+    function formatDateLabel(iso) {
+      const p = String(iso).split("-");
+      if (p.length === 3) return p[2] + "/" + p[1];
+      return iso;
+    }
+
+    function getActiveChartData() {
+      if (!currentPayload) return { labels: [], seriesNames: [], datasets: {}, showTotal: false };
+      if (currentView === "region") {
+        return {
+          labels: currentPayload.labels || [],
+          seriesNames: currentPayload.regions || [],
+          datasets: currentPayload.datasets || {},
+          showTotal: false,
+        };
+      }
+      const by = (currentPayload.by_region || {})[selectedRegion] || {};
+      return {
+        labels: by.labels || currentPayload.labels || [],
+        seriesNames: by.techs || [],
+        datasets: by.datasets || {},
+        showTotal: false,
+      };
+    }
+
+    function buildDatasets() {
+      const active = getActiveChartData();
+      const order = active.showTotal
+        ? [...active.seriesNames, "Total"]
+        : [...active.seriesNames];
+      const datasets = [];
+      order.forEach((name, idx) => {
+        if (!(name in (active.datasets || {}))) return;
+        if (visibleSeries[name] === false) return;
+        const col = colorFor(name, idx);
+        const isTotal = name === "Total";
+        datasets.push({
+          label: name,
+          data: active.datasets[name],
+          borderColor: col.border,
+          backgroundColor: col.bg,
+          borderWidth: isTotal ? 3 : 2,
+          pointRadius: isTotal ? 4 : 3,
+          pointHoverRadius: 6,
+          pointBackgroundColor: col.border,
+          pointBorderColor: "#fff",
+          pointBorderWidth: 2,
+          tension: 0,
+          fill: false,
+          order: isTotal ? 0 : 1,
+        });
+      });
+      return { labels: (active.labels || []).map(formatDateLabel), datasets, rawLabels: active.labels || [] };
+    }
+
+    function renderLegend() {
+      const el = document.getElementById("legend-toggle");
+      el.innerHTML = "";
+      const active = getActiveChartData();
+      const order = active.showTotal
+        ? [...active.seriesNames, "Total"]
+        : [...active.seriesNames];
+      order.forEach((name, idx) => {
+        if (!(name in (active.datasets || {}))) return;
+        if (!(name in visibleSeries)) visibleSeries[name] = true;
+        const col = colorFor(name, idx);
+        const chip = document.createElement("span");
+        chip.className = "legend-chip" + (visibleSeries[name] ? " active" : "");
+        chip.textContent = name;
+        if (visibleSeries[name]) {
+          chip.style.background = col.border;
+          chip.style.borderColor = col.border;
+        }
+        chip.addEventListener("click", () => {
+          visibleSeries[name] = !visibleSeries[name];
+          updateChart();
+          renderLegend();
+        });
+        el.appendChild(chip);
+      });
+    }
+
+    function updateChart() {
+      if (!currentPayload || !chart) return;
+      const built = buildDatasets();
+      chart.data.labels = built.labels;
+      chart.data.datasets = built.datasets;
+      chart.update("none");
+    }
+
+    function renderKPIs(payload) {
+      if (currentView === "region") {
+        const total = payload.total_tickets || 0;
+        const days = (payload.labels || []).length;
+        const regions = (payload.regions || []).length;
+        const avg = days > 0 ? (total / days).toFixed(1) : "—";
+        document.getElementById("kpi-total").textContent = total.toLocaleString("vi-VN");
+        document.getElementById("kpi-days").textContent = days;
+        document.getElementById("kpi-regions").textContent = regions;
+        document.getElementById("kpi-avg").textContent = avg;
+        const dr = payload.date_range || {};
+        document.getElementById("kpi-range").textContent =
+          dr.from && dr.to ? formatDateLabel(dr.from) + " → " + formatDateLabel(dr.to) : "—";
+      } else {
+        const by = (payload.by_region || {})[selectedRegion] || {};
+        const ds = by.datasets || {};
+        let total = 0;
+        Object.values(ds).forEach(arr => { arr.forEach(v => total += v); });
+        const days = (by.labels || payload.labels || []).length;
+        const techs = (by.techs || []).length;
+        const avg = days > 0 ? (total / days).toFixed(1) : "—";
+        document.getElementById("kpi-total").textContent = total.toLocaleString("vi-VN");
+        document.getElementById("kpi-days").textContent = days;
+        document.getElementById("kpi-regions").textContent = techs;
+        document.getElementById("kpi-avg").textContent = avg;
+        document.querySelector("#kpi-regions").parentElement.querySelector(".sub").textContent = "kỹ thuật viên";
+        document.querySelector("#kpi-total").parentElement.querySelector(".label").textContent = "Ticket khu vực";
+      }
+    }
+
+    function renderRegionTabs() {
+      const el = document.getElementById("region-tabs");
+      if (currentView !== "tech") {
+        el.style.display = "none";
+        return;
+      }
+      el.style.display = "flex";
+      el.innerHTML = "";
+      REGION_ORDER.forEach(r => {
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "region-tab" + (r === selectedRegion ? " active" : "");
+        btn.textContent = r;
+        btn.addEventListener("click", () => {
+          selectedRegion = r;
+          visibleSeries = {};
+          renderRegionTabs();
+          document.getElementById("chart-title").textContent = "Sự cố theo KT · " + selectedRegion;
+          document.getElementById("chart-desc").innerHTML =
+            "Ticket giao cho từng kỹ thuật viên khu vực <strong>" + selectedRegion + "</strong> (theo Create Time)";
+          // reset KPI sub labels
+          document.querySelector("#kpi-regions").parentElement.querySelector(".sub").textContent = "kỹ thuật viên";
+          document.querySelector("#kpi-total").parentElement.querySelector(".label").textContent = "Ticket khu vực";
+          renderKPIs(currentPayload);
+          renderLegend();
+          if (chart) {
+            const built = buildDatasets();
+            chart.data.labels = built.labels;
+            chart.data.datasets = built.datasets;
+            chart.update();
+          } else {
+            drawChart();
+          }
+        });
+        el.appendChild(btn);
+      });
+    }
+
+    function drawChart() {
+      const built = buildDatasets();
+      const ctx = document.getElementById("dailyChart").getContext("2d");
+      if (chart) chart.destroy();
+      if (!built.labels.length && !(built.datasets || []).length) return;
+
+      chart = new Chart(ctx, {
+        type: "line",
+        data: { labels: built.labels, datasets: built.datasets },
+        options: {
+          responsive: true,
+          maintainAspectRatio: false,
+          interaction: { mode: "index", intersect: false },
+          plugins: {
+            legend: { display: false },
+            tooltip: {
+              backgroundColor: "#0f172a",
+              titleFont: { size: 13, weight: "600" },
+              bodyFont: { size: 12.5 },
+              padding: 12,
+              cornerRadius: 8,
+              callbacks: {
+                title: (items) => {
+                  const idx = items[0].dataIndex;
+                  const raw = buildDatasets().rawLabels;
+                  return (raw && raw[idx]) || items[0].label;
+                },
+                label: (item) => " " + item.dataset.label + ": " + item.raw + " ticket",
+              },
+            },
+          },
+          scales: {
+            x: {
+              grid: { color: "rgba(148,163,184,.15)", drawBorder: false },
+              ticks: { font: { size: 11.5 }, color: "#64748b", maxRotation: 0 },
+            },
+            y: {
+              beginAtZero: true,
+              grace: "10%",
+              grid: { color: "rgba(148,163,184,.2)", drawBorder: false },
+              ticks: { font: { size: 11.5 }, color: "#64748b", precision: 0, stepSize: 1 },
+              title: {
+                display: true,
+                text: "Số ticket",
+                color: "#94a3b8",
+                font: { size: 12, weight: "500" },
+              },
+            },
+          },
+        },
+      });
+    }
+
+    function setChartCardVisible(show) {
+      const card = document.querySelector(".card");
+      const heat = document.getElementById("heat-panel");
+      // first .card is line chart card
+      const cards = document.querySelectorAll(".container > .card");
+      if (cards[0]) cards[0].style.display = show ? "" : "none";
+      if (heat) heat.style.display = show ? "none" : "";
+    }
+
+    function overdueColor(count, maxC) {
+      if (!maxC || maxC <= 0) return "#fbbf24";
+      const t = Math.min(1, count / maxC);
+      // vàng -> cam -> đỏ đậm
+      if (t < 0.33) return "#fbbf24";
+      if (t < 0.66) return "#f97316";
+      return "#b91c1c";
+    }
+
+    function renderHeatmap(payload) {
+      const heat = (payload && payload.heatmap) || {};
+      const points = heat.points || [];
+      const maxC = heat.max_overdue || 1;
+      document.getElementById("heat-stats").textContent =
+        (heat.total_overdue || 0) + " overdue · " +
+        (heat.stations_with_coords || 0) + " trạm có tọa độ" +
+        (heat.stations_missing_coords ? (" · " + heat.stations_missing_coords + " thiếu tọa độ") : "");
+
+      if (!heatMap) {
+        heatMap = L.map("heat-map").setView([10.8, 106.7], 6);
+        L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+          maxZoom: 18,
+          attribution: "&copy; OpenStreetMap",
+        }).addTo(heatMap);
+      }
+      if (heatLayer) {
+        heatMap.removeLayer(heatLayer);
+      }
+      heatLayer = L.layerGroup();
+      const bounds = [];
+      points.forEach(p => {
+        const r = 8 + Math.sqrt(p.overdue_count) * 6 + (p.major_count || 0) * 2;
+        const color = overdueColor(p.overdue_count, maxC);
+        const circle = L.circleMarker([p.lat, p.lng], {
+          radius: Math.min(r, 40),
+          color: "#7f1d1d",
+          weight: 1,
+          fillColor: color,
+          fillOpacity: 0.75,
+        });
+        circle.bindPopup(
+          "<strong>" + (p.station_code || "") + "</strong><br/>" +
+          "Overdue: <b>" + p.overdue_count + "</b><br/>" +
+          "Major: " + (p.major_count || 0) + "<br/>" +
+          (p.region ? ("KV: " + p.region) : "")
+        );
+        heatLayer.addLayer(circle);
+        bounds.push([p.lat, p.lng]);
+      });
+      heatLayer.addTo(heatMap);
+      setTimeout(() => {
+        heatMap.invalidateSize();
+        if (bounds.length) heatMap.fitBounds(bounds, { padding: [30, 30], maxZoom: 12 });
+      }, 100);
+    }
+
+    function applyView(view) {
+      currentView = view;
+      visibleSeries = {};
+      document.querySelectorAll("#view-toggle button").forEach(b => {
+        b.classList.toggle("active", b.dataset.view === view);
+      });
+
+      if (view === "heat") {
+        setChartCardVisible(false);
+        // KPI cho heatmap
+        if (currentPayload) {
+          const heat = currentPayload.heatmap || {};
+          document.getElementById("kpi-total").textContent = (heat.total_overdue || 0).toLocaleString("vi-VN");
+          document.querySelector("#kpi-total").parentElement.querySelector(".label").textContent = "Overdue";
+          document.getElementById("kpi-days").textContent = currentPayload.scrape_days || 62;
+          document.querySelector("#kpi-days").parentElement.querySelector(".sub").textContent = "ngày dữ liệu cào";
+          document.getElementById("kpi-regions").textContent = heat.stations_with_coords || 0;
+          document.querySelector("#kpi-regions").parentElement.querySelector(".sub").textContent = "trạm trên bản đồ";
+          document.getElementById("kpi-avg").textContent = heat.max_overdue || 0;
+          document.querySelector("#kpi-avg").parentElement.querySelector(".label").textContent = "Max / trạm";
+          document.querySelector("#kpi-avg").parentElement.querySelector(".sub").textContent = "overdue cao nhất";
+          renderHeatmap(currentPayload);
+        }
+        return;
+      }
+
+      setChartCardVisible(true);
+      if (view === "region") {
+        document.getElementById("chart-title").textContent = "Số lượng sự cố theo ngày";
+        document.getElementById("chart-desc").innerHTML =
+          "Đếm ticket theo <strong>Create Time</strong> · 10 ngày gần nhất trong dữ liệu ~2 tháng · theo khu vực";
+        document.querySelector("#kpi-regions").parentElement.querySelector(".sub").textContent = "có phát sinh ticket";
+        document.querySelector("#kpi-total").parentElement.querySelector(".label").textContent = "Tổng ticket";
+        document.querySelector("#kpi-days").parentElement.querySelector(".sub").textContent = "trong khoảng thống kê";
+        document.querySelector("#kpi-avg").parentElement.querySelector(".label").textContent = "TB / ngày";
+        document.querySelector("#kpi-avg").parentElement.querySelector(".sub").textContent = "ticket theo ngày tạo";
+      } else {
+        document.getElementById("chart-title").textContent = "Sự cố theo KT · " + selectedRegion;
+        document.getElementById("chart-desc").innerHTML =
+          "Ticket giao cho từng kỹ thuật viên khu vực <strong>" + selectedRegion + "</strong> (10 ngày gần nhất)";
+        document.querySelector("#kpi-regions").parentElement.querySelector(".sub").textContent = "kỹ thuật viên";
+        document.querySelector("#kpi-total").parentElement.querySelector(".label").textContent = "Ticket khu vực";
+      }
+      renderRegionTabs();
+      if (!currentPayload) return;
+      renderKPIs(currentPayload);
+      renderLegend();
+      drawChart();
+    }
+
+    function renderChart(payload) {
+      currentPayload = payload;
+      document.getElementById("chart-loading").style.display = "none";
+      document.getElementById("chart-wrap").style.display = "block";
+
+      const srcBadge = document.getElementById("source-badge");
+      const srcNote = document.getElementById("source-note");
+      if (payload.source === "sample") {
+        srcBadge.textContent = "Dữ liệu mẫu";
+        srcNote.textContent = "⚠ Đang dùng file mẫu (API không khả dụng). Cache sẽ cập nhật lúc 0h.";
+        srcNote.className = "source-note sample";
+      } else {
+        srcBadge.textContent = "Cache";
+        srcNote.textContent = "Nguồn cache (cào lúc 0h) · " + (payload.generated_at || "");
+        srcNote.className = "source-note";
+      }
+      document.getElementById("gen-at").textContent = payload.generated_at
+        ? "Cập nhật: " + String(payload.generated_at).replace("T", " ").slice(0, 19)
+        : "";
+
+      applyView(currentView);
+    }
+
+    // View toggle handlers
+    document.getElementById("view-toggle").addEventListener("click", (e) => {
+      const btn = e.target.closest("button[data-view]");
+      if (!btn) return;
+      applyView(btn.dataset.view);
+    });
+
+    async function loadData() {
+      try {
+        const res = await fetch("/api/stats/daily-volume");
+        if (!res.ok) throw new Error("HTTP " + res.status);
+        const payload = await res.json();
+        if (payload.error && !payload.labels) throw new Error(payload.error);
+        renderChart(payload);
+      } catch (e) {
+        console.warn("API lỗi, dùng demo:", e);
+        document.getElementById("chart-loading").textContent =
+          "Không tải được cache — hiển thị demo.";
+        renderChart({
+          labels: ["2026-07-28"],
+          regions: REGION_ORDER.slice(),
+          datasets: {
+            "DNA-QNA": [0], "DNI-VTU": [1], "LDO-BTH": [2],
+            "EC": [1], "Mtay": [2], "HCM": [2],           },
+          by_region: {
+            "HCM": {
+              labels: ["2026-07-28"],
+              techs: ["KT Demo 1", "KT Demo 2"],
+              datasets: { "KT Demo 1": [1], "KT Demo 2": [1] },
+            },
+            "DNI-VTU": {
+              labels: ["2026-07-28"],
+              techs: ["KT Demo A"],
+              datasets: { "KT Demo A": [1] },
+            },
+          },
+          total_tickets: 8,
+          date_range: { from: "2026-07-28", to: "2026-07-28" },
+          source: "sample",
+          generated_at: new Date().toISOString(),
+        });
+      }
+    }
+
+    loadData();
+  </script>
+</body>
+</html>

@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 import users_store
 import ccts_data
+import stats_data
 from ccts_data import get_static_data, filter_stations_for_user, filter_tech_by_region_for_user
 from location_hub import hub
 from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS, TRACCAR_TOKEN
@@ -32,6 +33,7 @@ _latest_station_payload = {
 }
 _latest_tech_stats = {}
 _latest_ticket_rows = []
+_refresh_paused = False  # True = tạm dừng chu kỳ cào tự động (chỉ admin bật/tắt)
 
 
 def get_current_user(request: Request):
@@ -85,11 +87,39 @@ async def broadcast_stations_update():
 async def refresh_stations_loop():
     while True:
         await asyncio.sleep(TICKET_REFRESH_SECONDS)
+        if _refresh_paused:
+            print(f"⏸ Chu kỳ cào đang TẠM DỪNG — bỏ qua lần này (mỗi {TICKET_REFRESH_SECONDS}s kiểm tra lại).")
+            continue
         try:
             await refresh_stations_once()
             await broadcast_stations_update()
         except Exception as e:
             print(f"⚠️ Lỗi làm mới dữ liệu ticket (giữ nguyên dữ liệu cũ): {e!r}")
+
+
+async def _seconds_until_next_midnight_vn() -> float:
+    """Số giây đến 00:00:05 giờ Việt Nam kế tiếp."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    vn = ZoneInfo("Asia/Ho_Chi_Minh")
+    now = datetime.now(vn)
+    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
+    return max(1.0, (tomorrow - now).total_seconds())
+
+
+async def stats_midnight_loop():
+    """Mỗi ngày lúc ~0h VN: cào lại thống kê 10 ngày và ghi cache."""
+    while True:
+        wait_s = await _seconds_until_next_midnight_vn()
+        hours = wait_s / 3600
+        print(f"[stats] Lịch cào 0h: còn ~{hours:.1f}h (đợi {int(wait_s)}s)...")
+        await asyncio.sleep(wait_s)
+        try:
+            print("[stats] === Bắt đầu cào thống kê định kỳ 0h ===")
+            await stats_data.refresh_stats_cache()
+            print("[stats] === Cào thống kê 0h hoàn tất ===")
+        except Exception as e:
+            print(f"[stats] Lỗi cào thống kê lúc 0h (giữ cache cũ): {e!r}")
 
 
 @app.on_event("startup")
@@ -105,12 +135,35 @@ async def on_startup():
         _latest_ticket_rows = cached_rows
         print("✅ Đã nạp dữ liệu từ lần cào gần nhất (file cache).")
 
+    # Stats: nạp cache ngay (nếu có) để /stats không trống; cào mới chạy NỀN — không chặn startup
+    stats_cached = stats_data.load_stats_cache()
+    if stats_cached:
+        print(f"✅ Đã nạp stats cache ({stats_cached.get('total_tickets', 0)} ticket, "
+              f"cập nhật {stats_cached.get('generated_at', '?')}).")
+    else:
+        print("[stats] Chưa có cache — trang /stats tạm trống đến khi cào nền xong.")
+
+    async def _stats_startup_refresh():
+        """
+        Mỗi lần restart: cào 10 ngày → hiện tại (để test nâng cấp).
+        Chạy nền + CCTS_API_LOCK — không lag web, không đụng ccts_data.
+        """
+        try:
+            print("[stats] === Cào thống kê khi khởi động (10 ngày → now, background) ===")
+            await stats_data.refresh_stats_cache(until_now=True)
+            print("[stats] === Cào thống kê startup hoàn tất ===")
+        except Exception as e:
+            print(f"[stats] Cào startup thất bại (giữ cache cũ nếu có): {e!r}")
+
+    asyncio.create_task(_stats_startup_refresh())
+
     try:
         await refresh_stations_once()
     except Exception as e:
         print(f"⚠️ Lỗi lần cào đầu tiên khi khởi động ({e!r}) - tiếp tục chạy với dữ liệu cache (nếu có).")
 
     asyncio.create_task(refresh_stations_loop())
+    asyncio.create_task(stats_midnight_loop())
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -154,6 +207,62 @@ async def map_page(request: Request):
     return templates.TemplateResponse(request=request, name="map.html", context={"user": user})
 
 
+@app.get("/stats", response_class=HTMLResponse)
+async def stats_page(request: Request):
+    """Trang thống kê / trực quan dữ liệu ticket."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    return templates.TemplateResponse(
+        request=request, name="stats.html", context={"user": user}
+    )
+
+
+@app.get("/api/stats/daily-volume")
+async def api_stats_daily_volume(request: Request):
+    """
+    Trả payload Chart.js từ cache (đã cào lúc 0h).
+    Không gọi API CCTS khi user mở trang thống kê.
+    """
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    payload = stats_data.get_cached_daily_volume()
+    if payload is None:
+        return JSONResponse(
+            {
+                "error": "Chưa có dữ liệu thống kê",
+                "detail": "Hệ thống sẽ tự cào lúc 0h mỗi ngày. Admin có thể bấm làm mới thủ công.",
+                "labels": [],
+                "regions": [],
+                "datasets": {},
+                "total_tickets": 0,
+            },
+            status_code=503,
+        )
+    return payload
+
+
+@app.post("/api/admin/refresh-stats")
+async def api_admin_refresh_stats(request: Request):
+    """Admin: ép cào lại thống kê ngay (không đợi 0h)."""
+    user = get_current_user(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "Bạn không có quyền thực hiện thao tác này."}, status_code=403)
+    try:
+        payload = await stats_data.refresh_stats_cache(until_now=True)
+        return {
+            "status": "ok",
+            "message": f"Đã cập nhật thống kê ({payload.get('total_tickets', 0)} ticket).",
+            "generated_at": payload.get("generated_at"),
+            "total_tickets": payload.get("total_tickets", 0),
+        }
+    except Exception as e:
+        print(f"[stats] Lỗi admin refresh-stats: {e!r}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/api/admin/refresh-stations")
 async def api_refresh_stations(request: Request):
     user = get_current_user(request)
@@ -163,6 +272,41 @@ async def api_refresh_stations(request: Request):
     await refresh_stations_once()
     await broadcast_stations_update()
     return {"status": "ok", "message": "Đã cập nhật dữ liệu trạm mới nhất!"}
+
+
+@app.get("/api/admin/refresh-status")
+async def api_refresh_status(request: Request):
+    """Trạng thái chu kỳ cào tự động (paused hay đang chạy)."""
+    user = get_current_user(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "forbidden"}, status_code=403)
+    return {
+        "paused": _refresh_paused,
+        "interval_seconds": TICKET_REFRESH_SECONDS,
+    }
+
+
+@app.post("/api/admin/toggle-refresh")
+async def api_toggle_refresh(request: Request):
+    """Bật/tắt chu kỳ cào tự động. Chỉ admin. Không ảnh hưởng nút refresh thủ công."""
+    global _refresh_paused
+    user = get_current_user(request)
+    if not require_admin(user):
+        return JSONResponse({"error": "Bạn không có quyền thực hiện thao tác này."}, status_code=403)
+
+    _refresh_paused = not _refresh_paused
+    if _refresh_paused:
+        msg = "Đã TẠM DỪNG chu kỳ cào tự động."
+        print(f"⏸ Admin [{user.get('username')}] tạm dừng cào dữ liệu.")
+    else:
+        msg = "Đã BẬT LẠI chu kỳ cào tự động."
+        print(f"▶ Admin [{user.get('username')}] bật lại cào dữ liệu.")
+    return {
+        "status": "ok",
+        "paused": _refresh_paused,
+        "message": msg,
+        "interval_seconds": TICKET_REFRESH_SECONDS,
+    }
 
 
 @app.get("/api/stations")

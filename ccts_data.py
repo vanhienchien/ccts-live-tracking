@@ -72,17 +72,35 @@ def reload_static_data():
 # ==========================================
 # Cào ticket - đa tài khoản
 # ==========================================
-async def _fetch_tickets_window_single_account(username, password, ticket_statuses, start_str, stop_str):
-    """Cào ticket cho 1 tài khoản, theo khoảng thời gian & danh sách trạng
-    thái tuỳ ý. Trả về (list_dict_thô, thành_công_bool). Lỗi đăng nhập/mạng
-    được BẮT Ở ĐÂY (không crash cả chu kỳ nếu 1 tài khoản gặp sự cố)."""
-    client = CCTSClient(username=username, password=password)
-    try:
-        await client.login()
-    except Exception as e:
-        print(f"[-] Đăng nhập thất bại cho [{username}]: {e}")
-        return [], False
+# ==========================================
+# Session pool — tái sử dụng phiên đăng nhập giữa các chu kỳ
+# (tránh login liên tục → bị CCTS đá session tài khoản khác)
+# ==========================================
+_client_pool = {}  # username -> CCTSClient đã login
 
+
+def _invalidate_client(username):
+    """Huỷ phiên đã lưu khi bị lỗi / bị đá đăng nhập."""
+    if username in _client_pool:
+        _client_pool.pop(username, None)
+        print(f"[~] Đã huỷ session cache của [{username}]")
+
+
+async def _get_or_login_client(username, password):
+    """Lấy client từ pool; nếu chưa có thì login mới và cache lại.
+    Trả về (client, is_fresh_login)."""
+    client = _client_pool.get(username)
+    if client is not None:
+        return client, False
+    client = CCTSClient(username=username, password=password)
+    await client.login()
+    _client_pool[username] = client
+    print(f"[+] Login mới & cache session cho [{username}]")
+    return client, True
+
+
+async def _post_find_tickets(client, username, ticket_statuses, start_str, stop_str):
+    """Gọi API find ticket, gắn _source_account, trả list thô."""
     payload = {
         "page": {"pageNum": 1, "pageSize": 2000},
         "timezoneOffset": 420,
@@ -90,34 +108,87 @@ async def _fetch_tickets_window_single_account(username, password, ticket_status
         "createStopTime": stop_str,
         "ticketStatus": ticket_statuses,
     }
+    res_data = await client._post(ENDPOINT_FIND_TICKET, payload)
+    data = res_data.get("data", {})
+    tickets = data.get("list", []) if isinstance(data, dict) else data
+    if not isinstance(tickets, list):
+        tickets = data.get("records", [])
+    for t in tickets or []:
+        t["_source_account"] = username
+    return tickets or []
+
+
+async def _fetch_tickets_window_single_account(username, password, ticket_statuses, start_str, stop_str):
+    """Cào ticket cho 1 tài khoản, theo khoảng thời gian & danh sách trạng
+    thái tuỳ ý. Tái sử dụng session đã login; nếu request lỗi (có thể bị đá
+    phiên) thì huỷ cache, login lại 1 lần rồi thử lại. Trả về
+    (list_dict_thô, thành_công_bool)."""
+    try:
+        client, _ = await _get_or_login_client(username, password)
+    except Exception as e:
+        print(f"[-] Đăng nhập thất bại cho [{username}]: {e}")
+        _invalidate_client(username)
+        return [], False
 
     try:
-        res_data = await client._post(ENDPOINT_FIND_TICKET, payload)
-        data = res_data.get("data", {})
-        tickets = data.get("list", []) if isinstance(data, dict) else data
-        if not isinstance(tickets, list):
-            tickets = data.get("records", [])
-        for t in tickets:
-            t["_source_account"] = username
-        return tickets or [], True
+        tickets = await _post_find_tickets(client, username, ticket_statuses, start_str, stop_str)
+        return tickets, True
     except Exception as e:
-        print(f"[-] Lỗi khi cào dữ liệu từ [{username}]: {e}")
-        return [], False
+        print(f"[-] Lỗi khi cào dữ liệu từ [{username}] (session có thể đã bị đá): {e}")
+        # Thử lại 1 lần với login mới
+        _invalidate_client(username)
+        try:
+            client, _ = await _get_or_login_client(username, password)
+            tickets = await _post_find_tickets(client, username, ticket_statuses, start_str, stop_str)
+            print(f"[+] Cào lại thành công sau khi login mới cho [{username}]")
+            return tickets, True
+        except Exception as e2:
+            print(f"[-] Cào lại vẫn thất bại cho [{username}]: {e2}")
+            _invalidate_client(username)
+            return [], False
 
 
 async def _fetch_tickets_window_multi_account(ticket_statuses, start_str, stop_str):
     """Cào từ TẤT CẢ tài khoản trong CCTS_ACCOUNTS, gộp lại (chưa khử trùng).
-    Trả về (list_dict_thô, có_ít_nhất_1_tài_khoản_thành_công)."""
+
+    Trả về (list_dict_thô, all_success_bool).
+    all_success = True chỉ khi *mọi* tài khoản đều lấy thành công.
+    Nếu thiếu dù 1 tài khoản → all_success=False để main giữ cache cũ
+    và thử lại chu kỳ sau (tránh dữ liệu thiếu nửa).
+
+    Dùng CCTS_API_LOCK chung với stats_data (export) để tránh đá session.
+    """
+    from ccts_gate import CCTS_API_LOCK
+
     all_raw = []
-    any_success = False
-    for account in CCTS_ACCOUNTS:
-        tickets, ok = await _fetch_tickets_window_single_account(
-            account["username"], account["password"], ticket_statuses, start_str, stop_str
+    success_count = 0
+    total = len(CCTS_ACCOUNTS)
+    failed_accounts = []
+
+    async with CCTS_API_LOCK:
+        print("[ccts_data] Đã giữ CCTS_API_LOCK — cào live tickets...")
+        for account in CCTS_ACCOUNTS:
+            username = account["username"]
+            tickets, ok = await _fetch_tickets_window_single_account(
+                username, account["password"], ticket_statuses, start_str, stop_str
+            )
+            if ok:
+                success_count += 1
+                all_raw.extend(tickets)
+            else:
+                failed_accounts.append(username)
+        print("[ccts_data] Nhả CCTS_API_LOCK.")
+
+    all_success = (total > 0) and (success_count == total)
+    if all_success:
+        print(f"[+] Cào thành công toàn bộ {total}/{total} tài khoản.")
+    else:
+        print(
+            f"[-] Chỉ {success_count}/{total} tài khoản thành công "
+            f"(lỗi: {', '.join(failed_accounts) or 'n/a'}) "
+            f"→ không chấp nhận dữ liệu mới, giữ cache cũ."
         )
-        if ok:
-            any_success = True
-        all_raw.extend(tickets)
-    return all_raw, any_success
+    return all_raw, all_success
 
 
 def _process_raw_tickets(raw_tickets):
@@ -140,7 +211,8 @@ def _process_raw_tickets(raw_tickets):
 
 async def fetch_live_tickets():
     """Cào ticket ĐANG MỞ từ TẤT CẢ tài khoản, gộp + khử trùng theo Ticket ID.
-    Trả về (DataFrame, any_success_bool)."""
+    Trả về (DataFrame, fetch_success_bool).
+    fetch_success=True chỉ khi mọi tài khoản CCTS đều cào thành công."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     raw, any_success = await _fetch_tickets_window_multi_account(OPEN_STATUSES, "2026-04-30 17:00:00", now_str)
 
@@ -311,7 +383,7 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
         "missing_count": missing_count,
         "missing_coord_tickets": missing_coord_tickets or [],
         "filtered_north": filtered_north_count,
-        "updated_at": datetime.now().isoformat(timespec="seconds"),
+        "updated_at": datetime.now(VN_TZ).isoformat(timespec="seconds"),
         "fetch_success": fetch_success,
     }
 

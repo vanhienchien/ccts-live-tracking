@@ -66,7 +66,7 @@ khác chỉ xem được **cấp bậc thấp hơn mình**, không phân biệt 
 **Trên Windows: KHÔNG dùng `--reload`** (xem giải thích bên dưới):
 
 ```powershell
-uvicorn main:app --host 0.0.0.0 --port 8000
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 **Trên Linux/macOS**, có thể dùng `--reload` bình thường khi phát triển:

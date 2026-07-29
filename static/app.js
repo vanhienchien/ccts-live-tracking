@@ -100,6 +100,52 @@ async function triggerManualRefresh() {
     }
 }
 
+function applyRefreshPausedUI(paused) {
+    const btn = document.getElementById('btn-toggle-refresh');
+    if (!btn) return;
+    btn.dataset.paused = paused ? '1' : '0';
+    btn.classList.toggle('is-paused', !!paused);
+    btn.textContent = paused ? '▶' : '⏸';
+    btn.title = paused
+        ? 'Đang tạm dừng cào tự động — bấm để BẬT LẠI'
+        : 'Đang cào tự động — bấm để TẠM DỪNG';
+}
+
+async function loadRefreshStatus() {
+    const btn = document.getElementById('btn-toggle-refresh');
+    if (!btn) return;
+    try {
+        const res = await fetch('/api/admin/refresh-status');
+        if (!res.ok) return;
+        const data = await res.json();
+        applyRefreshPausedUI(!!data.paused);
+    } catch (_) { /* ignore */ }
+}
+
+async function toggleAutoRefresh() {
+    const btn = document.getElementById('btn-toggle-refresh');
+    if (btn) btn.disabled = true;
+    try {
+        const res = await fetch('/api/admin/toggle-refresh', { method: 'POST' });
+        const data = await res.json();
+        if (res.ok) {
+            applyRefreshPausedUI(!!data.paused);
+            alert((data.paused ? '⏸ ' : '▶ ') + data.message);
+        } else {
+            alert('❌ ' + (data.error || 'Không đổi được trạng thái.'));
+        }
+    } catch (err) {
+        alert('❌ Không thể kết nối tới server.');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+// Đồng bộ icon pause khi trang load (chỉ admin có nút)
+if (document.getElementById('btn-toggle-refresh')) {
+    loadRefreshStatus();
+}
+
 // Vẽ marker trạm dựa trên allStations + bộ lọc kỹ thuật viên hiện tại (selectedTechs)
 // + bộ lọc loại trạm (showChargers/showBss)
 let showChargerStations = true;
@@ -329,7 +375,7 @@ function renderTechPanel(data) {
             <div class="region-header">
                 <input type="checkbox" class="region-check region-checkbox" data-region="${region}" onclick="event.stopPropagation()">
                 <span>📍 ${region}</span>
-                <span style="font-size:11.5px;color:#94a3b8;font-weight:500;">${techs.length}</span>
+                <span class="region-count">${techs.length}</span>
                 <span class="chevron">▶</span>
             </div>
             <div class="region-techs">`;
@@ -362,15 +408,22 @@ function renderTechPanel(data) {
     }
 
     techPanel.innerHTML = `
-        <div class="panel-head">
+        <div class="panel-head-text">
             <h3>🧑‍🔧 Lọc kỹ thuật viên</h3>
-            <div class="sub">Chọn khu vực để mở danh sách · Tick để lọc bản đồ</div>
         </div>
         <div class="panel-body">${bodyHtml}</div>
         <div id="tech-filter-actions">
-            <button id="tech-select-all">Chọn tất cả</button>
-            <button id="tech-clear-all">Bỏ chọn</button>
+            <button type="button" id="tech-select-all">Chọn tất cả</button>
+            <button type="button" id="tech-clear-all">Bỏ chọn</button>
         </div>`;
+
+    const closeBtn = document.getElementById('tech-filter-close');
+    if (closeBtn) {
+        closeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            setTechFilterOpen(false);
+        });
+    }
 
     // Accordion: click region header (except checkbox) to expand/collapse
     techPanel.querySelectorAll('.region-header').forEach((header) => {
@@ -851,8 +904,15 @@ function formatUpdatedAt(iso) {
     try {
         const d = new Date(iso);
         if (isNaN(d.getTime())) return iso;
-        const pad = (n) => String(n).padStart(2, '0');
-        return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+        // Luôn hiển thị theo giờ Việt Nam (UTC+7), tránh lệch múi giờ server/UTC
+        const parts = new Intl.DateTimeFormat('en-GB', {
+            timeZone: 'Asia/Ho_Chi_Minh',
+            day: '2-digit', month: '2-digit', year: 'numeric',
+            hour: '2-digit', minute: '2-digit', second: '2-digit',
+            hour12: false,
+        }).formatToParts(d);
+        const get = (type) => (parts.find((p) => p.type === type) || {}).value || '';
+        return `${get('day')}/${get('month')}/${get('year')} ${get('hour')}:${get('minute')}:${get('second')}`;
     } catch (_) {
         return iso;
     }
