@@ -1,7 +1,12 @@
 import asyncio
 import base64
 import hashlib
+import io
 import json
+import time
+from datetime import datetime, timedelta
+
+import pandas as pd
 import requests
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization
@@ -138,3 +143,140 @@ class CCTSClient:
                 res_data = res.json()
 
         return res_data
+
+    # ------------------------------------------------------------------
+    # Export ticket → Excel (dùng cho thống kê / visualization)
+    # ------------------------------------------------------------------
+    async def create_export_task(self, start_time, end_time, ticket_status=None, sla_timeout=None, offset=420):
+        """
+        Gửi yêu cầu xuất danh sách ticket sang Excel.
+        start_time / end_time nhận giờ Việt Nam (YYYY-MM-DD HH:MM:SS),
+        tự trừ 7 tiếng để khớp backend UTC.
+        """
+        try:
+            start_dt = datetime.strptime(str(start_time).strip(), "%Y-%m-%d %H:%M:%S") - timedelta(hours=7)
+            start_time_payload = start_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            start_time_payload = start_time
+
+        try:
+            end_dt = datetime.strptime(str(end_time).strip(), "%Y-%m-%d %H:%M:%S") - timedelta(hours=7)
+            end_time_payload = end_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            end_time_payload = end_time
+
+        request_data = {
+            "createStartTime": start_time_payload,
+            "createStopTime": end_time_payload,
+        }
+        if ticket_status:
+            request_data["ticketStatus"] = ticket_status
+        if sla_timeout is not None:
+            request_data["slaTimeout"] = str(sla_timeout)
+
+        payload = {
+            "requestParam": json.dumps(request_data),
+            "offset": offset,
+        }
+        print(f"[+] Gửi yêu cầu xuất (Status={ticket_status}, UTC start={start_time_payload})...")
+        return await self._post("/ocpp/exportTask/addTicket", payload)
+
+    async def get_export_tasks(self, page_num=1, page_size=10):
+        """Lấy danh sách nhiệm vụ xuất dữ liệu."""
+        payload = {"page": {"pageNum": page_num, "pageSize": page_size}}
+        return await self._post("/ocpp/exportTask/list", payload)
+
+    async def export_and_download_tickets(
+        self,
+        start_time,
+        end_time,
+        ticket_status=None,
+        sla_timeout=None,
+        offset=420,
+        check_interval=5,
+        timeout=180,
+    ):
+        """
+        Quy trình đầy đủ: tạo task xuất → poll đến khi sẵn sàng → tải Excel
+        trực tiếp vào RAM → trả về dict[str, DataFrame] các sheet.
+
+        Sheets trả về (luôn có đủ key, sheet thiếu sẽ là DataFrame rỗng):
+            Ticket Information, Appointment, Events Record,
+            Solutions, Spare Parts Record, Additional information
+        """
+        res_export = await self.create_export_task(
+            start_time, end_time,
+            ticket_status=ticket_status,
+            sla_timeout=sla_timeout,
+            offset=offset,
+        )
+        if not res_export.get("success") and str(res_export.get("code")) not in ("200", "0"):
+            print(f"[-] Thất bại khi gửi yêu cầu xuất: {res_export.get('message')}")
+            return None
+
+        print("[+] Đã gửi yêu cầu xuất. Đang chờ file sẵn sàng...")
+        start_poll = time.time()
+        download_url = None
+        current_interval = check_interval
+        status = "n/a"
+
+        while time.time() - start_poll < timeout:
+            res_tasks = await self.get_export_tasks(page_num=1, page_size=5)
+            data = res_tasks.get("data", {})
+            tasks = data.get("list", []) if isinstance(data, dict) else []
+            if not isinstance(tasks, list):
+                tasks = data.get("records", [])
+
+            if tasks:
+                latest = tasks[0]
+                download_url = (
+                    latest.get("fileUrl")
+                    or latest.get("downloadUrl")
+                    or latest.get("fileLocation")
+                    or latest.get("accessLocation")
+                )
+                status = str(latest.get("status"))
+                if status == "2" and download_url:
+                    print(f"[✓] File Excel sẵn sàng: {download_url}")
+                    break
+                if latest.get("errorMsg"):
+                    print(f"[-] Task xuất lỗi từ server: {latest.get('errorMsg')}")
+                    return None
+
+            print(f"[*] File chưa sẵn sàng (status={status}). Đợi {current_interval}s...")
+            await asyncio.sleep(current_interval)
+            current_interval = min(current_interval + 5, 20)
+
+        if not download_url:
+            print("[-] Timeout: file Excel chưa được tạo xong.")
+            return None
+
+        print("[+] Đang tải Excel vào RAM...")
+
+        def _download():
+            return self.session.get(download_url, timeout=120)
+
+        try:
+            res_file = await asyncio.to_thread(_download)
+            if res_file.status_code != 200:
+                print(f"[-] Lỗi tải file HTTP {res_file.status_code}")
+                return None
+
+            dfs = pd.read_excel(io.BytesIO(res_file.content), sheet_name=None)
+            required = [
+                "Ticket Information",
+                "Appointment",
+                "Events Record",
+                "Solutions",
+                "Spare Parts Record",
+                "Additional information",
+            ]
+            for sheet in required:
+                if sheet not in dfs:
+                    dfs[sheet] = pd.DataFrame()
+
+            print("[✓] Đọc Excel từ RAM thành công!")
+            return dfs
+        except Exception as e:
+            print(f"[-] Lỗi xử lý Excel trong RAM: {e}")
+            return None
