@@ -353,14 +353,14 @@
   </div>
 
   <script>
-    const REGION_ORDER = ["DNA-QNA", "DNI-VTU", "LDO-BTH", "EC", "Mtay", "HCM"];
+    const REGION_ORDER = ["DNA-QNA", "LDO-BTH", "DNI-VTU", "Mtay", "HCM", "EC"];
     const REGION_COLORS = {
-      "DNA-QNA": { border: "#3b82f6", bg: "rgba(59,130,246,.12)" },
+      "DNA-QNA": { border: "#ef4444", bg: "rgba(239,68,68,.12)" },
       "DNI-VTU": { border: "#10b981", bg: "rgba(16,185,129,.12)" },
       "LDO-BTH": { border: "#f59e0b", bg: "rgba(245,158,11,.12)" },
-      "EC":      { border: "#ef4444", bg: "rgba(239,68,68,.12)" },
       "Mtay":    { border: "#8b5cf6", bg: "rgba(139,92,246,.12)" },
       "HCM":     { border: "#0ea5e9", bg: "rgba(14,165,233,.12)" },
+      "EC":      { border: "#ef4444", bg: "rgba(239,68,68,.12)" },
       "Total":   { border: "#0f172a", bg: "rgba(15,23,42,.06)" },
     };
     const TECH_PALETTE = [
@@ -753,8 +753,8 @@
           labels: ["2026-07-28"],
           regions: REGION_ORDER.slice(),
           datasets: {
-            "DNA-QNA": [0], "DNI-VTU": [1], "LDO-BTH": [2],
-            "EC": [1], "Mtay": [2], "HCM": [2],           },
+            "DNA-QNA": [0], "LDO-BTH": [1], "DNI-VTU": [2],
+            "Mtay": [1], "HCM": [2], "EC": [2],           },
           by_region: {
             "HCM": {
               labels: ["2026-07-28"],
