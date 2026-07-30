@@ -149,8 +149,8 @@ async def on_startup():
         Chạy nền + CCTS_API_LOCK — không lag web, không đụng ccts_data.
         """
         try:
-            print("[stats] === Cào thống kê khi khởi động (10 ngày → now, background) ===")
-            await stats_data.refresh_stats_cache(until_now=True)
+            print("[stats] === Cào thống kê khi khởi động (45 ngày → 0h hôm nay, multi-account, background) ===")
+            await stats_data.refresh_stats_cache()
             print("[stats] === Cào thống kê startup hoàn tất ===")
         except Exception as e:
             print(f"[stats] Cào startup thất bại (giữ cache cũ nếu có): {e!r}")
@@ -244,6 +244,46 @@ async def api_stats_daily_volume(request: Request):
     return payload
 
 
+
+@app.get("/api/stats/overdue-rate")
+async def api_stats_overdue_rate(request: Request):
+    """Tỷ lệ ticket đóng bị Overdue theo KV / KT (30 ngày Close Time)."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    cache = stats_data.load_stats_cache()
+    if not cache:
+        return JSONResponse(
+            {"error": "Chưa có dữ liệu thống kê", "detail": "Đợi cào 0h hoặc restart."},
+            status_code=503,
+        )
+    try:
+        from stats_charts_overdue_rate import build_overdue_rate_payload_from_cache
+        return build_overdue_rate_payload_from_cache(cache)
+    except Exception as e:
+        print(f"[stats] Lỗi overdue-rate: {e!r}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+
+@app.get("/api/stats/error-codes")
+async def api_stats_error_codes(request: Request):
+    """Top 20 Error Code trong 30 ngày + KT gặp nhiều nhất."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    cache = stats_data.load_stats_cache()
+    if not cache:
+        return JSONResponse({"error": "Chưa có dữ liệu thống kê"}, status_code=503)
+    try:
+        from stats_charts_error_codes import build_error_codes_payload_from_cache
+        return build_error_codes_payload_from_cache(cache)
+    except Exception as e:
+        print(f"[stats] Lỗi error-codes: {e!r}")
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @app.post("/api/admin/refresh-stats")
 async def api_admin_refresh_stats(request: Request):
     """Admin: ép cào lại thống kê ngay (không đợi 0h)."""
@@ -251,7 +291,7 @@ async def api_admin_refresh_stats(request: Request):
     if not require_admin(user):
         return JSONResponse({"error": "Bạn không có quyền thực hiện thao tác này."}, status_code=403)
     try:
-        payload = await stats_data.refresh_stats_cache(until_now=True)
+        payload = await stats_data.refresh_stats_cache()
         return {
             "status": "ok",
             "message": f"Đã cập nhật thống kê ({payload.get('total_tickets', 0)} ticket).",
