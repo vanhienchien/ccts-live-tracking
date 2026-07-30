@@ -1,13 +1,17 @@
 """
-Module thống kê & trực quan dữ liệu ticket CCTS.
+stats_data.py — chỉ chịu trách nhiệm đăng nhập + cào + chuẩn hóa ticket.
 
-- Cào lịch sử qua api_client.export_and_download_tickets (fallback file mẫu)
-- Map Station Code → Region qua StationAssignments.json (github_data_store)
-- Aggregate số ticket theo ngày (Create Time) × khu vực
+- Cào tất cả tài khoản trong config.CCTS_ACCOUNTS, gộp + khử trùng Ticket ID.
+- Cửa sổ: 45 ngày kết thúc tại 0h hôm nay (KHÔNG gồm ngày hiện tại).
+- Lọc BSS.No2, map Region/Tech, phân loại EV/BSS.
+- Ghi cache thô (danh sách ticket đã chuẩn hóa) cho các module biểu đồ dùng.
+
+Không vẽ chart ở đây.
 """
 
 from __future__ import annotations
 
+import json
 import os
 from datetime import datetime, timedelta
 from typing import Any
@@ -16,20 +20,19 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+SCRAPE_LOOKBACK_DAYS = 45
+STATS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_daily_cache.json")
 SAMPLE_XLSX = os.path.join(os.path.dirname(__file__), "Tickets_esmanager_20260728_201743.xlsx")
 
-# Chỉ hiển thị các khu vực chuẩn trong StationAssignments.json
 ALLOWED_REGIONS = ("DNA-QNA", "DNI-VTU", "LDO-BTH", "EC", "Mtay", "HCM")
 _ALLOWED_SET = set(ALLOWED_REGIONS)
 
-# Không phải kỹ thuật viên / không thuộc quản lý → loại khỏi biểu đồ KT
 EXCLUDED_TECH_NAMES = {
     "unassigned",
     "bình dương",
     "binh duong",
 }
 
-# Prefix fallback → mã khu vực chuẩn (khi station chưa có trong StationAssignments)
 _REGION_PREFIX_RULES: list[tuple[str, str]] = [
     ("B.HCM", "HCM"),
     ("B.DNI", "DNI-VTU"),
@@ -51,6 +54,8 @@ _REGION_PREFIX_RULES: list[tuple[str, str]] = [
     ("C.KHA", "EC"),
 ]
 
+_memory_cache: dict[str, Any] | None = None
+
 
 def _extract_core_station_code(station_code: str | None) -> str | None:
     try:
@@ -60,6 +65,16 @@ def _extract_core_station_code(station_code: str | None) -> str | None:
         if not station_code or (isinstance(station_code, float) and pd.isna(station_code)):
             return None
         return str(station_code).strip().upper()
+
+
+def _get_static_maps() -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
+    try:
+        from github_data_store import load_static_data
+        _, tech_map, region_map, _, tech_by_region = load_static_data()
+        return region_map or {}, tech_map or {}, tech_by_region or {}
+    except Exception as e:
+        print(f"[stats] Không tải StationAssignments: {e}")
+        return {}, {}, {}
 
 
 def _infer_region_prefix(station_code: str | None) -> str | None:
@@ -72,31 +87,20 @@ def _infer_region_prefix(station_code: str | None) -> str | None:
     return None
 
 
-def _get_static_maps() -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
-    """
-    Trả (region_map, tech_map, tech_by_region) từ StationAssignments.json.
-    tech_by_region: {region: [engineer_name, ...]}
-    """
-    try:
-        from github_data_store import load_static_data
-        # (coords_map, tech_map, region_map, cp_model_map, tech_by_region)
-        _, tech_map, region_map, _, tech_by_region = load_static_data()
-        return region_map or {}, tech_map or {}, tech_by_region or {}
-    except Exception as e:
-        print(f"[stats] Không tải được StationAssignments từ GitHub: {e}")
-        return {}, {}, {}
-
-
-def _get_region_map() -> dict[str, str]:
-    region_map, _, _ = _get_static_maps()
-    return region_map
+def is_managed_region(region: str | None) -> bool:
+    """Chỉ 6 KV được quản lý — loại 'KV không quản lý' và mọi region lạ."""
+    if not region:
+        return False
+    r = str(region).strip()
+    if r in _ALLOWED_SET:
+        return True
+    # chuẩn hóa nhẹ
+    if r.lower() in {"kv không quản lý", "kv khong quan ly", "không quản lý", "unmanaged"}:
+        return False
+    return False
 
 
 def resolve_region(station_code: str | None, region_map: dict[str, str] | None = None) -> str | None:
-    """
-    Ưu tiên region_map (StationAssignments), fallback prefix.
-    Chỉ trả về khu vực trong ALLOWED_REGIONS; bỏ 'KV không quản lý' và vùng khác.
-    """
     region = None
     core = _extract_core_station_code(station_code)
     if region_map and core and core in region_map:
@@ -105,10 +109,27 @@ def resolve_region(station_code: str | None, region_map: dict[str, str] | None =
             region = raw
     if not region:
         region = _infer_region_prefix(station_code)
-
     if region in _ALLOWED_SET:
         return region
-    return None  # ngoài danh sách cho phép → loại
+    return None
+
+
+def classify_cp_type(cp_id) -> str:
+    if cp_id is None or (isinstance(cp_id, float) and pd.isna(cp_id)):
+        return "ev"
+    s = str(cp_id).strip().upper()
+    return "bss" if s.startswith("BSS") else "ev"
+
+
+def is_excluded_tech(name: str) -> bool:
+    n = (name or "").strip().lower()
+    if not n or n in EXCLUDED_TECH_NAMES:
+        return True
+    if "unassigned" in n:
+        return True
+    if "bình dương" in n or "binh duong" in n:
+        return True
+    return False
 
 
 def _parse_create_time(val) -> datetime | None:
@@ -125,30 +146,67 @@ def _parse_create_time(val) -> datetime | None:
     return None
 
 
+def scrape_time_range() -> tuple[str, str, str]:
+    """
+    [start, end) giờ VN:
+    - end = 0h hôm nay (KHÔNG gồm ngày hiện tại)
+    - start = end - 45 ngày
+    """
+    now = datetime.now(VN_TZ)
+    end = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = end - timedelta(days=SCRAPE_LOOKBACK_DAYS)
+    return (
+        start.strftime("%Y-%m-%d %H:%M:%S"),
+        end.strftime("%Y-%m-%d %H:%M:%S"),
+        end.strftime("%Y-%m-%d"),
+    )
+
+
+def _pick_accounts() -> list:
+    try:
+        from config import CCTS_ACCOUNTS
+        if CCTS_ACCOUNTS:
+            return list(CCTS_ACCOUNTS)
+    except Exception as e:
+        print(f"[stats] Không đọc CCTS_ACCOUNTS: {e}")
+    return [{"username": "esmanager", "password": "Ccts123.", "role": "esmanager"}]
+
+
 def process_ticket_information(
     df: pd.DataFrame,
-    region_map: dict[str, str] | None = None,
-    tech_map: dict[str, str] | None = None,
+    region_map=None,
+    tech_map=None,
+    end_date_exclusive: str | None = None,
 ) -> pd.DataFrame:
-    """Chuẩn hóa Ticket Information → Ticket ID, Station Code, Region, Tech, Create Date."""
+    cols_out = [
+        "Ticket ID", "Station Code", "Charge Point ID", "Create Time", "Create Date",
+        "Region", "Tech", "cp_type", "SLA Status", "Severity", "Problem Description", "Address",
+        "Error Code",
+    ]
     if df is None or df.empty:
-        return pd.DataFrame(
-            columns=["Ticket ID", "Station Code", "Create Time", "Region", "Tech", "Create Date"]
-        )
+        return pd.DataFrame(columns=cols_out)
 
     df = df.copy()
     df.columns = [str(c).strip() for c in df.columns]
 
-    for col in ("Ticket ID", "Station Code", "Create Time", "SLA Status", "Severity"):
+    for col in (
+        "Ticket ID", "Station Code", "Create Time", "SLA Status", "Severity",
+        "Charge Point ID", "Problem Description", "Address", "Error Code",
+    ):
         if col not in df.columns:
             df[col] = None
 
+    pd_col = df["Problem Description"].astype(str).str.strip()
+    before = len(df)
+    df = df[~pd_col.str.startswith("BSS.No2")].copy()
+    dropped = before - len(df)
+    if dropped:
+        print(f"[stats] Loại {dropped} ticket BSS.No2")
+
     if region_map is None or tech_map is None:
         rm, tm, _ = _get_static_maps()
-        if region_map is None:
-            region_map = rm
-        if tech_map is None:
-            tech_map = tm
+        region_map = region_map if region_map is not None else rm
+        tech_map = tech_map if tech_map is not None else tm
 
     def _tech_for(station_code):
         core = _extract_core_station_code(station_code)
@@ -158,379 +216,343 @@ def process_ticket_information(
         return "Unassigned"
 
     df["Region"] = df["Station Code"].apply(lambda s: resolve_region(s, region_map))
+    df = df[df["Region"].apply(is_managed_region)].copy()
     df["Tech"] = df["Station Code"].apply(_tech_for)
-    # Chỉ giữ ticket thuộc 6 khu vực được phép
-    df = df[df["Region"].notna()].copy()
+    df["cp_type"] = df["Charge Point ID"].apply(classify_cp_type)
 
     df["_dt"] = df["Create Time"].apply(_parse_create_time)
     df = df.dropna(subset=["_dt"]).copy()
     df["Create Date"] = df["_dt"].dt.strftime("%Y-%m-%d")
     df = df.drop(columns=["_dt"])
 
+    if end_date_exclusive:
+        df = df[df["Create Date"] < end_date_exclusive].copy()
+
     if "Ticket ID" in df.columns:
         df["Ticket ID"] = df["Ticket ID"].astype(str).str.strip()
         df = df.drop_duplicates(subset=["Ticket ID"])
 
-    return df
+    keep = [c for c in cols_out if c in df.columns]
+    return df[keep].reset_index(drop=True)
 
 
-def aggregate_daily_by_region(df: pd.DataFrame) -> dict[str, Any]:
-    """Pivot ngày × khu vực → payload Chart.js (chỉ ALLOWED_REGIONS)."""
-    if df is None or df.empty:
-        return {
-            "labels": [],
-            "regions": [],
-            "datasets": {},
-            "total_tickets": 0,
-            "date_range": {"from": None, "to": None},
-        }
-
-    # Đảm bảo chỉ còn region hợp lệ
-    df = df[df["Region"].isin(_ALLOWED_SET)].copy()
-    if df.empty:
-        return {
-            "labels": [],
-            "regions": [],
-            "datasets": {},
-            "total_tickets": 0,
-            "date_range": {"from": None, "to": None},
-        }
-
-    pivot = (
-        df.groupby(["Create Date", "Region"])
-        .size()
-        .unstack(fill_value=0)
-        .sort_index()
-    )
-
-    # Cột theo thứ tự cố định; region không có data trong kỳ vẫn hiện = 0
-    for r in ALLOWED_REGIONS:
-        if r not in pivot.columns:
-            pivot[r] = 0
-    pivot = pivot[list(ALLOWED_REGIONS)]
-
-    labels = list(pivot.index.astype(str))
-    regions = list(ALLOWED_REGIONS)
-    datasets: dict[str, list[int]] = {r: [int(x) for x in pivot[r].tolist()] for r in regions}
-    # Không đưa Total toàn công ty vào datasets (che khu vực nhỏ)
-
-    return {
-        "labels": labels,
-        "regions": regions,
-        "datasets": datasets,
-        "total_tickets": int(len(df)),
-        "date_range": {
-            "from": labels[0] if labels else None,
-            "to": labels[-1] if labels else None,
-        },
-    }
+OPEN_STATUSES = {
+    "open",
+    "appointment",
+    "pending for asp close",
+    "pending for spare parts close",
+}
+CLOSED_STATUS = "pending for local team close"
 
 
-def aggregate_daily_by_tech_per_region(
-    df: pd.DataFrame,
-    tech_by_region: dict[str, list[str]] | None = None,
-) -> dict[str, Any]:
+def _norm_status(val) -> str:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    return str(val).strip().lower()
+
+
+def extract_closed_tickets_from_events(
+    events_df: pd.DataFrame,
+    end_date_exclusive: str,
+    lookback_days: int = 30,
+) -> pd.DataFrame:
     """
-    Với mỗi khu vực: pivot Create Date × Tech → datasets (không có Total).
-    {
-      "HCM": {"labels": [...], "techs": [...], "datasets": {"KT A": [..], ...}},
-      ...
-    }
+    Duyệt Events Record (mới → cũ) theo từng Ticket ID:
+    - Gặp trạng thái mở → ticket đang mở, bỏ.
+    - Gặp 'Pending for local team close' → đã đóng, Close Time = Create Time event đó.
+    - Dừng khi Create Time event < (end - lookback_days).
+    Chỉ giữ ticket đóng có Close Time trong [end-lookback, end).
     """
-    result: dict[str, Any] = {}
-    if df is None or df.empty:
-        for r in ALLOWED_REGIONS:
-            result[r] = {"labels": [], "techs": [], "datasets": {}}
-        return result
+    cols = ["Ticket ID", "Close Time", "Close Date"]
+    if events_df is None or events_df.empty:
+        return pd.DataFrame(columns=cols)
 
-    df = df[df["Region"].isin(_ALLOWED_SET)].copy()
-    all_dates = sorted(df["Create Date"].unique().tolist()) if not df.empty else []
+    df = events_df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    if "Ticket ID" not in df.columns or "Ticket Status" not in df.columns or "Create Time" not in df.columns:
+        return pd.DataFrame(columns=cols)
 
-    for region in ALLOWED_REGIONS:
-        sub = df[df["Region"] == region]
-        # Danh sách KT ưu tiên từ StationAssignments, bổ sung KT có ticket thực tế
-        known_techs = list(tech_by_region.get(region, [])) if tech_by_region else []
-        actual_techs = sorted(sub["Tech"].dropna().unique().tolist()) if not sub.empty else []
-        def _is_excluded_tech(name: str) -> bool:
-            n = name.strip().lower()
-            if n in EXCLUDED_TECH_NAMES:
-                return True
-            # khớp gần: chứa "unassigned" / "bình dương"
-            if "unassigned" in n:
-                return True
-            if "bình dương" in n or "binh duong" in n:
-                return True
-            return False
+    df["Ticket ID"] = df["Ticket ID"].astype(str).str.strip()
+    df["_dt"] = df["Create Time"].apply(_parse_create_time)
+    df = df.dropna(subset=["_dt"])
+    df["_status"] = df["Ticket Status"].apply(_norm_status)
 
-        techs = []
-        seen = set()
-        for t in known_techs + actual_techs:
-            t = str(t).strip()
-            if not t or t in seen:
+    end_dt = datetime.strptime(end_date_exclusive, "%Y-%m-%d")
+    start_dt = end_dt - timedelta(days=lookback_days)
+
+    closed_rows = []
+    for tid, g in df.groupby("Ticket ID", sort=False):
+        g = g.sort_values("_dt", ascending=False)
+        result = None  # None | ("open",) | ("closed", close_dt)
+        for _, row in g.iterrows():
+            evt_dt = row["_dt"]
+            if evt_dt is None:
                 continue
-            if _is_excluded_tech(t):
-                continue
-            seen.add(t)
-            techs.append(t)
+            # Dừng khi quá cửa sổ 30 ngày (event cũ hơn start)
+            if evt_dt < start_dt:
+                break
+            st = row["_status"]
+            if st in OPEN_STATUSES:
+                result = ("open", None)
+                break
+            if st == CLOSED_STATUS:
+                result = ("closed", evt_dt)
+                break
+        if result and result[0] == "closed" and result[1] is not None:
+            close_dt = result[1]
+            if start_dt <= close_dt < end_dt:
+                closed_rows.append({
+                    "Ticket ID": tid,
+                    "Close Time": close_dt.strftime("%Y-%m-%d %H:%M:%S"),
+                    "Close Date": close_dt.strftime("%Y-%m-%d"),
+                })
 
-        if sub.empty or not all_dates:
-            result[region] = {"labels": all_dates, "techs": techs, "datasets": {t: [0] * len(all_dates) for t in techs}}
+    return pd.DataFrame(closed_rows) if closed_rows else pd.DataFrame(columns=cols)
+
+
+def enrich_closed_with_ticket_info(
+    closed_df: pd.DataFrame,
+    ticket_info_df: pd.DataFrame,
+    spare_ids: set,
+    appointment_ids: set,
+    region_map,
+    tech_map,
+) -> pd.DataFrame:
+    """Ghép Station/Region/Tech/cp_type/SLA + cờ chờ VT / hẹn khách."""
+    if closed_df is None or closed_df.empty:
+        return pd.DataFrame()
+
+    info = ticket_info_df.copy() if ticket_info_df is not None else pd.DataFrame()
+    if not info.empty:
+        info.columns = [str(c).strip() for c in info.columns]
+        if "Ticket ID" in info.columns:
+            info["Ticket ID"] = info["Ticket ID"].astype(str).str.strip()
+            info = info.drop_duplicates(subset=["Ticket ID"])
+
+    def _tech_for(station_code):
+        core = _extract_core_station_code(station_code)
+        if core and tech_map and core in tech_map:
+            name = str(tech_map[core] or "").strip()
+            return name if name else "Unassigned"
+        return "Unassigned"
+
+    rows = []
+    info_by_id = {}
+    if not info.empty and "Ticket ID" in info.columns:
+        info_by_id = {str(r["Ticket ID"]): r for _, r in info.iterrows()}
+
+    for _, c in closed_df.iterrows():
+        tid = str(c["Ticket ID"])
+        info_row = info_by_id.get(tid)
+        station = info_row.get("Station Code") if info_row is not None else None
+        cp_id = info_row.get("Charge Point ID") if info_row is not None else None
+        sla = info_row.get("SLA Status") if info_row is not None else None
+        severity = info_row.get("Severity") if info_row is not None else None
+        region = resolve_region(station, region_map)
+        if not is_managed_region(region):
             continue
-
-        pivot = (
-            sub.groupby(["Create Date", "Tech"])
-            .size()
-            .unstack(fill_value=0)
-            .reindex(all_dates, fill_value=0)
-        )
-        datasets: dict[str, list[int]] = {}
-        for t in techs:
-            if t in pivot.columns:
-                datasets[t] = [int(x) for x in pivot[t].tolist()]
-            else:
-                datasets[t] = [0] * len(all_dates)
-
-        result[region] = {
-            "labels": all_dates,
-            "techs": techs,
-            "datasets": datasets,
-        }
-
-    return result
-
-
-def _pick_ccts_account() -> tuple[str, str]:
-    """Lấy account đầu tiên từ config.CCTS_ACCOUNTS."""
-    try:
-        from config import CCTS_ACCOUNTS
-        if CCTS_ACCOUNTS:
-            acc = CCTS_ACCOUNTS[0]
-            return acc["username"], acc["password"]
-    except Exception:
-        pass
-    return "esmanager", "Ccts123."
+        tech = _tech_for(station)
+        sla_s = str(sla or "").strip().lower()
+        has_spare = tid in spare_ids
+        has_appt = tid in appointment_ids
+        is_od = sla_s == "overdue"
+        rows.append({
+            "Ticket ID": tid,
+            "Close Time": c.get("Close Time"),
+            "Close Date": c.get("Close Date"),
+            "Station Code": station,
+            "Region": region,
+            "Tech": tech,
+            "cp_type": classify_cp_type(cp_id),
+            "SLA Status": sla,
+            "is_overdue": is_od,
+            "has_spare_wait": has_spare,
+            "has_appointment": has_appt,
+            # Overdue + (chờ VT hoặc hẹn khách) — đánh dấu trên biểu đồ
+            "is_overdue_excuse": bool(is_od and (has_spare or has_appt)),
+            "Severity": severity,
+        })
+    return pd.DataFrame(rows)
 
 
-# Cào 1 lần ~2 tháng; biểu đồ đường chỉ lấy 10 ngày gần nhất trong đó
-SCRAPE_LOOKBACK_DAYS = 62  # ~2 tháng
-CHART_LOOKBACK_DAYS = 10
+async def _export_one_account(username, password, start_time, end_time) -> dict | None:
+    """Trả dict các sheet DataFrame (đã gắn _source_account)."""
+    from api_client import CCTSClient
 
-
-def default_stats_time_range(*, until_now: bool = False) -> tuple[str, str]:
-    """
-    Khoảng cào (giờ VN) — 2 tháng gần nhất:
-    - until_now=False (job 0h): → 0h hôm nay
-    - until_now=True (restart): → hiện tại
-    """
-    now = datetime.now(VN_TZ)
-    today_0h = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    start_0h = today_0h - timedelta(days=SCRAPE_LOOKBACK_DAYS)
-    end = now if until_now else today_0h
-    return (
-        start_0h.strftime("%Y-%m-%d %H:%M:%S"),
-        end.strftime("%Y-%m-%d %H:%M:%S"),
+    client = CCTSClient(username=username, password=password)
+    await client.login()
+    dfs = await client.export_and_download_tickets(
+        start_time=start_time,
+        end_time=end_time,
+        ticket_status=None,
     )
+    if not dfs:
+        return None
+    out = {}
+    for name, df in dfs.items():
+        if df is None or (hasattr(df, "empty") and df.empty):
+            continue
+        part = df.copy()
+        part["_source_account"] = username
+        out[name] = part
+    return out if out else None
 
 
-async def fetch_stats_tickets(
-    start_time: str | None = None,
-    end_time: str | None = None,
-    use_sample_fallback: bool = True,
-    until_now: bool = False,
-) -> tuple[pd.DataFrame, str]:
+async def fetch_all_accounts_tickets(
+    start_time=None,
+    end_time=None,
+    use_sample_fallback=True,
+):
     """
-    Cào ticket [start_time, end_time] (giờ VN).
-    Dùng CCTS_API_LOCK để không chạy song song với ccts_data.
+    Cào multi-account → gộp Ticket Information + Events Record + Spare Parts.
+    Trả (processed_open_window_df, source, meta, closed_enriched_df).
     """
-    if start_time is None or end_time is None:
-        d_start, d_end = default_stats_time_range(until_now=until_now)
-        if start_time is None:
-            start_time = d_start
-        if end_time is None:
-            end_time = d_end
-    print(f"[stats] Khoảng cào: {start_time} → {end_time} (VN)")
+    start_time, end_time, end_date_ex = scrape_time_range()
+    print(f"[stats] Khoảng cào [start, end): {start_time} → {end_time} (không gồm {end_date_ex})")
+
+    accounts = _pick_accounts()
+    ti_frames = []
+    ev_frames = []
+    sp_frames = []
+    ap_frames = []
+    ok_accounts = []
+    fail_accounts = []
+
+    try:
+        from ccts_gate import CCTS_API_LOCK
+    except Exception:
+        CCTS_API_LOCK = None
+
+    async def _run_exports():
+        for acc in accounts:
+            username = acc.get("username") or ""
+            password = acc.get("password") or ""
+            if not username:
+                continue
+            try:
+                print(f"[stats] Đang cào account: {username} ...")
+                bundle = await _export_one_account(username, password, start_time, end_time)
+                if not bundle or "Ticket Information" not in bundle:
+                    fail_accounts.append(username)
+                    print(f"[stats]   → thiếu Ticket Information: {username}")
+                    continue
+                ti_frames.append(bundle["Ticket Information"])
+                if "Events Record" in bundle:
+                    ev_frames.append(bundle["Events Record"])
+                if "Spare Parts Record" in bundle:
+                    sp_frames.append(bundle["Spare Parts Record"])
+                if "Appointment" in bundle:
+                    ap_frames.append(bundle["Appointment"])
+                ok_accounts.append(username)
+                print(
+                    f"[stats]   → TI={len(bundle['Ticket Information'])}, "
+                    f"EV={len(bundle.get('Events Record', []))}, "
+                    f"SP={len(bundle.get('Spare Parts Record', []))}, "
+                    f"AP={len(bundle.get('Appointment', []))}"
+                )
+            except Exception as e:
+                fail_accounts.append(username)
+                print(f"[stats]   → lỗi {username}: {e}")
+
+    if CCTS_API_LOCK is not None:
+        async with CCTS_API_LOCK:
+            print("[stats] Giữ CCTS_API_LOCK")
+            await _run_exports()
+            print("[stats] Nhả CCTS_API_LOCK")
+    else:
+        await _run_exports()
+
+    meta = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "end_date_exclusive": end_date_ex,
+        "accounts_ok": ok_accounts,
+        "accounts_fail": fail_accounts,
+        "lookback_days": SCRAPE_LOOKBACK_DAYS,
+    }
 
     source = "live"
-    username, password = _pick_ccts_account()
+    if not ti_frames:
+        if use_sample_fallback and os.path.exists(SAMPLE_XLSX):
+            print(f"[stats] Fallback file mẫu: {SAMPLE_XLSX}")
+            raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Ticket Information")
+            events_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Events Record")
+            try:
+                spare_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Spare Parts Record")
+            except Exception:
+                spare_raw = pd.DataFrame()
+            try:
+                appt_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Appointment")
+            except Exception:
+                appt_raw = pd.DataFrame()
+            source = "sample"
+        else:
+            raise RuntimeError("Không cào được ticket từ bất kỳ account nào")
+    else:
+        raw = pd.concat(ti_frames, ignore_index=True)
+        if "Ticket ID" in raw.columns:
+            raw["Ticket ID"] = raw["Ticket ID"].astype(str).str.strip()
+            before = len(raw)
+            raw = raw.drop_duplicates(subset=["Ticket ID"])
+            print(f"[stats] TI gộp {before} → {len(raw)}")
+        events_raw = pd.concat(ev_frames, ignore_index=True) if ev_frames else pd.DataFrame()
+        spare_raw = pd.concat(sp_frames, ignore_index=True) if sp_frames else pd.DataFrame()
+        appt_raw = pd.concat(ap_frames, ignore_index=True) if ap_frames else pd.DataFrame()
+        if not events_raw.empty and "Ticket ID" in events_raw.columns:
+            events_raw["Ticket ID"] = events_raw["Ticket ID"].astype(str).str.strip()
 
-    try:
-        from api_client import CCTSClient
-        from ccts_gate import CCTS_API_LOCK
-
-        async with CCTS_API_LOCK:
-            print("[stats] Đã giữ CCTS_API_LOCK — bắt đầu export...")
-            client = CCTSClient(username=username, password=password)
-            await client.login()
-            dfs = await client.export_and_download_tickets(
-                start_time=start_time,
-                end_time=end_time,
-                ticket_status=None,
-            )
-            print("[stats] Nhả CCTS_API_LOCK.")
-
-        if not dfs or "Ticket Information" not in dfs or dfs["Ticket Information"].empty:
-            raise RuntimeError("Export trả về rỗng")
-        raw = dfs["Ticket Information"]
-        print(f"[stats] Cào live OK: {len(raw)} dòng (account={username})")
-    except Exception as e:
-        print(f"[stats] Cào live thất bại: {e}")
-        if not use_sample_fallback or not os.path.exists(SAMPLE_XLSX):
-            raise
-        print(f"[stats] Fallback → file mẫu: {SAMPLE_XLSX}")
-        raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Ticket Information")
-        source = "sample"
+    spare_ids = set()
+    if spare_raw is not None and not spare_raw.empty and "Ticket ID" in spare_raw.columns:
+        spare_ids = set(spare_raw["Ticket ID"].astype(str).str.strip().tolist())
+    appointment_ids = set()
+    if appt_raw is not None and not appt_raw.empty and "Ticket ID" in appt_raw.columns:
+        appointment_ids = set(appt_raw["Ticket ID"].astype(str).str.strip().tolist())
 
     region_map, tech_map, tech_by_region = _get_static_maps()
-    processed = process_ticket_information(raw, region_map=region_map, tech_map=tech_map)
-    processed.attrs["tech_by_region"] = tech_by_region
-    return processed, source
+    processed = process_ticket_information(
+        raw,
+        region_map=region_map,
+        tech_map=tech_map,
+        end_date_exclusive=end_date_ex,
+    )
+
+    closed_basic = extract_closed_tickets_from_events(
+        events_raw, end_date_exclusive=end_date_ex, lookback_days=30
+    )
+    closed_enriched = enrich_closed_with_ticket_info(
+        closed_basic, raw, spare_ids, appointment_ids, region_map, tech_map
+    )
+    print(
+        f"[stats] Closed 30d: {len(closed_enriched)} "
+        f"(overdue={int(closed_enriched['is_overdue'].sum()) if len(closed_enriched) else 0}, "
+        f"spare={int(closed_enriched['has_spare_wait'].sum()) if len(closed_enriched) else 0}, "
+        f"appt={int(closed_enriched['has_appointment'].sum()) if len(closed_enriched) else 0})"
+    )
+
+    meta["tech_by_region"] = tech_by_region
+    meta["row_count"] = int(len(processed))
+    meta["closed_count"] = int(len(closed_enriched))
+    print(f"[stats] Sau chuẩn hóa TI: {len(processed)} ticket (source={source})")
+    return processed, source, meta, closed_enriched
 
 
-def _filter_last_n_days(df: pd.DataFrame, n_days: int = CHART_LOOKBACK_DAYS) -> pd.DataFrame:
-    """Lọc ticket có Create Date trong n ngày gần nhất (tính từ 0h hôm nay lùi lại)."""
-    if df is None or df.empty or "Create Date" not in df.columns:
-        return df
-    today_0h = datetime.now(VN_TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-    start = (today_0h - timedelta(days=n_days - 1)).strftime("%Y-%m-%d")
-    end = today_0h.strftime("%Y-%m-%d")
-    return df[(df["Create Date"] >= start) & (df["Create Date"] <= end)].copy()
-
-
-def _get_coords_map() -> dict:
-    try:
-        from github_data_store import load_static_data
-        coords_map, _, _, _, _ = load_static_data()
-        return coords_map or {}
-    except Exception as e:
-        print(f"[stats] Không tải StationCoords: {e}")
-        return {}
-
-
-def _parse_coords_from_address(address) -> tuple[float, float] | None:
-    """Parse lat;lng từ Address dạng '...|10.947188;106.60611'."""
-    if address is None or (isinstance(address, float) and pd.isna(address)):
-        return None
-    text = str(address)
-    # ưu tiên đoạn sau | nếu có
-    if "|" in text:
-        text = text.split("|")[-1]
-    import re
-    m = re.search(r"(-?\d{1,3}\.\d+)\s*[;,]\s*(-?\d{1,3}\.\d+)", text)
-    if not m:
-        return None
-    try:
-        lat, lng = float(m.group(1)), float(m.group(2))
-        if abs(lat) <= 90 and abs(lng) <= 180:
-            return lat, lng
-    except ValueError:
-        pass
-    return None
-
-
-def build_overdue_heatmap(df: pd.DataFrame, coords_map: dict | None = None) -> dict[str, Any]:
-    """
-    Ticket SLA Status = Overdue → aggregate theo trạm + tọa độ.
-    points: [{station_code, lat, lng, overdue_count, major_count, region}, ...]
-    """
-    empty = {"points": [], "max_overdue": 0, "total_overdue": 0, "stations_with_coords": 0, "stations_missing_coords": 0}
+def tickets_df_to_records(df: pd.DataFrame) -> list:
     if df is None or df.empty:
-        return empty
-
-    if coords_map is None:
-        coords_map = _get_coords_map()
-
-    work = df.copy()
-    if "SLA Status" not in work.columns:
-        return empty
-    work["_sla"] = work["SLA Status"].astype(str).str.strip().str.lower()
-    overdue = work[work["_sla"] == "overdue"].copy()
-    if overdue.empty:
-        return empty
-
-    if "Severity" not in overdue.columns:
-        overdue["Severity"] = ""
-    overdue["_major"] = overdue["Severity"].astype(str).str.strip().str.lower().eq("major")
-
-    # group by station
-    rows = []
-    missing = 0
-    for station_code, g in overdue.groupby("Station Code", dropna=False):
-        core = _extract_core_station_code(station_code)
-        lat = lng = None
-        if core and coords_map and core in coords_map:
-            c = coords_map[core]
-            try:
-                lat, lng = float(c["lat"]), float(c["lng"])
-            except Exception:
-                lat = lng = None
-        if lat is None and "Address" in g.columns:
-            parsed = _parse_coords_from_address(g.iloc[0].get("Address"))
-            if parsed:
-                lat, lng = parsed
-        if lat is None or lng is None:
-            missing += 1
-            continue
-        region = ""
-        if "Region" in g.columns and g["Region"].notna().any():
-            region = str(g["Region"].dropna().iloc[0])
-        rows.append({
-            "station_code": str(station_code or core or ""),
-            "core_code": core or "",
-            "lat": lat,
-            "lng": lng,
-            "overdue_count": int(len(g)),
-            "major_count": int(g["_major"].sum()),
-            "region": region,
-        })
-
-    max_od = max((r["overdue_count"] for r in rows), default=0)
-    return {
-        "points": rows,
-        "max_overdue": int(max_od),
-        "total_overdue": int(sum(r["overdue_count"] for r in rows)),
-        "stations_with_coords": len(rows),
-        "stations_missing_coords": missing,
-    }
+        return []
+    out = df.where(pd.notna(df), None)
+    return out.to_dict(orient="records")
 
 
-def build_daily_volume_payload(
-    df: pd.DataFrame,
-    source: str = "unknown",
-    tech_by_region: dict[str, list[str]] | None = None,
-) -> dict[str, Any]:
-    """
-    - Biểu đồ đường / KT: chỉ 10 ngày gần nhất trong dữ liệu đã cào (~2 tháng).
-    - Heatmap overdue: toàn bộ ticket Overdue trong khoảng cào 2 tháng.
-    """
-    if tech_by_region is None:
-        tech_by_region = df.attrs.get("tech_by_region") if hasattr(df, "attrs") else None
-        if tech_by_region is None:
-            _, _, tech_by_region = _get_static_maps()
-
-    df_chart = _filter_last_n_days(df, CHART_LOOKBACK_DAYS)
-    agg = aggregate_daily_by_region(df_chart)
-    agg["by_region"] = aggregate_daily_by_tech_per_region(df_chart, tech_by_region=tech_by_region or {})
-    agg["heatmap"] = build_overdue_heatmap(df)  # full scrape window
-    agg["scrape_days"] = SCRAPE_LOOKBACK_DAYS
-    agg["chart_days"] = CHART_LOOKBACK_DAYS
-    agg["source"] = source
-    agg["generated_at"] = datetime.now(VN_TZ).isoformat(timespec="seconds")
-    return agg
+def records_to_tickets_df(records) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame()
+    return pd.DataFrame(records)
 
 
-# =====================================================================
-# Cache file — cào 1 lần/ngày lúc 0h, trang /stats chỉ đọc cache
-# =====================================================================
-STATS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_daily_cache.json")
-
-_memory_cache: dict[str, Any] | None = None
-
-
-def save_stats_cache(payload: dict[str, Any]) -> None:
+def save_stats_cache(payload: dict) -> None:
     global _memory_cache
     _memory_cache = payload
     try:
-        import json
         with open(STATS_CACHE_FILE, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False)
         print(f"[stats] Đã lưu cache → {STATS_CACHE_FILE}")
@@ -538,17 +560,15 @@ def save_stats_cache(payload: dict[str, Any]) -> None:
         print(f"[stats] Lỗi ghi cache: {e}")
 
 
-def load_stats_cache() -> dict[str, Any] | None:
-    """Đọc cache bộ nhớ → file. Trả None nếu chưa có."""
+def load_stats_cache():
     global _memory_cache
     if _memory_cache is not None:
         return _memory_cache
     try:
-        import json
         if os.path.exists(STATS_CACHE_FILE):
             with open(STATS_CACHE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if isinstance(data, dict) and "labels" in data:
+            if isinstance(data, dict) and ("tickets" in data or "labels" in data):
                 _memory_cache = data
                 return data
     except Exception as e:
@@ -556,52 +576,79 @@ def load_stats_cache() -> dict[str, Any] | None:
     return None
 
 
-def get_cached_daily_volume() -> dict[str, Any] | None:
-    """API dùng hàm này — KHÔNG cào, chỉ đọc cache."""
-    return load_stats_cache()
+def get_cached_tickets_df() -> pd.DataFrame:
+    cache = load_stats_cache()
+    if not cache:
+        return pd.DataFrame()
+    if "tickets" in cache:
+        return records_to_tickets_df(cache.get("tickets") or [])
+    return pd.DataFrame()
 
 
-async def refresh_stats_cache(
-    start_time: str | None = None,
-    end_time: str | None = None,
-    until_now: bool = False,
-) -> dict[str, Any]:
-    """
-    Cào dữ liệu 10 ngày, aggregate, ghi cache.
-    - until_now=True: restart / admin test (đến thời điểm hiện tại).
-    - until_now=False: job 0h (đến 0h hôm nay).
-    """
-    df, source = await fetch_stats_tickets(
-        start_time=start_time, end_time=end_time, until_now=until_now,
-    )
-    payload = build_daily_volume_payload(df, source)
+def get_cached_meta() -> dict:
+    cache = load_stats_cache() or {}
+    return cache.get("meta") or {}
+
+
+async def refresh_stats_cache(**_kwargs) -> dict:
+    """Cào multi-account 45 ngày, không gồm hôm nay → cache v2 (tickets + closed)."""
+    df, source, meta, closed_df = await fetch_all_accounts_tickets()
+    tech_by_region = meta.pop("tech_by_region", {}) or {}
+    if not tech_by_region:
+        _, _, tech_by_region = _get_static_maps()
+
+    payload = {
+        "version": 2,
+        "tickets": tickets_df_to_records(df),
+        "closed_tickets": tickets_df_to_records(closed_df),
+        "meta": {
+            **meta,
+            "source": source,
+            "generated_at": datetime.now(VN_TZ).isoformat(timespec="seconds"),
+            "tech_by_region": tech_by_region,
+            "allowed_regions": list(ALLOWED_REGIONS),
+        },
+    }
     save_stats_cache(payload)
     print(
-        f"[stats] Cache cập nhật: {payload.get('total_tickets', 0)} ticket, "
-        f"source={source}, range={payload.get('date_range')}"
+        f"[stats] Cache v2: TI={meta.get('row_count', 0)}, "
+        f"closed30d={meta.get('closed_count', 0)}, source={source}"
     )
     return payload
 
 
-# Tương thích ngược: nếu ai đó còn gọi get_daily_volume_stats → ưu tiên cache
-async def get_daily_volume_stats(
-    start_time: str | None = None,
-    end_time: str | None = None,
-    force_refresh: bool = False,
-) -> dict[str, Any]:
+def get_cached_daily_volume():
+    cache = load_stats_cache()
+    if not cache:
+        return None
+    if cache.get("version") == 2 or "tickets" in cache:
+        try:
+            from stats_charts_volume import build_volume_payload_from_cache
+            return build_volume_payload_from_cache(cache)
+        except Exception as e:
+            print(f"[stats] Lỗi build volume từ cache: {e}")
+            return None
+    return cache
+
+
+async def get_daily_volume_stats(force_refresh: bool = False, **kwargs):
     if not force_refresh:
-        cached = load_stats_cache()
+        cached = get_cached_daily_volume()
         if cached is not None:
             return cached
-    return await refresh_stats_cache(start_time=start_time, end_time=end_time)
+    await refresh_stats_cache(**kwargs)
+    out = get_cached_daily_volume()
+    if out is None:
+        raise RuntimeError("Không xây được payload thống kê sau khi cào")
+    return out
 
 
 if __name__ == "__main__":
     import asyncio
-    import json
 
     async def _main():
-        payload = await refresh_stats_cache()
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        p = await refresh_stats_cache()
+        print("tickets:", len(p.get("tickets") or []))
+        print("meta:", p.get("meta"))
 
     asyncio.run(_main())
