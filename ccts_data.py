@@ -10,19 +10,16 @@ thay vì xoá sạch bản đồ.
 """
 
 import os
-import re
 import json
 from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from api_client import CCTSClient
 from utils import extract_core_station_code, parse_duration_to_hours
 from config import CCTS_ACCOUNTS
 import github_data_store
+from ccts_shared import VN_TZ, CCTS_API_LOCK, ClientPool
 
-VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 CACHE_FILE = "last_known_data.json"
 
 STATUS_COLORS = {
@@ -72,31 +69,12 @@ def reload_static_data():
 # ==========================================
 # Cào ticket - đa tài khoản
 # ==========================================
+# Session pool — tái sử dụng phiên đăng nhập giữa các chu kỳ (tránh login
+# liên tục → bị CCTS đá session tài khoản khác). Logic pool + tự relogin khi
+# bị đá session nằm chung ở ccts_shared.ClientPool (dùng chung với
+# stats_data.py, mỗi module giữ 1 instance riêng).
 # ==========================================
-# Session pool — tái sử dụng phiên đăng nhập giữa các chu kỳ
-# (tránh login liên tục → bị CCTS đá session tài khoản khác)
-# ==========================================
-_client_pool = {}  # username -> CCTSClient đã login
-
-
-def _invalidate_client(username):
-    """Huỷ phiên đã lưu khi bị lỗi / bị đá đăng nhập."""
-    if username in _client_pool:
-        _client_pool.pop(username, None)
-        print(f"[~] Đã huỷ session cache của [{username}]")
-
-
-async def _get_or_login_client(username, password):
-    """Lấy client từ pool; nếu chưa có thì login mới và cache lại.
-    Trả về (client, is_fresh_login)."""
-    client = _client_pool.get(username)
-    if client is not None:
-        return client, False
-    client = CCTSClient(username=username, password=password)
-    await client.login()
-    _client_pool[username] = client
-    print(f"[+] Login mới & cache session cho [{username}]")
-    return client, True
+_pool = ClientPool()
 
 
 async def _post_find_tickets(client, username, ticket_statuses, start_str, stop_str):
@@ -121,31 +99,14 @@ async def _post_find_tickets(client, username, ticket_statuses, start_str, stop_
 async def _fetch_tickets_window_single_account(username, password, ticket_statuses, start_str, stop_str):
     """Cào ticket cho 1 tài khoản, theo khoảng thời gian & danh sách trạng
     thái tuỳ ý. Tái sử dụng session đã login; nếu request lỗi (có thể bị đá
-    phiên) thì huỷ cache, login lại 1 lần rồi thử lại. Trả về
-    (list_dict_thô, thành_công_bool)."""
-    try:
-        client, _ = await _get_or_login_client(username, password)
-    except Exception as e:
-        print(f"[-] Đăng nhập thất bại cho [{username}]: {e}")
-        _invalidate_client(username)
-        return [], False
+    phiên) thì tự huỷ cache, login lại 1 lần rồi thử lại (qua ClientPool
+    dùng chung). Trả về (list_dict_thô, thành_công_bool)."""
 
-    try:
-        tickets = await _post_find_tickets(client, username, ticket_statuses, start_str, stop_str)
-        return tickets, True
-    except Exception as e:
-        print(f"[-] Lỗi khi cào dữ liệu từ [{username}] (session có thể đã bị đá): {e}")
-        # Thử lại 1 lần với login mới
-        _invalidate_client(username)
-        try:
-            client, _ = await _get_or_login_client(username, password)
-            tickets = await _post_find_tickets(client, username, ticket_statuses, start_str, stop_str)
-            print(f"[+] Cào lại thành công sau khi login mới cho [{username}]")
-            return tickets, True
-        except Exception as e2:
-            print(f"[-] Cào lại vẫn thất bại cho [{username}]: {e2}")
-            _invalidate_client(username)
-            return [], False
+    async def _action(client):
+        return await _post_find_tickets(client, username, ticket_statuses, start_str, stop_str)
+
+    tickets, ok = await _pool.call_with_retry(username, password, _action)
+    return (tickets or []), ok
 
 
 async def _fetch_tickets_window_multi_account(ticket_statuses, start_str, stop_str):
@@ -156,10 +117,9 @@ async def _fetch_tickets_window_multi_account(ticket_statuses, start_str, stop_s
     Nếu thiếu dù 1 tài khoản → all_success=False để main giữ cache cũ
     và thử lại chu kỳ sau (tránh dữ liệu thiếu nửa).
 
-    Dùng CCTS_API_LOCK chung với stats_data (export) để tránh đá session.
+    Dùng CCTS_API_LOCK chung với stats_data.py (export) để 2 module KHÔNG
+    BAO GIỜ gọi API CCTS cùng lúc — tránh đá session lẫn nhau.
     """
-    from ccts_gate import CCTS_API_LOCK
-
     all_raw = []
     success_count = 0
     total = len(CCTS_ACCOUNTS)

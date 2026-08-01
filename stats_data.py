@@ -1,28 +1,45 @@
 """
 stats_data.py — chỉ chịu trách nhiệm đăng nhập + cào + chuẩn hóa ticket.
 
-- Cào tất cả tài khoản trong config.CCTS_ACCOUNTS, gộp + khử trùng Ticket ID.
+- Cào CỐ ĐỊNH 2 tài khoản esmanager + itsmanagermt (ccts_shared.STATS_SCRAPE_
+  ACCOUNTS) — KHÔNG phụ thuộc config.CCTS_ACCOUNTS, vì lịch cào (0h / khởi
+  động) rơi vào giờ không ai dùng tài khoản tổng, nên cố định luôn cho an
+  toàn & dễ kiểm soát. Gộp + khử trùng theo Ticket ID.
+- Nếu 1 tài khoản chưa cào được ngay, tự động THỬ LẠI theo vòng lặp (tối đa
+  MAX_SCRAPE_ROUNDS lần, cách nhau SCRAPE_RETRY_DELAY_SECONDS giây) cho đến
+  khi có dữ liệu hoặc hết số vòng cho phép. Nếu sau cùng vẫn KHÔNG cào được
+  ticket nào (từ cả 2 tài khoản), GIỮ NGUYÊN cache thống kê cũ (ngày hôm
+  qua) thay vì ghi đè bằng dữ liệu rỗng.
 - Cửa sổ: 45 ngày kết thúc tại 0h hôm nay (KHÔNG gồm ngày hiện tại).
 - Lọc BSS.No2, map Region/Tech, phân loại EV/BSS.
 - Ghi cache thô (danh sách ticket đã chuẩn hóa) cho các module biểu đồ dùng.
+- Dùng CCTS_API_LOCK dùng chung với ccts_data.py (qua ccts_shared) để 2
+  module không bao giờ gọi API CCTS cùng lúc; và STATS_REFRESH_LOCK (single-
+  flight) để gộp nhiều lượt cào thống kê gọi gần nhau (khởi động / 0h /
+  admin bấm tay) thành 1 lượt duy nhất.
 
 Không vẽ chart ở đây.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from datetime import datetime, timedelta
 from typing import Any
-from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+from ccts_shared import VN_TZ, CCTS_API_LOCK, STATS_REFRESH_LOCK, STATS_SCRAPE_ACCOUNTS, ClientPool
+
 SCRAPE_LOOKBACK_DAYS = 45
 STATS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_daily_cache.json")
 SAMPLE_XLSX = os.path.join(os.path.dirname(__file__), "Tickets_esmanager_20260728_201743.xlsx")
+
+# Cào tối đa 10 vòng, chờ 20s giữa các vòng cho tài khoản còn thất bại.
+MAX_SCRAPE_ROUNDS = 10
+SCRAPE_RETRY_DELAY_SECONDS = 20
 
 ALLOWED_REGIONS = ("DNA-QNA", "DNI-VTU", "LDO-BTH", "EC", "Mtay", "HCM")
 _ALLOWED_SET = set(ALLOWED_REGIONS)
@@ -160,16 +177,6 @@ def scrape_time_range() -> tuple[str, str, str]:
         end.strftime("%Y-%m-%d %H:%M:%S"),
         end.strftime("%Y-%m-%d"),
     )
-
-
-def _pick_accounts() -> list:
-    try:
-        from config import CCTS_ACCOUNTS
-        if CCTS_ACCOUNTS:
-            return list(CCTS_ACCOUNTS)
-    except Exception as e:
-        print(f"[stats] Không đọc CCTS_ACCOUNTS: {e}")
-    return [{"username": "esmanager", "password": "Ccts123.", "role": "esmanager"}]
 
 
 def process_ticket_information(
@@ -375,19 +382,28 @@ def enrich_closed_with_ticket_info(
     return pd.DataFrame(rows)
 
 
-async def _export_one_account(username, password, start_time, end_time) -> dict | None:
-    """Trả dict các sheet DataFrame (đã gắn _source_account)."""
-    from api_client import CCTSClient
+_stats_pool = ClientPool()  # pool phiên đăng nhập RIÊNG của stats_data.py
 
-    client = CCTSClient(username=username, password=password)
-    await client.login()
-    dfs = await client.export_and_download_tickets(
-        start_time=start_time,
-        end_time=end_time,
-        ticket_status=None,
-    )
-    if not dfs:
+
+async def _export_one_account(username, password, start_time, end_time) -> dict | None:
+    """Export Excel cho 1 tài khoản (tự relogin 1 lần nếu bị đá session, qua
+    ClientPool dùng chung). Trả dict các sheet DataFrame (đã gắn
+    _source_account), hoặc None nếu thất bại."""
+
+    async def _action(client):
+        dfs = await client.export_and_download_tickets(
+            start_time=start_time,
+            end_time=end_time,
+            ticket_status=None,
+        )
+        if not dfs:
+            raise RuntimeError("export_and_download_tickets trả về rỗng")
+        return dfs
+
+    dfs, ok = await _stats_pool.call_with_retry(username, password, _action)
+    if not ok or not dfs:
         return None
+
     out = {}
     for name, df in dfs.items():
         if df is None or (hasattr(df, "empty") and df.empty):
@@ -398,108 +414,11 @@ async def _export_one_account(username, password, start_time, end_time) -> dict 
     return out if out else None
 
 
-async def fetch_all_accounts_tickets(
-    start_time=None,
-    end_time=None,
-    use_sample_fallback=True,
-):
-    """
-    Cào multi-account → gộp Ticket Information + Events Record + Spare Parts.
-    Trả (processed_open_window_df, source, meta, closed_enriched_df).
-    """
-    start_time, end_time, end_date_ex = scrape_time_range()
-    print(f"[stats] Khoảng cào [start, end): {start_time} → {end_time} (không gồm {end_date_ex})")
-
-    accounts = _pick_accounts()
-    ti_frames = []
-    ev_frames = []
-    sp_frames = []
-    ap_frames = []
-    ok_accounts = []
-    fail_accounts = []
-
-    try:
-        from ccts_gate import CCTS_API_LOCK
-    except Exception:
-        CCTS_API_LOCK = None
-
-    async def _run_exports():
-        for acc in accounts:
-            username = acc.get("username") or ""
-            password = acc.get("password") or ""
-            if not username:
-                continue
-            try:
-                print(f"[stats] Đang cào account: {username} ...")
-                bundle = await _export_one_account(username, password, start_time, end_time)
-                if not bundle or "Ticket Information" not in bundle:
-                    fail_accounts.append(username)
-                    print(f"[stats]   → thiếu Ticket Information: {username}")
-                    continue
-                ti_frames.append(bundle["Ticket Information"])
-                if "Events Record" in bundle:
-                    ev_frames.append(bundle["Events Record"])
-                if "Spare Parts Record" in bundle:
-                    sp_frames.append(bundle["Spare Parts Record"])
-                if "Appointment" in bundle:
-                    ap_frames.append(bundle["Appointment"])
-                ok_accounts.append(username)
-                print(
-                    f"[stats]   → TI={len(bundle['Ticket Information'])}, "
-                    f"EV={len(bundle.get('Events Record', []))}, "
-                    f"SP={len(bundle.get('Spare Parts Record', []))}, "
-                    f"AP={len(bundle.get('Appointment', []))}"
-                )
-            except Exception as e:
-                fail_accounts.append(username)
-                print(f"[stats]   → lỗi {username}: {e}")
-
-    if CCTS_API_LOCK is not None:
-        async with CCTS_API_LOCK:
-            print("[stats] Giữ CCTS_API_LOCK")
-            await _run_exports()
-            print("[stats] Nhả CCTS_API_LOCK")
-    else:
-        await _run_exports()
-
-    meta = {
-        "start_time": start_time,
-        "end_time": end_time,
-        "end_date_exclusive": end_date_ex,
-        "accounts_ok": ok_accounts,
-        "accounts_fail": fail_accounts,
-        "lookback_days": SCRAPE_LOOKBACK_DAYS,
-    }
-
-    source = "live"
-    if not ti_frames:
-        if use_sample_fallback and os.path.exists(SAMPLE_XLSX):
-            print(f"[stats] Fallback file mẫu: {SAMPLE_XLSX}")
-            raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Ticket Information")
-            events_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Events Record")
-            try:
-                spare_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Spare Parts Record")
-            except Exception:
-                spare_raw = pd.DataFrame()
-            try:
-                appt_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Appointment")
-            except Exception:
-                appt_raw = pd.DataFrame()
-            source = "sample"
-        else:
-            raise RuntimeError("Không cào được ticket từ bất kỳ account nào")
-    else:
-        raw = pd.concat(ti_frames, ignore_index=True)
-        if "Ticket ID" in raw.columns:
-            raw["Ticket ID"] = raw["Ticket ID"].astype(str).str.strip()
-            before = len(raw)
-            raw = raw.drop_duplicates(subset=["Ticket ID"])
-            print(f"[stats] TI gộp {before} → {len(raw)}")
-        events_raw = pd.concat(ev_frames, ignore_index=True) if ev_frames else pd.DataFrame()
-        spare_raw = pd.concat(sp_frames, ignore_index=True) if sp_frames else pd.DataFrame()
-        appt_raw = pd.concat(ap_frames, ignore_index=True) if ap_frames else pd.DataFrame()
-        if not events_raw.empty and "Ticket ID" in events_raw.columns:
-            events_raw["Ticket ID"] = events_raw["Ticket ID"].astype(str).str.strip()
+def _finalize_from_raw(raw, events_raw, spare_raw, appt_raw, meta_extra: dict):
+    """Phần xử lý THUẦN (không gọi mạng): chuẩn hóa Ticket Information +
+    trích xuất ticket đã đóng 30 ngày. Dùng chung cho cả dữ liệu cào trực
+    tiếp lẫn dữ liệu fallback từ file mẫu."""
+    end_date_ex = meta_extra["end_date_exclusive"]
 
     spare_ids = set()
     if spare_raw is not None and not spare_raw.empty and "Ticket ID" in spare_raw.columns:
@@ -529,9 +448,137 @@ async def fetch_all_accounts_tickets(
         f"appt={int(closed_enriched['has_appointment'].sum()) if len(closed_enriched) else 0})"
     )
 
-    meta["tech_by_region"] = tech_by_region
-    meta["row_count"] = int(len(processed))
-    meta["closed_count"] = int(len(closed_enriched))
+    meta = {
+        **meta_extra,
+        "tech_by_region": tech_by_region,
+        "row_count": int(len(processed)),
+        "closed_count": int(len(closed_enriched)),
+    }
+    return processed, meta, closed_enriched
+
+
+def _load_sample_bundle():
+    """Đọc file Excel mẫu làm phao cứu sinh CUỐI CÙNG — chỉ dùng khi cào
+    thất bại hoàn toàn VÀ không hề có cache cũ nào (ví dụ lần deploy đầu
+    tiên). Trả (raw, events_raw, spare_raw, appt_raw) hoặc None nếu không có
+    file mẫu."""
+    if not os.path.exists(SAMPLE_XLSX):
+        return None
+    print(f"[stats] Fallback file mẫu: {SAMPLE_XLSX}")
+    raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Ticket Information")
+    events_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Events Record")
+    try:
+        spare_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Spare Parts Record")
+    except Exception:
+        spare_raw = pd.DataFrame()
+    try:
+        appt_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Appointment")
+    except Exception:
+        appt_raw = pd.DataFrame()
+    return raw, events_raw, spare_raw, appt_raw
+
+
+async def fetch_all_accounts_tickets(start_time=None, end_time=None):
+    """
+    Cào 2 tài khoản cố định (ccts_shared.STATS_SCRAPE_ACCOUNTS), gộp + khử
+    trùng Ticket Information / Events Record / Spare Parts / Appointment.
+
+    Cào theo VÒNG LẶP: mỗi vòng thử các tài khoản CHƯA thành công; tài khoản
+    nào đã có dữ liệu ở vòng trước thì không cào lại. Lặp tối đa
+    MAX_SCRAPE_ROUNDS vòng, nghỉ SCRAPE_RETRY_DELAY_SECONDS giây giữa các
+    vòng (KHÔNG giữ CCTS_API_LOCK trong lúc nghỉ, để không chặn ccts_data.py
+    cào bản đồ realtime mỗi 15').
+
+    Trả (processed_df, source, meta, closed_enriched_df) nếu có ít nhất 1
+    tài khoản cào được; trả None nếu SAU TỐI ĐA số vòng vẫn không lấy được
+    ticket nào từ bất kỳ tài khoản nào (để refresh_stats_cache() giữ nguyên
+    cache cũ thay vì ghi đè dữ liệu rỗng).
+    """
+    start_time, end_time, end_date_ex = scrape_time_range()
+    print(f"[stats] Khoảng cào [start, end): {start_time} → {end_time} (không gồm {end_date_ex})")
+
+    pending = {
+        acc["username"]: acc
+        for acc in STATS_SCRAPE_ACCOUNTS
+        if acc.get("username")
+    }
+    bundles: dict[str, dict] = {}
+
+    round_no = 0
+    while pending and round_no < MAX_SCRAPE_ROUNDS:
+        round_no += 1
+        print(
+            f"[stats] Vòng cào {round_no}/{MAX_SCRAPE_ROUNDS} — "
+            f"còn {len(pending)} tài khoản chưa xong: {list(pending)}"
+        )
+        async with CCTS_API_LOCK:
+            for username, acc in list(pending.items()):
+                password = acc.get("password") or ""
+                print(f"[stats] Đang cào account: {username} ...")
+                try:
+                    bundle = await _export_one_account(username, password, start_time, end_time)
+                except Exception as e:
+                    bundle = None
+                    print(f"[stats]   → lỗi {username}: {e}")
+
+                if bundle and "Ticket Information" in bundle:
+                    bundles[username] = bundle
+                    pending.pop(username, None)
+                    print(
+                        f"[stats]   → OK {username}: TI={len(bundle['Ticket Information'])}, "
+                        f"EV={len(bundle.get('Events Record', []))}, "
+                        f"SP={len(bundle.get('Spare Parts Record', []))}, "
+                        f"AP={len(bundle.get('Appointment', []))}"
+                    )
+                else:
+                    print(f"[stats]   → chưa được: {username} (sẽ thử lại ở vòng sau)")
+
+        if pending and round_no < MAX_SCRAPE_ROUNDS:
+            print(f"[stats] Đợi {SCRAPE_RETRY_DELAY_SECONDS}s trước vòng kế tiếp...")
+            await asyncio.sleep(SCRAPE_RETRY_DELAY_SECONDS)
+
+    ok_accounts = list(bundles.keys())
+    fail_accounts = list(pending.keys())
+    if fail_accounts:
+        print(f"[stats] Sau {round_no} vòng vẫn chưa cào được: {fail_accounts}")
+
+    meta_extra = {
+        "start_time": start_time,
+        "end_time": end_time,
+        "end_date_exclusive": end_date_ex,
+        "accounts_ok": ok_accounts,
+        "accounts_fail": fail_accounts,
+        "rounds_used": round_no,
+        "lookback_days": SCRAPE_LOOKBACK_DAYS,
+    }
+
+    if not bundles:
+        # Không có tài khoản nào cào được sau tối đa số vòng cho phép.
+        # KHÔNG dùng sample fallback ở đây - để refresh_stats_cache() tự
+        # quyết định giữ cache cũ (ưu tiên) hoặc mới dùng sample (chót).
+        print(f"[stats] Cào thất bại toàn bộ sau {round_no} vòng — không có ticket nào.")
+        return None
+
+    ti_frames = [b["Ticket Information"] for b in bundles.values()]
+    ev_frames = [b["Events Record"] for b in bundles.values() if "Events Record" in b]
+    sp_frames = [b["Spare Parts Record"] for b in bundles.values() if "Spare Parts Record" in b]
+    ap_frames = [b["Appointment"] for b in bundles.values() if "Appointment" in b]
+
+    raw = pd.concat(ti_frames, ignore_index=True)
+    if "Ticket ID" in raw.columns:
+        raw["Ticket ID"] = raw["Ticket ID"].astype(str).str.strip()
+        before = len(raw)
+        raw = raw.drop_duplicates(subset=["Ticket ID"])
+        print(f"[stats] TI gộp {before} → {len(raw)}")
+    events_raw = pd.concat(ev_frames, ignore_index=True) if ev_frames else pd.DataFrame()
+    spare_raw = pd.concat(sp_frames, ignore_index=True) if sp_frames else pd.DataFrame()
+    appt_raw = pd.concat(ap_frames, ignore_index=True) if ap_frames else pd.DataFrame()
+    if not events_raw.empty and "Ticket ID" in events_raw.columns:
+        events_raw["Ticket ID"] = events_raw["Ticket ID"].astype(str).str.strip()
+
+    source = "live" if not fail_accounts else "live_partial"
+    processed, meta, closed_enriched = _finalize_from_raw(raw, events_raw, spare_raw, appt_raw, meta_extra)
+    meta["source"] = source
     print(f"[stats] Sau chuẩn hóa TI: {len(processed)} ticket (source={source})")
     return processed, source, meta, closed_enriched
 
@@ -590,14 +637,11 @@ def get_cached_meta() -> dict:
     return cache.get("meta") or {}
 
 
-async def refresh_stats_cache(**_kwargs) -> dict:
-    """Cào multi-account 45 ngày, không gồm hôm nay → cache v2 (tickets + closed)."""
-    df, source, meta, closed_df = await fetch_all_accounts_tickets()
+def _build_payload(df, source, meta, closed_df) -> dict:
     tech_by_region = meta.pop("tech_by_region", {}) or {}
     if not tech_by_region:
         _, _, tech_by_region = _get_static_maps()
-
-    payload = {
+    return {
         "version": 2,
         "tickets": tickets_df_to_records(df),
         "closed_tickets": tickets_df_to_records(closed_df),
@@ -609,12 +653,71 @@ async def refresh_stats_cache(**_kwargs) -> dict:
             "allowed_regions": list(ALLOWED_REGIONS),
         },
     }
+
+
+async def _refresh_stats_cache_impl() -> dict:
+    """Phần thực thi thật sự (chạy dưới STATS_REFRESH_LOCK)."""
+    result = await fetch_all_accounts_tickets()
+
+    if result is None:
+        # Cào thất bại HOÀN TOÀN sau tối đa MAX_SCRAPE_ROUNDS vòng.
+        old = load_stats_cache()
+        if old:
+            print(
+                "[stats] Cào thất bại toàn bộ — GIỮ NGUYÊN cache thống kê cũ "
+                f"(generated_at={old.get('meta', {}).get('generated_at', '?')})."
+            )
+            return old
+
+        # Chưa từng có cache nào (ví dụ lần deploy đầu tiên) → dùng file mẫu
+        # làm phao cứu sinh CUỐI CÙNG để trang /stats không trống trơn.
+        sample = _load_sample_bundle()
+        if sample is None:
+            raise RuntimeError(
+                "Không cào được ticket từ bất kỳ tài khoản nào, cũng không có "
+                "cache cũ hay file mẫu để hiển thị tạm."
+            )
+        raw, events_raw, spare_raw, appt_raw = sample
+        _, end_time, end_date_ex = scrape_time_range()
+        meta_extra = {
+            "start_time": None,
+            "end_time": end_time,
+            "end_date_exclusive": end_date_ex,
+            "accounts_ok": [],
+            "accounts_fail": [a["username"] for a in STATS_SCRAPE_ACCOUNTS],
+            "rounds_used": MAX_SCRAPE_ROUNDS,
+            "lookback_days": SCRAPE_LOOKBACK_DAYS,
+        }
+        processed, meta, closed_df = _finalize_from_raw(raw, events_raw, spare_raw, appt_raw, meta_extra)
+        payload = _build_payload(processed, "sample", meta, closed_df)
+        save_stats_cache(payload)
+        print(f"[stats] Cache v2 (sample fallback): TI={meta.get('row_count', 0)}")
+        return payload
+
+    df, source, meta, closed_df = result
+    payload = _build_payload(df, source, meta, closed_df)
     save_stats_cache(payload)
     print(
         f"[stats] Cache v2: TI={meta.get('row_count', 0)}, "
         f"closed30d={meta.get('closed_count', 0)}, source={source}"
     )
     return payload
+
+
+async def refresh_stats_cache(**_kwargs) -> dict:
+    """Cào 2 tài khoản cố định, 45 ngày (không gồm hôm nay) → cache v2
+    (tickets + closed). Dùng STATS_REFRESH_LOCK kiểu "single-flight": nếu đã
+    có 1 lượt cào khác đang chạy (khởi động / lịch 0h / admin bấm tay xảy ra
+    gần nhau), lượt gọi này sẽ ĐỢI lượt kia xong rồi dùng luôn kết quả đó,
+    thay vì cào 2 lần chồng nhau."""
+    if STATS_REFRESH_LOCK.locked():
+        print("[stats] Đã có 1 lượt cào thống kê khác đang chạy — đợi kết quả đó, không cào lặp lại.")
+        async with STATS_REFRESH_LOCK:
+            pass
+        return load_stats_cache() or {}
+
+    async with STATS_REFRESH_LOCK:
+        return await _refresh_stats_cache_impl()
 
 
 def get_cached_daily_volume():
@@ -644,8 +747,6 @@ async def get_daily_volume_stats(force_refresh: bool = False, **kwargs):
 
 
 if __name__ == "__main__":
-    import asyncio
-
     async def _main():
         p = await refresh_stats_cache()
         print("tickets:", len(p.get("tickets") or []))
