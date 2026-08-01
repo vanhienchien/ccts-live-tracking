@@ -107,19 +107,29 @@ async def _seconds_until_next_midnight_vn() -> float:
     return max(1.0, (tomorrow - now).total_seconds())
 
 
+async def _run_stats_refresh(label: str):
+    """Chạy 1 lượt cào thống kê nền, log thống nhất theo `label` (vd "0h",
+    "khởi động"). stats_data.refresh_stats_cache() đã tự lo:
+    - Cào 2 tài khoản cố định, thử lại tối đa 10 vòng nếu chưa được ngay.
+    - Tự giữ nguyên cache cũ (KHÔNG ghi đè) nếu sau 10 vòng vẫn thất bại.
+    - Tự gộp (single-flight) nếu có 1 lượt cào khác đang chạy cùng lúc.
+    Vì vậy ở đây chỉ cần log, không cần tự xử lý giữ cache cũ nữa."""
+    try:
+        print(f"[stats] === Bắt đầu cào thống kê ({label}) ===")
+        await stats_data.refresh_stats_cache()
+        print(f"[stats] === Cào thống kê ({label}) hoàn tất ===")
+    except Exception as e:
+        print(f"[stats] Lỗi cào thống kê ({label}) (giữ cache cũ nếu có): {e!r}")
+
+
 async def stats_midnight_loop():
-    """Mỗi ngày lúc ~0h VN: cào lại thống kê 10 ngày và ghi cache."""
+    """Mỗi ngày lúc ~0h VN: cào lại thống kê 45 ngày và ghi cache."""
     while True:
         wait_s = await _seconds_until_next_midnight_vn()
         hours = wait_s / 3600
         print(f"[stats] Lịch cào 0h: còn ~{hours:.1f}h (đợi {int(wait_s)}s)...")
         await asyncio.sleep(wait_s)
-        try:
-            print("[stats] === Bắt đầu cào thống kê định kỳ 0h ===")
-            await stats_data.refresh_stats_cache()
-            print("[stats] === Cào thống kê 0h hoàn tất ===")
-        except Exception as e:
-            print(f"[stats] Lỗi cào thống kê lúc 0h (giữ cache cũ): {e!r}")
+        await _run_stats_refresh("định kỳ 0h")
 
 
 @app.on_event("startup")
@@ -143,19 +153,10 @@ async def on_startup():
     else:
         print("[stats] Chưa có cache — trang /stats tạm trống đến khi cào nền xong.")
 
-    async def _stats_startup_refresh():
-        """
-        Mỗi lần restart: cào 10 ngày → hiện tại (để test nâng cấp).
-        Chạy nền + CCTS_API_LOCK — không lag web, không đụng ccts_data.
-        """
-        try:
-            print("[stats] === Cào thống kê khi khởi động (45 ngày → 0h hôm nay, multi-account, background) ===")
-            await stats_data.refresh_stats_cache()
-            print("[stats] === Cào thống kê startup hoàn tất ===")
-        except Exception as e:
-            print(f"[stats] Cào startup thất bại (giữ cache cũ nếu có): {e!r}")
-
-    asyncio.create_task(_stats_startup_refresh())
+    # Mỗi lần restart: cào lại 45 ngày → 0h hôm nay (2 tài khoản cố định).
+    # Chạy NỀN (không await) — không chặn startup, không lag web. Việc tự
+    # retry / giữ cache cũ khi thất bại đã nằm sẵn trong refresh_stats_cache().
+    asyncio.create_task(_run_stats_refresh("khởi động"))
 
     try:
         await refresh_stations_once()
