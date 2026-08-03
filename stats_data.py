@@ -33,7 +33,7 @@ import pandas as pd
 
 from ccts_shared import VN_TZ, CCTS_API_LOCK, STATS_REFRESH_LOCK, STATS_SCRAPE_ACCOUNTS, ClientPool
 
-SCRAPE_LOOKBACK_DAYS = 45
+SCRAPE_LOOKBACK_DAYS = 60
 STATS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_daily_cache.json")
 SAMPLE_XLSX = os.path.join(os.path.dirname(__file__), "Tickets_esmanager_20260728_201743.xlsx")
 
@@ -112,7 +112,7 @@ def is_managed_region(region: str | None) -> bool:
     if r in _ALLOWED_SET:
         return True
     # chuẩn hóa nhẹ
-    if r.lower() in {"kv không quản lý", "kv khong quan ly", "không quản lý", "unmanaged"}:
+    if r.lower() in {"kv không quản lý", "kv khong quan ly", "không quản lý", "unmanaged", "HCM"}:
         return False
     return False
 
@@ -167,7 +167,7 @@ def scrape_time_range() -> tuple[str, str, str]:
     """
     [start, end) giờ VN:
     - end = 0h hôm nay (KHÔNG gồm ngày hiện tại)
-    - start = end - 45 ngày
+    - start = end - 60 ngày
     """
     now = datetime.now(VN_TZ)
     end = now.replace(hour=0, minute=0, second=0, microsecond=0)
