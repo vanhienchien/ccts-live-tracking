@@ -33,7 +33,7 @@ import pandas as pd
 
 from ccts_shared import VN_TZ, CCTS_API_LOCK, STATS_REFRESH_LOCK, STATS_SCRAPE_ACCOUNTS, ClientPool
 
-SCRAPE_LOOKBACK_DAYS = 60
+SCRAPE_LOOKBACK_DAYS = 45
 STATS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_daily_cache.json")
 SAMPLE_XLSX = os.path.join(os.path.dirname(__file__), "Tickets_esmanager_20260728_201743.xlsx")
 
@@ -41,7 +41,10 @@ SAMPLE_XLSX = os.path.join(os.path.dirname(__file__), "Tickets_esmanager_2026072
 MAX_SCRAPE_ROUNDS = 10
 SCRAPE_RETRY_DELAY_SECONDS = 20
 
-ALLOWED_REGIONS = ("DNA-QNA", "DNI-VTU", "LDO-BTH", "EC", "Mtay", "HCM")
+# Công ty đã RÚT KHỎI khu vực HCM (08/2026) -> HCM không còn nằm trong danh
+# sách khu vực được quản lý; xem thêm ccts_shared.DEPRECATED_REGIONS (nơi
+# region_map gốc cũng được tự động chuẩn hoá HCM -> "KV không quản lý").
+ALLOWED_REGIONS = ("DNA-QNA", "DNI-VTU", "LDO-BTH", "EC", "Mtay")
 _ALLOWED_SET = set(ALLOWED_REGIONS)
 
 EXCLUDED_TECH_NAMES = {
@@ -51,7 +54,7 @@ EXCLUDED_TECH_NAMES = {
 }
 
 _REGION_PREFIX_RULES: list[tuple[str, str]] = [
-    ("B.HCM", "HCM"),
+    # B.HCM đã bị loại: công ty rút khỏi khu vực HCM, xem ccts_shared.DEPRECATED_REGIONS.
     ("B.DNI", "DNI-VTU"),
     ("B.VTU", "DNI-VTU"),
     ("B.DNA", "DNA-QNA"),
@@ -86,8 +89,8 @@ def _extract_core_station_code(station_code: str | None) -> str | None:
 
 def _get_static_maps() -> tuple[dict[str, str], dict[str, str], dict[str, list[str]]]:
     try:
-        from github_data_store import load_static_data
-        _, tech_map, region_map, _, tech_by_region = load_static_data()
+        from ccts_shared import load_static_data_filtered
+        _, tech_map, region_map, _, tech_by_region = load_static_data_filtered()
         return region_map or {}, tech_map or {}, tech_by_region or {}
     except Exception as e:
         print(f"[stats] Không tải StationAssignments: {e}")
@@ -105,14 +108,15 @@ def _infer_region_prefix(station_code: str | None) -> str | None:
 
 
 def is_managed_region(region: str | None) -> bool:
-    """Chỉ 6 KV được quản lý — loại 'KV không quản lý' và mọi region lạ."""
+    """Chỉ 5 KV được quản lý — loại 'KV không quản lý' (gồm cả HCM, đã rút
+    khỏi từ 08/2026) và mọi region lạ."""
     if not region:
         return False
     r = str(region).strip()
     if r in _ALLOWED_SET:
         return True
     # chuẩn hóa nhẹ
-    if r.lower() in {"kv không quản lý", "kv khong quan ly", "không quản lý", "unmanaged", "HCM"}:
+    if r.lower() in {"kv không quản lý", "kv khong quan ly", "không quản lý", "unmanaged"}:
         return False
     return False
 
@@ -167,7 +171,7 @@ def scrape_time_range() -> tuple[str, str, str]:
     """
     [start, end) giờ VN:
     - end = 0h hôm nay (KHÔNG gồm ngày hiện tại)
-    - start = end - 60 ngày
+    - start = end - 45 ngày
     """
     now = datetime.now(VN_TZ)
     end = now.replace(hour=0, minute=0, second=0, microsecond=0)
