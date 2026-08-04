@@ -40,6 +40,65 @@ from zoneinfo import ZoneInfo
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
 # ------------------------------------------------------------------
+# Khu vực KHÔNG còn được quản lý.
+# ------------------------------------------------------------------
+# Nhãn chuẩn cho "khu vực không quản lý" — dùng xuyên suốt chương trình.
+UNMANAGED_REGION_LABEL = "KV không quản lý"
+
+# Các khu vực công ty đã RÚT KHỎI / NGỪNG quản lý. Khai báo ở đây để chỉ
+# cần sửa 1 chỗ duy nhất khi có thay đổi phạm vi hoạt động; toàn bộ chương
+# trình (bản đồ, danh sách ticket, thống kê) sẽ tự coi các khu vực này là
+# "KV không quản lý" — kể cả khi dữ liệu gốc trên GitHub (StationAssignments)
+# chưa kịp cập nhật.
+#   - HCM: công ty đã rút khỏi khu vực TP.HCM (từ 08/2026).
+DEPRECATED_REGIONS = {"HCM"}
+
+_UNMANAGED_ALIASES = {
+    "kv không quản lý", "kv khong quan ly", "không quản lý", "khong quan ly", "unmanaged",
+}
+
+
+def is_unmanaged_region(region) -> bool:
+    """True nếu khu vực này KHÔNG (còn) được quản lý: rỗng, đúng nhãn
+    "KV không quản lý", một biến thể gõ khác của nhãn đó, hoặc thuộc
+    DEPRECATED_REGIONS (vd HCM)."""
+    if not region:
+        return True
+    r = str(region).strip()
+    if r in DEPRECATED_REGIONS:
+        return True
+    if r.lower() in _UNMANAGED_ALIASES:
+        return True
+    return False
+
+
+def load_static_data_filtered():
+    """Bọc github_data_store.load_static_data(): tự động chuẩn hoá các khu
+    vực đã NGỪNG quản lý (DEPRECATED_REGIONS, vd HCM) thành
+    UNMANAGED_REGION_LABEL trong region_map, và loại các khu vực đó khỏi
+    tech_by_region. Cả ccts_data.py (bản đồ realtime) lẫn stats_data.py
+    (thống kê) đều nên lấy static data qua hàm này thay vì gọi thẳng
+    github_data_store, để chỉ cần đổi DEPRECATED_REGIONS ở 1 chỗ là áp dụng
+    toàn chương trình.
+
+    Trả (coords_map, tech_map, region_map, cp_model_map, tech_by_region) —
+    giống hệt chữ ký của github_data_store.load_static_data()."""
+    import github_data_store
+
+    coords_map, tech_map, region_map, cp_model_map, tech_by_region = github_data_store.load_static_data()
+
+    region_map = {
+        code: (UNMANAGED_REGION_LABEL if is_unmanaged_region(region) else region)
+        for code, region in (region_map or {}).items()
+    }
+    tech_by_region = {
+        region: names
+        for region, names in (tech_by_region or {}).items()
+        if not is_unmanaged_region(region)
+    }
+    return coords_map, tech_map, region_map, cp_model_map, tech_by_region
+
+# ------------------------------------------------------------------
 # Khoá dùng chung cho MỌI lần gọi API CCTS (login, find ticket, export...).
 # ------------------------------------------------------------------
 try:

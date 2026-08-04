@@ -18,7 +18,7 @@ import pandas as pd
 from utils import extract_core_station_code, parse_duration_to_hours
 from config import CCTS_ACCOUNTS
 import github_data_store
-from ccts_shared import VN_TZ, CCTS_API_LOCK, ClientPool
+from ccts_shared import VN_TZ, CCTS_API_LOCK, ClientPool, is_unmanaged_region, load_static_data_filtered
 
 CACHE_FILE = "last_known_data.json"
 
@@ -58,12 +58,15 @@ def _severity_color(hours):
 def get_static_data():
     """Toạ độ trạm / phân công kỹ thuật viên / model trụ sạc - đọc trực tiếp
     từ GitHub (github_data_store.py) tại runtime, không cần deploy lại khi
-    bạn cập nhật file và push lên."""
-    return github_data_store.load_static_data()
+    bạn cập nhật file và push lên. Đã tự lọc/chuẩn hoá các khu vực NGỪNG
+    quản lý (vd HCM, xem ccts_shared.DEPRECATED_REGIONS) thành
+    "KV không quản lý", nên không cần lọc lại ở nơi gọi."""
+    return load_static_data_filtered()
 
 
 def reload_static_data():
-    return github_data_store.reload_static_data()
+    github_data_store.reload_static_data()
+    return load_static_data_filtered()
 
 
 # ==========================================
@@ -242,7 +245,7 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
             core_code = extract_core_station_code(station_code)
 
             region = region_map.get(core_code, "Unknown")
-            if region == "KV không quản lý":
+            if is_unmanaged_region(region):
                 continue
 
             coords = group.iloc[0]["coords"]  # đã lọc nên chắc chắn có
@@ -365,6 +368,8 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
         core_code = extract_core_station_code(station_code) if station_code else None
         tech_name = tech_map.get(core_code, "Unassigned") if core_code else "Unassigned"
         region = region_map.get(core_code, "Unknown") if core_code else "Unknown"
+        if is_unmanaged_region(region):
+            continue
         cp_id = str(row.get("Charge Point ID") or "")
         hours = float(row.get("Hours") or 0)
         rows.append({
