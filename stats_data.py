@@ -44,7 +44,7 @@ SCRAPE_RETRY_DELAY_SECONDS = 20
 # Công ty đã RÚT KHỎI khu vực HCM (08/2026) -> HCM không còn nằm trong danh
 # sách khu vực được quản lý; xem thêm ccts_shared.DEPRECATED_REGIONS (nơi
 # region_map gốc cũng được tự động chuẩn hoá HCM -> "KV không quản lý").
-ALLOWED_REGIONS = ("DNA-QNA", "DNI-BPH", "LDO-BTH", "EC", "Mtay")
+ALLOWED_REGIONS = ("DNA-QNA", "DNI-BPH", "LDO-BTH", "Tây Nguyên", "Mtay")
 _ALLOWED_SET = set(ALLOWED_REGIONS)
 
 EXCLUDED_TECH_NAMES = {
@@ -67,11 +67,11 @@ _REGION_PREFIX_RULES: list[tuple[str, str]] = [
     ("B.CTH", "Mtay"),
     ("B.KG", "Mtay"),
     ("B.CMU", "Mtay"),
-    ("C.NTH", "EC"),
+    ("C.NTH", "Tây Nguyên"),
     ("C.QNA", "DNA-QNA"),
-    ("C.DNG", "EC"),
-    ("C.PYE", "EC"),
-    ("C.KHA", "EC"),
+    ("C.DNG", "Tây Nguyên"),
+    ("C.PYE", "Tây Nguyên"),
+    ("C.KHA", "Tây Nguyên"),
 ]
 
 _memory_cache: dict[str, Any] | None = None
