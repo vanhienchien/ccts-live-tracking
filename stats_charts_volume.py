@@ -3,7 +3,8 @@ stats_charts_volume.py — biểu đồ đường số ticket theo ngày.
 
 Đọc cache tickets từ stats_data, phân tích theo:
 - khu vực (ALLOWED_REGIONS)
-- kỹ thuật viên trong từng khu vực
+- tổng cộng tất cả khu vực (1 đường, kèm TB/ngày, đỉnh, đáy — total_series)
+- kỹ thuật viên trong từng khu vực (ma trận tech × ngày, frontend vẽ heatmap)
 - bộ lọc EV / BSS / all
 
 Không cào API.
@@ -143,9 +144,59 @@ def aggregate_daily_by_tech_per_region(
     return result
 
 
+def aggregate_daily_total(df: pd.DataFrame) -> dict[str, Any]:
+    """Chuỗi TỔNG (gộp tất cả khu vực) theo ngày — dùng cho biểu đồ 1 đường
+    "Tổng cộng". Kèm các chỉ số phụ (TB/ngày, đỉnh, đáy, chênh lệch ngày kề
+    trước) để frontend vẽ thêm nhãn số liệu / điểm nhấn trực quan trên từng
+    ngày thay vì chỉ có 1 đường trơn."""
+    empty = {
+        "labels": [],
+        "total": [],
+        "deltas": [],
+        "avg": 0,
+        "max_value": 0,
+        "max_date": None,
+        "min_value": 0,
+        "min_date": None,
+        "date_range": {"from": None, "to": None},
+    }
+    if df is None or df.empty:
+        return empty
+
+    df = df[df["Region"].isin(_ALLOWED_SET)].copy()
+    if df.empty:
+        return empty
+
+    counts = df.groupby("Create Date").size().sort_index()
+    labels = list(counts.index.astype(str))
+    values = [int(x) for x in counts.tolist()]
+    if not values:
+        return empty
+
+    avg = round(sum(values) / len(values), 2)
+    max_value = max(values)
+    min_value = min(values)
+    max_date = labels[values.index(max_value)]
+    min_date = labels[values.index(min_value)]
+    deltas = [None] + [values[i] - values[i - 1] for i in range(1, len(values))]
+
+    return {
+        "labels": labels,
+        "total": values,
+        "deltas": deltas,
+        "avg": avg,
+        "max_value": max_value,
+        "max_date": max_date,
+        "min_value": min_value,
+        "min_date": min_date,
+        "date_range": {"from": labels[0], "to": labels[-1]},
+    }
+
+
 def _payload_for_df(df: pd.DataFrame, tech_by_region: dict | None) -> dict[str, Any]:
     agg = aggregate_daily_by_region(df)
     agg["by_region"] = aggregate_daily_by_tech_per_region(df, tech_by_region=tech_by_region or {})
+    agg["total_series"] = aggregate_daily_total(df)
     return agg
 
 
