@@ -72,7 +72,7 @@
   let chart = null;
   let fullPayload = null;
   let currentPayload = null;
-  let currentView = "region";
+  let currentView = "total";
   let selectedRegion = "LDO-BTH";
   let visibleSeries = {};
   let panelEl = null;
@@ -558,15 +558,15 @@
     panelEl = panel;
     panel.innerHTML = `
       <div class="view-toggle" style="margin-bottom:12px;">
-        <button type="button" class="active" data-view="region">Theo khu vực</button>
-        <button type="button" data-view="total">Tổng cộng</button>
+        <button type="button" class="active" data-view="total">Total</button>
+        <button type="button" data-view="region">Theo khu vực</button>
         <button type="button" data-view="tech">Theo kỹ thuật viên</button>
       </div>
       <div class="region-tabs" style="display:none;"></div>
       <div class="card-header">
         <div>
-          <h2 class="chart-title">Số lượng sự cố theo ngày</h2>
-          <div class="desc chart-desc">Ticket theo <strong>Create Time</strong> · <strong>30 ngày</strong> gần nhất (trong 45 ngày đã cào) · đến hết hôm qua</div>
+          <h2 class="chart-title">Tổng số sự cố theo ngày (tất cả khu vực)</h2>
+          <div class="desc chart-desc">Gộp toàn bộ khu vực đang quản lý · <strong>30 ngày</strong> gần nhất · đến hết hôm qua</div>
         </div>
         <div class="legend-toggle"></div>
       </div>
