@@ -300,14 +300,14 @@
       <div class="view-toggle" style="margin-bottom:12px;">
         <button type="button" class="active" data-view="region">Theo khu vực</button>
         <button type="button" data-view="tech">Theo kỹ thuật viên</button>
-        <button type="button" data-view="top_od">Top 10 OD cao</button>
+        <button type="button" data-view="top_od">Top 10 Overdue</button>
         <button type="button" data-view="top_eff">Top 10 hiệu quả</button>
         <button type="button" data-view="top_vol">Top 10 khối lượng</button>
       </div>
       <div class="region-tabs" style="display:none;"></div>
       <div class="card-header">
         <div>
-          <h2 class="chart-title">Tỷ lệ ticket Overdue khi đóng</h2>
+          <h2 class="chart-title">Tỷ lệ Overdue</h2>
           <div class="desc chart-desc">
             Ticket đã đóng (Events → <strong>Pending for local team close</strong>) · <strong>30 ngày</strong> ·
             màu theo % OD (đỏ nhạt→đỏ tươi@10%→đỏ sẫm) · <strong>vạch</strong> = (OD − OD chủ quan VT/hẹn) / đóng

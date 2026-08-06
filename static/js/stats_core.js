@@ -25,11 +25,11 @@
   "use strict";
 
   // ================== Hằng số dùng chung ==================
-  const REGION_ORDER = ["DNA-QNA", "LDO-BTH", "Mtay", "DNI-BPH", "EC"];
+  const REGION_ORDER = ["DNA-QNA", "LDO-BTH", "Mtay", "DNI-BPH", "Tây Nguyên"];
   const REGION_COLORS = {
     "DNA-QNA": { border: "#3b82f6", bg: "rgba(59,130,246,.12)" },
     "DNI-BPH": { border: "#10b981", bg: "rgba(16,185,129,.12)" },
-    "EC": { border: "#f59e0b", bg: "rgba(245,158,11,.12)" },
+    "Tây Nguyên": { border: "#f59e0b", bg: "rgba(245,158,11,.12)" },
     "LDO-BTH": { border: "#ef4444", bg: "rgba(239,68,68,.12)" },
     "Mtay": { border: "#8b5cf6", bg: "rgba(139,92,246,.12)" },
   };
