@@ -2,12 +2,14 @@
  * stats_chart_volume.js — module biểu đồ "Thống kê sự cố theo ngày".
  * Nguồn dữ liệu: GET /api/stats/daily-volume (xem stats_charts_volume.py).
  *
- * 3 view:
- *   - region : 1 đường / khu vực (đa đường, có legend bật/tắt).
- *   - total  : 1 đường TỔNG tất cả khu vực + nhãn số liệu từng điểm, đường
- *              trung bình tham chiếu, điểm tô màu theo trên/dưới TB, và
- *              dải chỉ số nổi bật (đỉnh/đáy/so với hôm trước/so với TB).
- *   - tech   : heatmap Kỹ thuật viên (dòng) × Ngày (cột), màu theo số ticket.
+ * 4 view:
+ *   - region   : 1 đường / khu vực (đa đường, có legend bật/tắt).
+ *   - total    : 1 đường TỔNG tất cả khu vực + nhãn số liệu từng điểm, đường
+ *                trung bình tham chiếu, điểm tô màu theo trên/dưới TB, và
+ *                dải chỉ số nổi bật (đỉnh/đáy/so với hôm trước/so với TB).
+ *   - tech     : heatmap Kỹ thuật viên (dòng) × Ngày (cột), màu theo số ticket.
+ *   - workload : bubble so sánh khối lượng KT — X = TB km/chặng, Y = số trạm,
+ *                bán kính ∝ số ticket; đã lọc nhiễu toạ độ (>200 km).
  *
  * Tự đăng ký vào StatsCore — xem stats_core.js để biết cách thêm 1 module
  * biểu đồ mới tương tự file này.
@@ -67,9 +69,16 @@
       background: linear-gradient(to right, #fef3c7, #f59e0b, #991b1b); border: 1px solid rgba(0,0,0,.06);
     }
     .heatmap-empty { padding: 60px 20px; text-align: center; color: var(--text-muted); font-size: 13.5px; }
+
+    .workload-wrap { margin-top: 22px; padding-top: 20px; border-top: 1px solid var(--border); }
+    .workload-header h3 { margin: 0 0 4px; font-size: 14.5px; font-weight: 600; color: var(--text); }
+    .workload-header .desc { font-size: 12.5px; color: var(--text-muted); margin-bottom: 14px; }
+    .workload-chart-wrap { position: relative; height: 380px; width: 100%; }
+    .workload-note { font-size: 11.5px; color: var(--text-muted); margin-top: 10px; line-height: 1.5; }
   `);
 
   let chart = null;
+  let workloadChart = null;
   let fullPayload = null;
   let currentPayload = null;
   let currentView = "total";
@@ -397,6 +406,157 @@
       '<span>Ít</span><span class="heatmap-gradient-bar"></span><span>Nhiều (tối đa ' + max + ' ticket/ngày)</span>';
   }
 
+  // ----- view "workload": bubble so sánh khối lượng KT (toàn bộ khu vực) -----
+  // Trục X = quãng đường TB mỗi chặng hợp lệ (avg_leg_km)
+  // Trục Y = số trạm unique (sau lọc nhiễu)
+  // Bán kính bubble ∝ số ticket
+  // Xem stats_charts_volume.aggregate_tech_travel_workload (đã lọc cặp >200km).
+  function renderWorkloadChart() {
+    const data = (currentPayload && currentPayload.tech_workload) || {};
+    const techs = data.techs || [];
+    const cov = data.coverage || {};
+
+    if (!techs.length) {
+      refs.workloadChartWrap.style.display = "none";
+      refs.workloadNote.textContent = cov.tickets_total
+        ? "Không đủ toạ độ trạm (StationCoords.json) để ước tính quãng đường cho các KT hiện có."
+        : "Chưa có dữ liệu để tính khối lượng công việc.";
+      if (workloadChart) { workloadChart.destroy(); workloadChart = null; }
+      return;
+    }
+    refs.workloadChartWrap.style.display = "block";
+
+    const maxTickets = Math.max(1, ...techs.map((t) => t.ticket_count || 0));
+    const minR = 8;
+    const maxR = 28;
+    const byRegion = {};
+    techs.forEach((t) => { (byRegion[t.region] = byRegion[t.region] || []).push(t); });
+
+    const datasets = REGION_ORDER.filter((r) => byRegion[r]).map((region, idx) => {
+      const col = colorFor(region, idx);
+      return {
+        label: region,
+        data: byRegion[region].map((t) => ({
+          x: t.avg_leg_km != null ? t.avg_leg_km : 0,
+          y: t.unique_stations || 0,
+          r: minR + (maxR - minR) * Math.sqrt((t.ticket_count || 0) / maxTickets),
+          _tech: t,
+        })),
+        backgroundColor: col.border + "cc",
+        borderColor: col.border,
+        borderWidth: 1.5,
+        hoverBorderWidth: 2.5,
+      };
+    });
+
+    if (workloadChart) workloadChart.destroy();
+    workloadChart = new Chart(refs.workloadCanvas.getContext("2d"), {
+      type: "bubble",
+      data: { datasets },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        plugins: {
+          legend: {
+            display: true,
+            position: "top",
+            align: "end",
+            labels: { boxWidth: 12, font: { size: 11.5 }, color: "#64748b" },
+          },
+          tooltip: {
+            backgroundColor: "#0f172a",
+            titleFont: { size: 13, weight: "600" },
+            bodyFont: { size: 12.5 },
+            padding: 12,
+            cornerRadius: 8,
+            callbacks: {
+              title: (items) => {
+                const t = items[0].raw._tech;
+                return t.tech + " · " + t.region;
+              },
+              label: (item) => {
+                const t = item.raw._tech;
+                return [
+                  " Ticket: " + t.ticket_count + " (có toạ độ hợp lệ: " + t.coord_ticket_count + ")",
+                  " Số trạm: " + t.unique_stations,
+                  " TB mỗi chặng: " + (t.avg_leg_km ?? 0) + " km",
+                  " Tổng quãng đường ước tính: " + t.total_km + " km (" + (t.leg_count || 0) + " chặng)",
+                  " Bán kính phục vụ: ~" + t.service_radius_km + " km",
+                  (t.noise_legs ? " Đã loại " + t.noise_legs + " chặng nhiễu (>200 km)" : null),
+                ].filter(Boolean);
+              },
+            },
+          },
+        },
+        scales: {
+          x: {
+            beginAtZero: true,
+            grace: "12%",
+            title: {
+              display: true,
+              text: "Quãng đường TB mỗi chặng (km)",
+              color: "#94a3b8",
+              font: { size: 12, weight: "500" },
+            },
+            grid: { color: "rgba(148,163,184,.15)", drawBorder: false },
+            ticks: { color: "#64748b", font: { size: 11.5 } },
+          },
+          y: {
+            beginAtZero: true,
+            grace: "12%",
+            title: {
+              display: true,
+              text: "Số trạm khác nhau",
+              color: "#94a3b8",
+              font: { size: 12, weight: "500" },
+            },
+            grid: { color: "rgba(148,163,184,.2)", drawBorder: false },
+            ticks: { color: "#64748b", font: { size: 11.5 }, precision: 0, stepSize: 1 },
+          },
+        },
+      },
+    });
+
+    const pct = cov.pct != null ? cov.pct : 0;
+    const noise = cov.noise_legs_dropped || 0;
+    const maxLegit = cov.max_legit_km || 200;
+    const mode = cov.distance_mode === "road_osrm" ? "đường đi thực tế (OSRM)" : "đường chim bay";
+    const osrm = cov.osrm || {};
+    refs.workloadNote.textContent =
+      "Kích thước điểm ∝ số ticket · X = TB km mỗi chặng hợp lệ (" + mode + " giữa 2 trạm kề nhau theo Create Time trong ngày) · " +
+      "Y = số trạm unique sau lọc nhiễu · cặp trạm > " + maxLegit + " km bị coi là toạ độ sai và bỏ · " +
+      "toạ độ phủ " + pct + "% ticket (" + (cov.tickets_with_coords ?? 0) + "/" + (cov.tickets_total ?? 0) + ")" +
+      (noise ? " · đã loại " + noise + " chặng nhiễu" : "") +
+      (osrm.ok != null ? " · OSRM " + (osrm.ok || 0) + " cặp, fallback " + (osrm.fallback_bird || 0) : "") + ".";
+  }
+
+  function renderKPIsWorkload(payload) {
+    const data = (payload && payload.tech_workload) || {};
+    const techs = data.techs || [];
+    const cov = data.coverage || {};
+    const withTravel = techs.filter((t) => (t.leg_count || 0) > 0);
+    const avgLeg = withTravel.length
+      ? (withTravel.reduce((s, t) => s + (t.avg_leg_km || 0), 0) / withTravel.length).toFixed(1)
+      : "—";
+    const maxLegTech = withTravel.length
+      ? withTravel.reduce((a, b) => ((a.avg_leg_km || 0) >= (b.avg_leg_km || 0) ? a : b))
+      : null;
+    setKPIs([
+      { label: "Kỹ thuật viên", value: techs.length, sub: "có ticket trong 30 ngày" },
+      { label: "TB chặng / KT", value: avgLeg, sub: "km (chỉ chặng ≤ " + (cov.max_legit_km || 200) + " km)" },
+      {
+        label: "Chặng xa nhất",
+        value: maxLegTech ? (maxLegTech.avg_leg_km + " km") : "—",
+        sub: maxLegTech ? maxLegTech.tech + " · " + maxLegTech.region : "—",
+      },
+      {
+        label: "Phủ toạ độ",
+        value: (cov.pct != null ? cov.pct + "%" : "—"),
+        sub: (cov.tickets_with_coords ?? 0) + "/" + (cov.tickets_total ?? 0) + " ticket",
+      },
+    ]);
+  }
+
   // ----- KPI theo từng view -----
   function renderKPIsRegion(payload) {
     const total = payload.total_tickets || 0;
@@ -473,9 +633,12 @@
     } else if (view === "total") {
       refs.title.textContent = "Tổng số sự cố theo ngày (tất cả khu vực)";
       refs.desc.innerHTML = "Gộp toàn bộ khu vực đang quản lý · <strong>30 ngày</strong> gần nhất · đến hết hôm qua";
-    } else {
+    } else if (view === "tech") {
       refs.title.textContent = "Sự cố theo KT · " + selectedRegion;
       refs.desc.innerHTML = "Ticket giao KT khu vực <strong>" + selectedRegion + "</strong> · 30 ngày gần nhất · đến hết hôm qua · màu ô = số ticket";
+    } else if (view === "workload") {
+      refs.title.textContent = "Khối lượng công việc KT (ticket × quãng đường)";
+      refs.desc.innerHTML = "Mỗi điểm = 1 kỹ thuật viên · <strong>X</strong> = TB km mỗi chặng hợp lệ · <strong>Y</strong> = số trạm · kích thước ∝ số ticket · màu = khu vực · so sánh trên <strong>tất cả</strong> khu vực · 30 ngày";
     }
 
     renderRegionTabs();
@@ -484,21 +647,30 @@
     if (view === "region") {
       refs.chartWrap.style.display = "block";
       refs.heatmapWrap.style.display = "none";
+      refs.workloadOnlyWrap.style.display = "none";
       renderKPIsRegion(currentPayload);
       renderLegend();
       drawLineChart();
     } else if (view === "total") {
       refs.chartWrap.style.display = "block";
       refs.heatmapWrap.style.display = "none";
+      refs.workloadOnlyWrap.style.display = "none";
       const series = currentPayload.total_series || {};
       renderKPIsTotal(series);
       renderTotalStatStrip(series);
       drawTotalChart(series);
-    } else {
+    } else if (view === "tech") {
       refs.chartWrap.style.display = "none";
       refs.heatmapWrap.style.display = "block";
+      refs.workloadOnlyWrap.style.display = "none";
       renderKPIsTech(currentPayload);
       renderHeatmap();
+    } else if (view === "workload") {
+      refs.chartWrap.style.display = "none";
+      refs.heatmapWrap.style.display = "none";
+      refs.workloadOnlyWrap.style.display = "block";
+      renderKPIsWorkload(currentPayload);
+      renderWorkloadChart();
     }
   }
 
@@ -561,6 +733,7 @@
         <button type="button" class="active" data-view="total">Total</button>
         <button type="button" data-view="region">Theo khu vực</button>
         <button type="button" data-view="tech">Theo kỹ thuật viên</button>
+        <button type="button" data-view="workload">Khối lượng KT</button>
       </div>
       <div class="region-tabs" style="display:none;"></div>
       <div class="card-header">
@@ -577,6 +750,12 @@
         <div class="heatmap-scroll"></div>
         <div class="heatmap-legend"></div>
       </div>
+      <div class="workload-only-wrap" style="display:none;">
+        <div class="workload-wrap" style="margin-top:0;padding-top:0;border-top:none;">
+          <div class="workload-chart-wrap" style="display:none;"><canvas class="workload-canvas"></canvas></div>
+          <div class="workload-note"></div>
+        </div>
+      </div>
       <div class="source-note"></div>
     `;
     refs = {
@@ -588,10 +767,14 @@
       loading: panel.querySelector(".chart-loading"),
       totalStrip: panel.querySelector(".total-stat-strip"),
       chartWrap: panel.querySelector(".chart-wrap"),
-      canvas: panel.querySelector("canvas"),
+      canvas: panel.querySelector(".chart-wrap canvas"),
       heatmapWrap: panel.querySelector(".heatmap-wrap"),
       heatmapScroll: panel.querySelector(".heatmap-scroll"),
       heatmapLegendEl: panel.querySelector(".heatmap-legend"),
+      workloadOnlyWrap: panel.querySelector(".workload-only-wrap"),
+      workloadChartWrap: panel.querySelector(".workload-chart-wrap"),
+      workloadCanvas: panel.querySelector(".workload-canvas"),
+      workloadNote: panel.querySelector(".workload-note"),
       sourceNote: panel.querySelector(".source-note"),
     };
     refs.viewToggle.addEventListener("click", (e) => {
