@@ -56,7 +56,7 @@ EXCLUDED_TECH_NAMES = {
 _REGION_PREFIX_RULES: list[tuple[str, str]] = [
     # B.HCM đã bị loại: công ty rút khỏi khu vực HCM, xem ccts_shared.DEPRECATED_REGIONS.
     ("B.DNI", "DNI-BPH"),
-    ("B.VTU", "DNI-BPH"),
+    ("B.BPH", "DNI-BPH"),
     ("B.DNA", "DNA-QNA"),
     ("B.QNA", "DNA-QNA"),
     ("B.LDO", "LDO-BTH"),
@@ -67,7 +67,7 @@ _REGION_PREFIX_RULES: list[tuple[str, str]] = [
     ("B.CTH", "Mtay"),
     ("B.KG", "Mtay"),
     ("B.CMU", "Mtay"),
-    ("C.NTH", "Tây Nguyên"),
+    ("C.NTH", "LDO-BTH"),
     ("C.QNA", "DNA-QNA"),
     ("C.DNG", "Tây Nguyên"),
     ("C.PYE", "Tây Nguyên"),
@@ -98,10 +98,7 @@ def _get_static_maps() -> tuple[dict[str, str], dict[str, str], dict[str, list[s
 
 
 def get_coords_map() -> dict[str, dict]:
-    """Toạ độ trạm (StationCoords.json, key = core station code, value =
-    {"lat": ..., "lng": ...}) — dùng để ước tính quãng đường di chuyển giữa
-    các trạm cho biểu đồ khối lượng công việc theo kỹ thuật viên
-    (stats_charts_volume.aggregate_tech_travel_workload)."""
+    """Toạ độ trạm — ước tính quãng đường di chuyển KT."""
     try:
         from ccts_shared import load_static_data_filtered
         coords_map, _, _, _, _ = load_static_data_filtered()
@@ -167,6 +164,60 @@ def is_excluded_tech(name: str) -> bool:
     return False
 
 
+ONSITE_HANDLING_ALIASES = {
+    "tại trạm", "tai tram", "onsite", "on-site", "on site", "at station", "tại chỗ", "tai cho",
+}
+REMOTE_HANDLING_ALIASES = {
+    "từ xa", "tu xa", "remote", "remotely", "from remote",
+}
+
+
+def normalize_handling_type(val) -> str | None:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return None
+    s = str(val).strip().lower()
+    if not s:
+        return None
+    if s in ONSITE_HANDLING_ALIASES or any(a in s for a in ("tại trạm", "tai tram", "onsite", "on-site")):
+        return "onsite"
+    if s in REMOTE_HANDLING_ALIASES or any(a in s for a in ("từ xa", "tu xa", "remote")):
+        return "remote"
+    return None
+
+
+def extract_handling_type_map(additional_df: pd.DataFrame | None) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if additional_df is None or additional_df.empty:
+        return out
+    df = additional_df.copy()
+    df.columns = [str(col).strip() for col in df.columns]
+    tid_col = ht_col = None
+    for col in df.columns:
+        cl = col.lower().replace("_", " ")
+        if tid_col is None and cl in {"ticket id", "ticketid", "ticket"}:
+            tid_col = col
+        if ht_col is None and ("handling" in cl or cl in {"handling type", "handle type"}):
+            ht_col = col
+    if tid_col is None or ht_col is None:
+        print(f"[stats] Additional information thiếu Ticket ID/Handling type (cols={list(df.columns)[:12]})")
+        return out
+    for _, row in df.iterrows():
+        tid = str(row.get(tid_col) or "").strip()
+        if not tid or tid.lower() == "nan":
+            continue
+        norm = normalize_handling_type(row.get(ht_col))
+        if norm:
+            out[tid] = norm
+    print(
+        f"[stats] Handling type: {len(out)} ticket "
+        f"(onsite={sum(1 for v in out.values() if v == 'onsite')}, "
+        f"remote={sum(1 for v in out.values() if v == 'remote')})"
+    )
+    return out
+
+
+
+
 def _parse_create_time(val) -> datetime | None:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
@@ -202,11 +253,12 @@ def process_ticket_information(
     region_map=None,
     tech_map=None,
     end_date_exclusive: str | None = None,
+    handling_map: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     cols_out = [
         "Ticket ID", "Station Code", "Charge Point ID", "Create Time", "Create Date",
         "Region", "Tech", "cp_type", "SLA Status", "Severity", "Problem Description", "Address",
-        "Error Code",
+        "Error Code", "handling_type",
     ]
     if df is None or df.empty:
         return pd.DataFrame(columns=cols_out)
@@ -257,7 +309,14 @@ def process_ticket_information(
         df["Ticket ID"] = df["Ticket ID"].astype(str).str.strip()
         df = df.drop_duplicates(subset=["Ticket ID"])
 
-    keep = [c for c in cols_out if c in df.columns]
+    if handling_map:
+        df["handling_type"] = df["Ticket ID"].map(
+            lambda tid: handling_map.get(str(tid).strip()) if tid is not None else None
+        )
+    else:
+        df["handling_type"] = None
+
+    keep = [col for col in cols_out if col in df.columns]
     return df[keep].reset_index(drop=True)
 
 
@@ -342,6 +401,7 @@ def enrich_closed_with_ticket_info(
     appointment_ids: set,
     region_map,
     tech_map,
+    handling_map: dict[str, str] | None = None,
 ) -> pd.DataFrame:
     """Ghép Station/Region/Tech/cp_type/SLA + cờ chờ VT / hẹn khách."""
     if closed_df is None or closed_df.empty:
@@ -381,11 +441,31 @@ def enrich_closed_with_ticket_info(
         has_spare = tid in spare_ids
         has_appt = tid in appointment_ids
         is_od = sla_s == "overdue"
+        create_time = info_row.get("Create Time") if info_row is not None else None
+        close_time = c.get("Close Time")
+        duration_hours = None
+        ct = _parse_create_time(create_time)
+        clt = _parse_create_time(close_time)
+        if ct is not None and clt is not None and clt >= ct:
+            duration_hours = round((clt - ct).total_seconds() / 3600.0, 2)
+
+        ht = None
+        if handling_map:
+            ht = handling_map.get(tid)
+        if ht is None and info_row is not None:
+            try:
+                ht = info_row.get("handling_type")
+            except Exception:
+                ht = None
+
         rows.append({
             "Ticket ID": tid,
-            "Close Time": c.get("Close Time"),
+            "Create Time": create_time.strftime("%Y-%m-%d %H:%M:%S") if hasattr(create_time, "strftime") else create_time,
+            "Close Time": close_time,
             "Close Date": c.get("Close Date"),
+            "duration_hours": duration_hours,
             "Station Code": station,
+            "Charge Point ID": cp_id,
             "Region": region,
             "Tech": tech,
             "cp_type": classify_cp_type(cp_id),
@@ -393,9 +473,9 @@ def enrich_closed_with_ticket_info(
             "is_overdue": is_od,
             "has_spare_wait": has_spare,
             "has_appointment": has_appt,
-            # Overdue + (chờ VT hoặc hẹn khách) — đánh dấu trên biểu đồ
             "is_overdue_excuse": bool(is_od and (has_spare or has_appt)),
             "Severity": severity,
+            "handling_type": ht,
         })
     return pd.DataFrame(rows)
 
@@ -432,10 +512,8 @@ async def _export_one_account(username, password, start_time, end_time) -> dict 
     return out if out else None
 
 
-def _finalize_from_raw(raw, events_raw, spare_raw, appt_raw, meta_extra: dict):
-    """Phần xử lý THUẦN (không gọi mạng): chuẩn hóa Ticket Information +
-    trích xuất ticket đã đóng 30 ngày. Dùng chung cho cả dữ liệu cào trực
-    tiếp lẫn dữ liệu fallback từ file mẫu."""
+def _finalize_from_raw(raw, events_raw, spare_raw, appt_raw, meta_extra: dict, additional_raw=None):
+    """Chuẩn hóa TI + closed 30 ngày. additional_raw → handling_type."""
     end_date_ex = meta_extra["end_date_exclusive"]
 
     spare_ids = set()
@@ -445,19 +523,23 @@ def _finalize_from_raw(raw, events_raw, spare_raw, appt_raw, meta_extra: dict):
     if appt_raw is not None and not appt_raw.empty and "Ticket ID" in appt_raw.columns:
         appointment_ids = set(appt_raw["Ticket ID"].astype(str).str.strip().tolist())
 
+    handling_map = extract_handling_type_map(additional_raw)
+
     region_map, tech_map, tech_by_region = _get_static_maps()
     processed = process_ticket_information(
         raw,
         region_map=region_map,
         tech_map=tech_map,
         end_date_exclusive=end_date_ex,
+        handling_map=handling_map,
     )
 
     closed_basic = extract_closed_tickets_from_events(
         events_raw, end_date_exclusive=end_date_ex, lookback_days=30
     )
     closed_enriched = enrich_closed_with_ticket_info(
-        closed_basic, raw, spare_ids, appointment_ids, region_map, tech_map
+        closed_basic, raw, spare_ids, appointment_ids, region_map, tech_map,
+        handling_map=handling_map,
     )
     print(
         f"[stats] Closed 30d: {len(closed_enriched)} "
@@ -493,7 +575,11 @@ def _load_sample_bundle():
         appt_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Appointment")
     except Exception:
         appt_raw = pd.DataFrame()
-    return raw, events_raw, spare_raw, appt_raw
+    try:
+        additional_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Additional information")
+    except Exception:
+        additional_raw = pd.DataFrame()
+    return raw, events_raw, spare_raw, appt_raw, additional_raw
 
 
 async def fetch_all_accounts_tickets(start_time=None, end_time=None):
@@ -581,6 +667,7 @@ async def fetch_all_accounts_tickets(start_time=None, end_time=None):
     ev_frames = [b["Events Record"] for b in bundles.values() if "Events Record" in b]
     sp_frames = [b["Spare Parts Record"] for b in bundles.values() if "Spare Parts Record" in b]
     ap_frames = [b["Appointment"] for b in bundles.values() if "Appointment" in b]
+    ai_frames = [b["Additional information"] for b in bundles.values() if "Additional information" in b]
 
     raw = pd.concat(ti_frames, ignore_index=True)
     if "Ticket ID" in raw.columns:
@@ -591,11 +678,14 @@ async def fetch_all_accounts_tickets(start_time=None, end_time=None):
     events_raw = pd.concat(ev_frames, ignore_index=True) if ev_frames else pd.DataFrame()
     spare_raw = pd.concat(sp_frames, ignore_index=True) if sp_frames else pd.DataFrame()
     appt_raw = pd.concat(ap_frames, ignore_index=True) if ap_frames else pd.DataFrame()
+    additional_raw = pd.concat(ai_frames, ignore_index=True) if ai_frames else pd.DataFrame()
     if not events_raw.empty and "Ticket ID" in events_raw.columns:
         events_raw["Ticket ID"] = events_raw["Ticket ID"].astype(str).str.strip()
 
     source = "live" if not fail_accounts else "live_partial"
-    processed, meta, closed_enriched = _finalize_from_raw(raw, events_raw, spare_raw, appt_raw, meta_extra)
+    processed, meta, closed_enriched = _finalize_from_raw(
+        raw, events_raw, spare_raw, appt_raw, meta_extra, additional_raw=additional_raw
+    )
     meta["source"] = source
     print(f"[stats] Sau chuẩn hóa TI: {len(processed)} ticket (source={source})")
     return processed, source, meta, closed_enriched
@@ -695,7 +785,7 @@ async def _refresh_stats_cache_impl() -> dict:
                 "Không cào được ticket từ bất kỳ tài khoản nào, cũng không có "
                 "cache cũ hay file mẫu để hiển thị tạm."
             )
-        raw, events_raw, spare_raw, appt_raw = sample
+        raw, events_raw, spare_raw, appt_raw, additional_raw = sample
         _, end_time, end_date_ex = scrape_time_range()
         meta_extra = {
             "start_time": None,
@@ -706,7 +796,9 @@ async def _refresh_stats_cache_impl() -> dict:
             "rounds_used": MAX_SCRAPE_ROUNDS,
             "lookback_days": SCRAPE_LOOKBACK_DAYS,
         }
-        processed, meta, closed_df = _finalize_from_raw(raw, events_raw, spare_raw, appt_raw, meta_extra)
+        processed, meta, closed_df = _finalize_from_raw(
+            raw, events_raw, spare_raw, appt_raw, meta_extra, additional_raw=additional_raw
+        )
         payload = _build_payload(processed, "sample", meta, closed_df)
         save_stats_cache(payload)
         print(f"[stats] Cache v2 (sample fallback): TI={meta.get('row_count', 0)}")

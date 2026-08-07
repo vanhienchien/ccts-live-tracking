@@ -79,7 +79,7 @@
 
   let chart = null;
   let workloadChart = null;
-  let fullPayload = null;
+    let fullPayload = null;
   let currentPayload = null;
   let currentView = "total";
   let selectedRegion = "LDO-BTH";
@@ -102,6 +102,7 @@
       generated_at: full.generated_at,
       meta: full.meta,
       cp_type: cp,
+      tech_workload: full.tech_workload,
     });
   }
 
@@ -520,14 +521,12 @@
     const pct = cov.pct != null ? cov.pct : 0;
     const noise = cov.noise_legs_dropped || 0;
     const maxLegit = cov.max_legit_km || 200;
-    const mode = cov.distance_mode === "road_osrm" ? "đường đi thực tế (OSRM)" : "đường chim bay";
-    const osrm = cov.osrm || {};
+    const factor = cov.road_factor != null ? cov.road_factor : 1.3;
     refs.workloadNote.textContent =
-      "Kích thước điểm ∝ số ticket · X = TB km mỗi chặng hợp lệ (" + mode + " giữa 2 trạm kề nhau theo Create Time trong ngày) · " +
-      "Y = số trạm unique sau lọc nhiễu · cặp trạm > " + maxLegit + " km bị coi là toạ độ sai và bỏ · " +
+      "Kích thước điểm ∝ số ticket · X = TB km mỗi chặng (chim bay × " + factor + " ≈ đường đi) giữa 2 trạm kề nhau theo Create Time trong ngày · " +
+      "Y = số trạm unique sau lọc nhiễu · cặp > " + maxLegit + " km = toạ độ sai, bỏ · " +
       "toạ độ phủ " + pct + "% ticket (" + (cov.tickets_with_coords ?? 0) + "/" + (cov.tickets_total ?? 0) + ")" +
-      (noise ? " · đã loại " + noise + " chặng nhiễu" : "") +
-      (osrm.ok != null ? " · OSRM " + (osrm.ok || 0) + " cặp, fallback " + (osrm.fallback_bird || 0) : "") + ".";
+      (noise ? " · đã loại " + noise + " chặng nhiễu" : "") + ".";
   }
 
   function renderKPIsWorkload(payload) {
@@ -618,6 +617,7 @@
     });
   }
 
+
   function applyView(view) {
     currentView = view;
     visibleSeries = {};
@@ -638,7 +638,7 @@
       refs.desc.innerHTML = "Ticket giao KT khu vực <strong>" + selectedRegion + "</strong> · 30 ngày gần nhất · đến hết hôm qua · màu ô = số ticket";
     } else if (view === "workload") {
       refs.title.textContent = "Khối lượng công việc KT (ticket × quãng đường)";
-      refs.desc.innerHTML = "Mỗi điểm = 1 kỹ thuật viên · <strong>X</strong> = TB km mỗi chặng hợp lệ · <strong>Y</strong> = số trạm · kích thước ∝ số ticket · màu = khu vực · so sánh trên <strong>tất cả</strong> khu vực · 30 ngày";
+      refs.desc.innerHTML = "Mỗi điểm = 1 kỹ thuật viên · chỉ ticket <strong>Tại trạm</strong> (loại Từ xa) · <strong>X</strong> = TB km mỗi chặng · <strong>Y</strong> = số trạm · kích thước ∝ số ticket · màu = khu vực · 30 ngày";
     }
 
     renderRegionTabs();
@@ -647,14 +647,14 @@
     if (view === "region") {
       refs.chartWrap.style.display = "block";
       refs.heatmapWrap.style.display = "none";
-      refs.workloadOnlyWrap.style.display = "none";
+      if (refs.workloadOnlyWrap) refs.workloadOnlyWrap.style.display = "none";
       renderKPIsRegion(currentPayload);
       renderLegend();
       drawLineChart();
     } else if (view === "total") {
       refs.chartWrap.style.display = "block";
       refs.heatmapWrap.style.display = "none";
-      refs.workloadOnlyWrap.style.display = "none";
+      if (refs.workloadOnlyWrap) refs.workloadOnlyWrap.style.display = "none";
       const series = currentPayload.total_series || {};
       renderKPIsTotal(series);
       renderTotalStatStrip(series);
@@ -662,17 +662,18 @@
     } else if (view === "tech") {
       refs.chartWrap.style.display = "none";
       refs.heatmapWrap.style.display = "block";
-      refs.workloadOnlyWrap.style.display = "none";
+      if (refs.workloadOnlyWrap) refs.workloadOnlyWrap.style.display = "none";
       renderKPIsTech(currentPayload);
       renderHeatmap();
     } else if (view === "workload") {
       refs.chartWrap.style.display = "none";
       refs.heatmapWrap.style.display = "none";
-      refs.workloadOnlyWrap.style.display = "block";
+      if (refs.workloadOnlyWrap) refs.workloadOnlyWrap.style.display = "block";
       renderKPIsWorkload(currentPayload);
       renderWorkloadChart();
     }
   }
+
 
   // ----- nạp dữ liệu / vòng đời module -----
   function renderSourceNote(payload) {
@@ -733,7 +734,7 @@
         <button type="button" class="active" data-view="total">Total</button>
         <button type="button" data-view="region">Theo khu vực</button>
         <button type="button" data-view="tech">Theo kỹ thuật viên</button>
-        <button type="button" data-view="workload">Khối lượng KT</button>
+        <button type="button" data-view="workload">Mật độ ticket-khoảng cách</button>
       </div>
       <div class="region-tabs" style="display:none;"></div>
       <div class="card-header">
