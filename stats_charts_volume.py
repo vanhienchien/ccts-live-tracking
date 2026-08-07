@@ -17,7 +17,6 @@ Không cào API.
 
 from __future__ import annotations
 
-import json
 import os
 import time
 import math
@@ -48,27 +47,18 @@ EARTH_RADIUS_KM = 6371.0
 
 
 
-# ~km mỗi độ vĩ độ (đường kính Trái Đất / 360). Dùng cho xấp xỉ
-# equirectangular — fallback khi OSRM không trả được; vẫn đủ tốt để so sánh.
+# ~km mỗi độ vĩ độ. Equirectangular đủ chính xác ở cự ly tỉnh VN.
 _DEG_TO_KM = EARTH_RADIUS_KM * math.pi / 180.0
 
-# OSRM (Open Source Routing Machine) — khoảng cách ĐƯỜNG ĐI thực tế, miễn phí.
-# Mặc định dùng demo public (router.project-osrm.org). Job 0h/ngày + cache đĩa
-# nên quota demo là chấp nhận được; production nên self-host:
-#   docker run -t -i -p 5000:5000 -v $PWD:/data osrm/osrm-backend \
-#     osrm-routed --algorithm mld /data/vietnam-latest.osrm
-# rồi set OSRM_BASE_URL=http://127.0.0.1:5000
-OSRM_BASE_URL = os.environ.get("OSRM_BASE_URL", "https://router.project-osrm.org").rstrip("/")
-OSRM_ENABLED = os.environ.get("OSRM_ENABLED", "1").strip() not in {"0", "false", "False", "no"}
-OSRM_TIMEOUT_SEC = float(os.environ.get("OSRM_TIMEOUT_SEC", "12"))
-OSRM_PAUSE_SEC = float(os.environ.get("OSRM_PAUSE_SEC", "0.15"))  # lịch sự với public server
-ROAD_DIST_CACHE_FILE = os.path.join(
-    os.path.dirname(os.path.abspath(__file__)), "road_dist_cache.json"
-)
+# Hệ số ước lượng đường đi ≈ đường chim bay × ROAD_FACTOR.
+# Thực tế đường bộ/xe máy thường dài hơn chim bay ~20–40% (đường vòng,
+# địa hình). 1.30 là mức trung bình hợp lý cho so sánh tương đối giữa KT;
+# có thể chỉnh bằng env ROAD_DISTANCE_FACTOR.
+ROAD_FACTOR = float(os.environ.get("ROAD_DISTANCE_FACTOR", "1.30"))
 
 
 def _haversine_km(p1: tuple[float, float], p2: tuple[float, float]) -> float:
-    """Khoảng cách đường chim bay (Haversine) giữa 2 toạ độ (lat, lng), km."""
+    """Khoảng cách đường chim bay (Haversine), km."""
     lat1, lon1 = p1
     lat2, lon2 = p2
     phi1, phi2 = math.radians(lat1), math.radians(lat2)
@@ -79,7 +69,7 @@ def _haversine_km(p1: tuple[float, float], p2: tuple[float, float]) -> float:
 
 
 def _fast_km(p1: tuple[float, float], p2: tuple[float, float]) -> float:
-    """Xấp xỉ equirectangular — fallback khi không có đường đi OSRM."""
+    """Xấp xỉ equirectangular (chim bay), km. Cùng trạm → 0."""
     lat1, lon1 = p1
     lat2, lon2 = p2
     if lat1 == lat2 and lon1 == lon2:
@@ -89,8 +79,13 @@ def _fast_km(p1: tuple[float, float], p2: tuple[float, float]) -> float:
     return _DEG_TO_KM * math.sqrt(x * x + y * y)
 
 
+def _road_km(p1: tuple[float, float], p2: tuple[float, float]) -> float:
+    """Ước lượng quãng đường đi ≈ chim bay × ROAD_FACTOR."""
+    return _fast_km(p1, p2) * ROAD_FACTOR
+
+
 def _max_pairwise_km(points: list[tuple[float, float]]) -> float:
-    """Bán kính phục vụ (max pairwise) — dùng chim bay, chỉ để tham khảo."""
+    """Bán kính phục vụ (max pairwise chim bay) — tham khảo địa bàn rộng/hẹp."""
     best = 0.0
     n = len(points)
     for i in range(n):
@@ -102,127 +97,33 @@ def _max_pairwise_km(points: list[tuple[float, float]]) -> float:
     return best
 
 
-def _load_road_cache() -> dict[str, float]:
-    try:
-        if os.path.exists(ROAD_DIST_CACHE_FILE):
-            with open(ROAD_DIST_CACHE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict):
-                # key "coreA|coreB" → km
-                return {str(k): float(v) for k, v in data.items() if v is not None}
-    except Exception as e:
-        print(f"[stats] Không đọc road_dist_cache: {e}")
-    return {}
-
-
-def _save_road_cache(cache: dict[str, float]) -> None:
-    try:
-        with open(ROAD_DIST_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(cache, f, ensure_ascii=False)
-    except Exception as e:
-        print(f"[stats] Không ghi road_dist_cache: {e}")
-
-
-def _pair_key(a: str, b: str) -> str:
-    return f"{a}|{b}" if a < b else f"{b}|{a}"
-
-
-def _osrm_route_km(p1: tuple[float, float], p2: tuple[float, float]) -> float | None:
-    """Gọi OSRM /route/v1/driving → khoảng cách đường đi (km).
-    Toạ độ OSRM: lon,lat. Trả None nếu lỗi / không route được."""
-    # lon,lat ; lon,lat
-    coords = f"{p1[1]},{p1[0]};{p2[1]},{p2[0]}"
-    url = (
-        f"{OSRM_BASE_URL}/route/v1/driving/{coords}"
-        f"?overview=false&alternatives=false&steps=false"
-    )
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "ccts-stats/1.0"})
-        with urllib.request.urlopen(req, timeout=OSRM_TIMEOUT_SEC) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-        if payload.get("code") != "Ok":
-            return None
-        routes = payload.get("routes") or []
-        if not routes:
-            return None
-        meters = routes[0].get("distance")
-        if meters is None:
-            return None
-        return float(meters) / 1000.0
-    except Exception as e:
-        print(f"[stats] OSRM lỗi {p1}->{p2}: {e}")
-        return None
-
-
 class _DistCache:
-    """Khoảng cách giữa 2 mã trạm.
+    """Cache khoảng cách ước lượng theo cặp mã trạm (core).
 
-    Ưu tiên: cache đĩa (road) → OSRM road → equirectangular fallback.
-    Mỗi cặp chỉ gọi OSRM tối đa 1 lần / process; kết quả ghi đĩa để job
-    0h các ngày sau tái sử dụng (tập trạm ít đổi).
+    Mỗi cặp chỉ tính 1 lần trong process. Dùng _road_km (chim bay × hệ số).
     """
 
-    __slots__ = ("_pts", "_mem", "_disk", "_osrm_ok", "_osrm_fail", "_fallback")
+    __slots__ = ("_pts", "_cache")
 
-    def __init__(self, pts_by_core: dict[str, tuple[float, float]], disk: dict[str, float] | None = None):
+    def __init__(self, pts_by_core: dict[str, tuple[float, float]]):
         self._pts = pts_by_core
-        self._mem: dict[str, float] = {}
-        self._disk = disk if disk is not None else _load_road_cache()
-        self._osrm_ok = 0
-        self._osrm_fail = 0
-        self._fallback = 0
+        self._cache: dict[tuple[str, str], float] = {}
 
     def leg(self, a: str, b: str) -> float:
         if a == b:
             return 0.0
-        key = _pair_key(a, b)
-        if key in self._mem:
-            return self._mem[key]
-        if key in self._disk:
-            d = self._disk[key]
-            self._mem[key] = d
+        key = (a, b) if a < b else (b, a)
+        d = self._cache.get(key)
+        if d is not None:
             return d
-
         pa = self._pts.get(a)
         pb = self._pts.get(b)
         if pa is None or pb is None:
-            self._mem[key] = float("inf")
-            return float("inf")
-
-        d: float | None = None
-        if OSRM_ENABLED:
-            d = _osrm_route_km(pa, pb)
-            if d is not None:
-                self._osrm_ok += 1
-                # lịch sự với public server
-                if OSRM_PAUSE_SEC > 0:
-                    time.sleep(OSRM_PAUSE_SEC)
-            else:
-                self._osrm_fail += 1
-
-        if d is None:
-            d = _fast_km(pa, pb)
-            self._fallback += 1
+            d = float("inf")
         else:
-            # chỉ ghi đĩa khi là road distance thật
-            self._disk[key] = round(d, 3)
-
-        self._mem[key] = d
+            d = _road_km(pa, pb)
+        self._cache[key] = d
         return d
-
-    def flush_disk(self) -> None:
-        if self._disk is not None:
-            _save_road_cache(self._disk)
-
-    def stats(self) -> dict:
-        return {
-            "osrm_ok": self._osrm_ok,
-            "osrm_fail": self._osrm_fail,
-            "fallback_bird": self._fallback,
-            "disk_entries": len(self._disk),
-            "osrm_enabled": OSRM_ENABLED,
-            "osrm_base": OSRM_BASE_URL,
-        }
 
 
 def _filter_last_n_days(df: pd.DataFrame, n_days: int = CHART_LOOKBACK_DAYS) -> pd.DataFrame:
@@ -442,6 +343,9 @@ def aggregate_tech_travel_workload(df: pd.DataFrame, coords_map: dict | None) ->
     miền núi vất vả hơn — metric "avg_leg_km" (TB km mỗi chặng hợp lệ)
     thể hiện rõ điều đó.
 
+    Chỉ tính ticket handling_type=onsite ("Tại trạm"); ticket "Từ xa"
+    (remote) bị loại vì không phát sinh di chuyển thực tế.
+
     Cách tính (đã lọc nhiễu + tối ưu):
       1. Lấy ticket có toạ độ; map core → (lat, lng) 1 lần.
       2. Unique station → loại outlier (> 200 km khỏi tâm tập trạm KT).
@@ -449,12 +353,11 @@ def aggregate_tech_travel_workload(df: pd.DataFrame, coords_map: dict | None) ->
          (cặp > 200 km = nhiễu, bỏ). Cùng trạm = 0 km, không gọi công thức.
       4. Khoảng cách cache theo cặp mã trạm (_DistCache) — mỗi cặp chỉ
          tính 1 lần dù lặp lại nhiều ngày.
-      5. Khoảng cách ưu tiên OSRM đường đi thực tế (miễn phí) + cache đĩa
-         road_dist_cache.json; fallback equirectangular nếu OSRM lỗi.
+      5. Khoảng cách = chim bay (equirectangular) × ROAD_FACTOR (mặc định
+         1.30) để ước lượng đường đi thực tế, không cần API.
       6. avg_leg_km / unique_stations / service_radius_km như trước.
 
-    Job 0h/ngày: OSRM chỉ gọi cho cặp trạm CHƯA có trong cache → ngày
-    sau gần như chỉ đọc đĩa. Trả {"techs": [...], "coverage": {...}}.
+    Chỉ dùng để SO SÁNH tương đối giữa các KT. Trả {"techs", "coverage"}.
     """
     empty = {
         "techs": [],
@@ -473,6 +376,15 @@ def aggregate_tech_travel_workload(df: pd.DataFrame, coords_map: dict | None) ->
 
     d = df[df["Region"].isin(_ALLOWED_SET)].copy()
     d = d[~d["Tech"].apply(is_excluded_tech)]
+    # Chỉ ticket xử lý TẠI TRẠM — "Từ xa" không phát sinh di chuyển.
+    # Cache cũ thiếu handling_type → giữ nguyên (coi như chưa phân loại).
+    if "handling_type" in d.columns:
+        before = len(d)
+        is_remote = d["handling_type"].astype(str).str.lower().eq("remote")
+        d = d.loc[~is_remote].copy()
+        dropped_remote = before - len(d)
+        if dropped_remote:
+            print(f"[stats] Workload: loại {dropped_remote} ticket Từ xa (remote)")
     if d.empty:
         return empty
 
@@ -498,9 +410,6 @@ def aggregate_tech_travel_workload(df: pd.DataFrame, coords_map: dict | None) ->
     has_pt = d["_pt"].notna()
     tickets_with_coords = int(has_pt.sum())
     noise_legs_total = 0
-    road_disk = _load_road_cache()
-    dist_stats_acc = {"osrm_ok": 0, "osrm_fail": 0, "fallback_bird": 0}
-    last_dist: _DistCache | None = None
 
     results = []
     for (tech, region), g in d.groupby(["Tech", "Region"], sort=False):
@@ -521,8 +430,7 @@ def aggregate_tech_travel_workload(df: pd.DataFrame, coords_map: dict | None) ->
             continue
 
         unique_stations = len(pts_by_core)
-        dist = _DistCache(pts_by_core, disk=road_disk)
-        last_dist = dist
+        dist = _DistCache(pts_by_core)
 
         # Ticket thuộc trạm hợp lệ + có Create Date / time
         mask_valid = g_coord["_core"].isin(pts_by_core.keys())
@@ -544,19 +452,17 @@ def aggregate_tech_travel_workload(df: pd.DataFrame, coords_map: dict | None) ->
                     if prev is None:
                         prev = core
                         continue
-                    leg = dist.leg(prev, core)
+                    leg = dist.leg(prev, core)  # đã × ROAD_FACTOR
                     prev = core
-                    if leg > MAX_LEGIT_LEG_KM:
+                    # Ngưỡng nhiễu tính trên chim bay (leg / ROAD_FACTOR)
+                    bird = leg / ROAD_FACTOR if ROAD_FACTOR else leg
+                    if bird > MAX_LEGIT_LEG_KM:
                         noise_legs += 1
                         continue
                     total_km += leg
                     leg_count += 1
 
         noise_legs_total += noise_legs
-        st = dist.stats()
-        dist_stats_acc["osrm_ok"] += st["osrm_ok"]
-        dist_stats_acc["osrm_fail"] += st["osrm_fail"]
-        dist_stats_acc["fallback_bird"] += st["fallback_bird"]
         avg_leg = round(total_km / leg_count, 2) if leg_count else 0.0
         radius_km = (
             _max_pairwise_km(list(pts_by_core.values()))
@@ -578,17 +484,6 @@ def aggregate_tech_travel_workload(df: pd.DataFrame, coords_map: dict | None) ->
             "noise_legs": noise_legs,
         })
 
-    if last_dist is not None:
-        last_dist.flush_disk()
-    dist_stats_acc["disk_entries"] = len(road_disk)
-    dist_stats_acc["osrm_base"] = OSRM_BASE_URL
-    print(
-        f"[stats] Road dist: OSRM ok={dist_stats_acc['osrm_ok']} "
-        f"fail={dist_stats_acc['osrm_fail']} "
-        f"fallback_bird={dist_stats_acc['fallback_bird']} "
-        f"disk={dist_stats_acc['disk_entries']} base={OSRM_BASE_URL}"
-    )
-
     results.sort(key=lambda r: (r["avg_leg_km"], r["total_km"]), reverse=True)
     return {
         "techs": results,
@@ -598,14 +493,8 @@ def aggregate_tech_travel_workload(df: pd.DataFrame, coords_map: dict | None) ->
             "pct": round(100 * tickets_with_coords / tickets_total, 1) if tickets_total else 0,
             "noise_legs_dropped": noise_legs_total,
             "max_legit_km": MAX_LEGIT_LEG_KM,
-            "distance_mode": "road_osrm" if OSRM_ENABLED else "bird_flight",
-            "osrm": {
-                "ok": dist_stats_acc.get("osrm_ok", 0),
-                "fail": dist_stats_acc.get("osrm_fail", 0),
-                "fallback_bird": dist_stats_acc.get("fallback_bird", 0),
-                "disk_entries": dist_stats_acc.get("disk_entries", 0),
-                "base": dist_stats_acc.get("osrm_base", OSRM_BASE_URL),
-            },
+            "distance_mode": "bird_x_factor",
+            "road_factor": ROAD_FACTOR,
         },
     }
 
@@ -615,6 +504,7 @@ def _payload_for_df(df: pd.DataFrame, tech_by_region: dict | None) -> dict[str, 
     agg["by_region"] = aggregate_daily_by_tech_per_region(df, tech_by_region=tech_by_region or {})
     agg["total_series"] = aggregate_daily_total(df)
     return agg
+
 
 
 def build_volume_payload_from_cache(cache: dict[str, Any]) -> dict[str, Any]:
