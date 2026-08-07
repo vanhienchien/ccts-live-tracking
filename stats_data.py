@@ -97,6 +97,20 @@ def _get_static_maps() -> tuple[dict[str, str], dict[str, str], dict[str, list[s
         return {}, {}, {}
 
 
+def get_coords_map() -> dict[str, dict]:
+    """Toạ độ trạm (StationCoords.json, key = core station code, value =
+    {"lat": ..., "lng": ...}) — dùng để ước tính quãng đường di chuyển giữa
+    các trạm cho biểu đồ khối lượng công việc theo kỹ thuật viên
+    (stats_charts_volume.aggregate_tech_travel_workload)."""
+    try:
+        from ccts_shared import load_static_data_filtered
+        coords_map, _, _, _, _ = load_static_data_filtered()
+        return coords_map or {}
+    except Exception as e:
+        print(f"[stats] Không tải StationCoords: {e}")
+        return {}
+
+
 def _infer_region_prefix(station_code: str | None) -> str | None:
     if not station_code or (isinstance(station_code, float) and pd.isna(station_code)):
         return None
