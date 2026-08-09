@@ -9,6 +9,15 @@
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+  <!-- Leaflet + leaflet.heat — chỉ dùng cho module "Bản đồ nhiệt" (stats_chart_heatmap.js) -->
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+  <!-- turf.js — dùng để cắt bản đồ nhiệt theo đúng ranh giới khu vực
+       (turf.mask/turf.bbox trong stats_chart_heatmap.js). Phải nạp TRƯỚC
+       stats_chart_heatmap.js; nếu CDN này bị chặn, module tự fallback về
+       cách cũ (không cắt vùng) và chỉ log cảnh báo, không vỡ trang. -->
+  <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6.5.0/turf.min.js"></script>
   <style>
     /* ============================================================
        CSS DÙNG CHUNG cho khung trang (topbar, tab, KPI, card, v.v.).
@@ -299,6 +308,7 @@
        sửa gì phía trên. Thứ tự quyết định tab nào mặc định hiển thị đầu
        tiên (tab đầu tiên đăng ký sẽ active sẵn). -->
   <script src="/static/js/stats_chart_volume.js"></script>
+  <script src="/static/js/stats_chart_heatmap.js"></script>
   <script src="/static/js/stats_chart_overdue.js"></script>
   <script src="/static/js/stats_chart_errors.js"></script>
 </body>

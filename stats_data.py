@@ -68,10 +68,7 @@ _REGION_PREFIX_RULES: list[tuple[str, str]] = [
     ("B.KG", "Mtay"),
     ("B.CMU", "Mtay"),
     ("C.NTH", "LDO-BTH"),
-    ("C.QNA", "DNA-QNA"),
-    ("C.DNG", "Tây Nguyên"),
-    ("C.PYE", "Tây Nguyên"),
-    ("C.KHA", "Tây Nguyên"),
+    ("C.QNA", "DNA-QNA")
 ]
 
 _memory_cache: dict[str, Any] | None = None
@@ -433,6 +430,18 @@ def enrich_closed_with_ticket_info(
         cp_id = info_row.get("Charge Point ID") if info_row is not None else None
         sla = info_row.get("SLA Status") if info_row is not None else None
         severity = info_row.get("Severity") if info_row is not None else None
+        problem = None
+        if info_row is not None:
+            for pk in ("Problem Description", "problem description", "ProblemDescription"):
+                if pk in info_row.index if hasattr(info_row, "index") else pk in info_row:
+                    problem = info_row.get(pk)
+                    break
+                try:
+                    problem = info_row.get(pk)
+                    if problem is not None and str(problem).strip():
+                        break
+                except Exception:
+                    pass
         region = resolve_region(station, region_map)
         if not is_managed_region(region):
             continue
@@ -475,6 +484,7 @@ def enrich_closed_with_ticket_info(
             "has_appointment": has_appt,
             "is_overdue_excuse": bool(is_od and (has_spare or has_appt)),
             "Severity": severity,
+            "Problem Description": (str(problem).strip() if problem is not None and str(problem).strip() not in ("", "nan", "None") else ""),
             "handling_type": ht,
         })
     return pd.DataFrame(rows)
@@ -800,12 +810,14 @@ async def _refresh_stats_cache_impl() -> dict:
             raw, events_raw, spare_raw, appt_raw, meta_extra, additional_raw=additional_raw
         )
         payload = _build_payload(processed, "sample", meta, closed_df)
+        payload = _prebuild_chart_payloads(payload)
         save_stats_cache(payload)
         print(f"[stats] Cache v2 (sample fallback): TI={meta.get('row_count', 0)}")
         return payload
 
     df, source, meta, closed_df = result
     payload = _build_payload(df, source, meta, closed_df)
+    payload = _prebuild_chart_payloads(payload)
     save_stats_cache(payload)
     print(
         f"[stats] Cache v2: TI={meta.get('row_count', 0)}, "
@@ -830,18 +842,73 @@ async def refresh_stats_cache(**_kwargs) -> dict:
         return await _refresh_stats_cache_impl()
 
 
-def get_cached_daily_volume():
+
+def _prebuild_chart_payloads(cache_payload: dict) -> dict:
+    """Nướng sẵn JSON từng biểu đồ ngay sau khi cào (model 0h xong hết).
+
+    Route /api/stats/* chỉ trả cache["charts"][...], không tính lại trên request
+    (trừ khi cache cũ thiếu field — khi đó build 1 lần rồi ghi lại).
+    """
+    charts: dict[str, Any] = dict(cache_payload.get("charts") or {})
+
+    builders = [
+        ("daily_volume", "stats_charts_volume", "build_volume_payload_from_cache"),
+        ("overdue_rate", "stats_charts_overdue_rate", "build_overdue_rate_payload_from_cache"),
+        ("heatmap", "stats_charts_heatmap", "build_heatmap_payload_from_cache"),
+        ("error_codes", "stats_charts_error_codes", "build_error_codes_payload_from_cache"),
+    ]
+    for key, mod_name, fn_name in builders:
+        try:
+            mod = __import__(mod_name, fromlist=[fn_name])
+            fn = getattr(mod, fn_name)
+            charts[key] = fn(cache_payload)
+            print(f"[stats] Pre-build chart OK: {key}")
+        except ModuleNotFoundError:
+            print(f"[stats] Bỏ qua pre-build {key}: chưa có module {mod_name}")
+        except Exception as e:
+            print(f"[stats] Lỗi pre-build {key}: {e!r}")
+
+    cache_payload["charts"] = charts
+    return cache_payload
+
+
+def ensure_chart_in_cache(chart_key: str):
+    """Lấy chart đã nướng; nếu cache cũ thiếu thì build 1 lần và ghi lại."""
     cache = load_stats_cache()
     if not cache:
         return None
-    if cache.get("version") == 2 or "tickets" in cache:
-        try:
-            from stats_charts_volume import build_volume_payload_from_cache
-            return build_volume_payload_from_cache(cache)
-        except Exception as e:
-            print(f"[stats] Lỗi build volume từ cache: {e}")
-            return None
-    return cache
+    charts = cache.get("charts")
+    if not isinstance(charts, dict):
+        charts = {}
+    if chart_key in charts and charts[chart_key] is not None:
+        return charts[chart_key]
+
+    builders = {
+        "daily_volume": ("stats_charts_volume", "build_volume_payload_from_cache"),
+        "overdue_rate": ("stats_charts_overdue_rate", "build_overdue_rate_payload_from_cache"),
+        "heatmap": ("stats_charts_heatmap", "build_heatmap_payload_from_cache"),
+        "error_codes": ("stats_charts_error_codes", "build_error_codes_payload_from_cache"),
+    }
+    spec = builders.get(chart_key)
+    if not spec:
+        return None
+    mod_name, fn_name = spec
+    try:
+        mod = __import__(mod_name, fromlist=[fn_name])
+        payload = getattr(mod, fn_name)(cache)
+    except Exception as e:
+        print(f"[stats] ensure_chart {chart_key} lỗi: {e!r}")
+        return None
+    charts[chart_key] = payload
+    cache["charts"] = charts
+    save_stats_cache(cache)
+    print(f"[stats] ensure_chart: đã bổ sung {chart_key} vào cache")
+    return payload
+
+
+def get_cached_daily_volume():
+    """Ưu tiên chart đã nướng lúc 0h; fallback build 1 lần nếu cache cũ."""
+    return ensure_chart_in_cache("daily_volume")
 
 
 async def get_daily_volume_stats(force_refresh: bool = False, **kwargs):

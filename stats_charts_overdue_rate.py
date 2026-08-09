@@ -354,6 +354,7 @@ def _box_stats_from_rows(rows: list[dict]) -> dict | None:
                 "cp_id": r.get("cp_id"),
                 "duration_days": round(d, 2),
                 "far": d > RESOLUTION_AXIS_DAYS,  # ngoài trục 7 ngày
+                "problem": r.get("problem") or "",
             })
     # sort outliers by duration desc, cap payload
     outliers.sort(key=lambda o: o["duration_days"], reverse=True)
@@ -441,6 +442,7 @@ def aggregate_resolution_boxplot(
                     "ticket_id": str(row.get("Ticket ID") or ""),
                     "station": str(row.get("Station Code") or ""),
                     "cp_id": str(row.get("Charge Point ID") or row.get("cp_id") or ""),
+                    "problem": str(row.get("Problem Description") or row.get("problem") or "").strip(),
                 })
             stats = _box_stats_from_rows(rows)
             if not stats:

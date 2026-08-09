@@ -8,6 +8,36 @@
   const Core = window.StatsCore;
   const { REGION_ORDER, lerp, rgb, setKPIs, colorFor } = Core;
 
+  Core.injectStyleOnce("stats-style-overdue-region-chips", `
+    .card-header {
+      display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between;
+      gap: 12px 16px;
+    }
+    .card-header .header-main { flex: 1 1 220px; min-width: 0; }
+    .card-header .region-tabs,
+    .card-header .header-region-filters {
+      display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+      justify-content: flex-end; margin: 0; flex: 0 1 auto;
+      max-width: 100%;
+    }
+    .region-tabs .legend-chip,
+    .header-region-filters .legend-chip {
+      display: inline-flex; align-items: center; justify-content: center;
+      padding: 6px 14px; border-radius: 999px; font-size: 12.5px; font-weight: 600;
+      border: 1.5px solid #cbd5e1; background: #f1f5f9; color: #64748b;
+      cursor: pointer; user-select: none;
+      transition: background .15s, color .15s, border-color .15s, box-shadow .15s;
+    }
+    .region-tabs .legend-chip:hover,
+    .header-region-filters .legend-chip:hover { filter: brightness(0.97); }
+    .region-tabs .legend-chip.active,
+    .header-region-filters .legend-chip.active {
+      color: #fff; border-color: transparent;
+      box-shadow: 0 2px 6px rgba(15, 23, 42, 0.12);
+    }
+  `);
+
+
   Core.injectStyleOnce("stats-style-resolution-tip", `
     .res-tip {
       position: fixed; z-index: 9999; pointer-events: none;
@@ -239,7 +269,7 @@
     const xMax = Math.max(medVol * 1.15, Math.max(...xs, 1) * 1.15, 5);
     const yMax = Math.max(medRate * 1.2, Math.max(...ys, 1) * 1.15, 15);
 
-    // Đường median
+    // Đường median (khớp phân loại 4 góc phía backend)
     datasets.push({
       label: "Median volume",
       type: "line",
@@ -349,11 +379,70 @@
       },
     };
 
+
+    // Nhãn số trên đường median (volume / OD %)
+    const refLineLabelPlugin = {
+      id: "refLineLabels",
+      afterDatasetsDraw(chartInstance) {
+        const { ctx, chartArea, scales } = chartInstance;
+        if (!chartArea) return;
+        const xScale = scales.x;
+        const yScale = scales.y;
+        const xMedPx = xScale.getPixelForValue(medVol);
+        const yMedPx = yScale.getPixelForValue(medRate);
+        const volText = "Median " + (Math.round(medVol * 10) / 10);
+        const rateText = "Median " + (Math.round(medRate * 10) / 10) + "%";
+
+        ctx.save();
+        ctx.font = "600 11px system-ui, sans-serif";
+        ctx.textBaseline = "middle";
+
+        // Vertical median — label near top of chart
+        ctx.textAlign = "left";
+        const vt = volText;
+        const vw = ctx.measureText(vt).width;
+        let vx = xMedPx + 6;
+        if (vx + vw + 8 > chartArea.right) vx = xMedPx - vw - 8;
+        const vy = chartArea.top + 12;
+        ctx.fillStyle = "rgba(255,255,255,.92)";
+        ctx.strokeStyle = "rgba(71,85,105,.35)";
+        ctx.lineWidth = 1;
+        const pad = 4;
+        ctx.beginPath();
+        ctx.roundRect
+          ? ctx.roundRect(vx - pad, vy - 8, vw + pad * 2, 16, 4)
+          : ctx.rect(vx - pad, vy - 8, vw + pad * 2, 16);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#334155";
+        ctx.fillText(vt, vx, vy);
+
+        // Horizontal median — label near right edge
+        ctx.textAlign = "right";
+        const rt = rateText;
+        const rw = ctx.measureText(rt).width;
+        const rx = chartArea.right - 6;
+        let ry = yMedPx - 12;
+        if (ry < chartArea.top + 10) ry = yMedPx + 14;
+        ctx.fillStyle = "rgba(255,255,255,.92)";
+        ctx.beginPath();
+        ctx.roundRect
+          ? ctx.roundRect(rx - rw - pad, ry - 8, rw + pad * 2, 16, 4)
+          : ctx.rect(rx - rw - pad, ry - 8, rw + pad * 2, 16);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = "#334155";
+        ctx.fillText(rt, rx, ry);
+
+        ctx.restore();
+      },
+    };
+
     if (chart) chart.destroy();
     chart = new Chart(refs.matrixCanvas.getContext("2d"), {
       type: "scatter",
       data: { datasets },
-      plugins: [bgPlugin, labelPlugin],
+      plugins: [bgPlugin, labelPlugin, refLineLabelPlugin],
       options: {
         responsive: true,
         maintainAspectRatio: false,
@@ -682,24 +771,38 @@
     ]);
   }
 
+
+  function makeRegionChip(label, active, idx, onClick) {
+    const col = (typeof colorFor === "function")
+      ? colorFor(label, idx)
+      : { border: ["#0ea5e9","#22c55e","#ef4444","#f97316","#a855f7"][idx % 5] };
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "legend-chip" + (active ? " active" : "");
+    chip.textContent = label;
+    if (active) {
+      chip.style.background = col.border;
+      chip.style.borderColor = col.border;
+      chip.style.color = "#fff";
+    }
+    chip.addEventListener("click", onClick);
+    return chip;
+  }
+
   function renderRegionTabs() {
     const el = refs.regionTabs;
     if (currentView !== "tech" && currentView !== "resolution") { el.style.display = "none"; return; }
     if (currentView === "resolution") { renderResolutionRegionTabs(); return; }
     el.style.display = "flex";
+    el.className = "region-tabs";
     el.innerHTML = "";
-    REGION_ORDER.forEach((r) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "region-tab" + (r === selectedRegion ? " active" : "");
-      btn.textContent = r;
-      btn.addEventListener("click", () => {
+    REGION_ORDER.forEach((r, idx) => {
+      el.appendChild(makeRegionChip(r, r === selectedRegion, idx, () => {
         selectedRegion = r;
         renderRegionTabs();
         refs.title.textContent = "% Overdue theo KT · " + r;
         if (currentPayload) { renderKPIs(currentPayload); drawChart(); }
-      });
-      el.appendChild(btn);
+      }));
     });
   }
 
@@ -732,23 +835,22 @@
     const el = refs.regionTabs;
     if (currentView !== "resolution") return;
     el.style.display = "flex";
+    el.className = "region-tabs";
     el.innerHTML = "";
-    REGION_ORDER.forEach((r) => {
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "region-tab" + (r === resolutionRegion ? " active" : "");
-      btn.textContent = r;
-      btn.addEventListener("click", () => {
+    REGION_ORDER.forEach((r, idx) => {
+      el.appendChild(makeRegionChip(r, r === resolutionRegion, idx, () => {
         resolutionRegion = r;
         renderResolutionRegionTabs();
         refs.title.textContent = "Thời gian xử lý · " + resolutionRegion;
         const pack = getResolutionRegionPack();
         renderKPIsResolution(pack);
         drawResolutionBoxplot();
-      });
-      el.appendChild(btn);
+      }));
     });
   }
+
+  let resTipPinned = false;
+  let resTipPinnedData = null; // { outlier, tech }
 
   function ensureResTip() {
     let el = document.getElementById("stats-res-tip");
@@ -757,18 +859,59 @@
       el.id = "stats-res-tip";
       el.className = "res-tip";
       document.body.appendChild(el);
+      el.addEventListener("click", (e) => {
+        const btn = e.target.closest("button[data-act]");
+        if (!btn || !resTipPinnedData) return;
+        const act = btn.getAttribute("data-act");
+        if (act === "close") {
+          unpinResTip();
+          return;
+        }
+        const o = resTipPinnedData.outlier;
+        const tech = resTipPinnedData.tech;
+        let text = "";
+        if (act === "copy-id") text = o.ticket_id || "";
+        else text = formatOutlierPlainGlobal(o, tech);
+        if (text && navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(() => {
+            btn.textContent = act === "copy-id" ? "Đã copy ID" : "Đã copy";
+            setTimeout(() => {
+              btn.textContent = act === "copy-id" ? "Copy Ticket ID" : "Copy toàn bộ";
+            }, 1200);
+          }).catch(() => {
+            window.prompt("Copy thủ công:", text);
+          });
+        } else {
+          window.prompt("Copy thủ công:", text);
+        }
+      });
     }
     return el;
   }
 
-  function showResTip(html, clientX, clientY) {
+  // formatOutlierPlain dùng trong handler pin (định nghĩa lại nhẹ nếu boxplot chưa tạo)
+  function formatOutlierPlainGlobal(o, tech) {
+    const days = (o && o.duration_days != null) ? o.duration_days : "—";
+    return [
+      "Ticket ID: " + ((o && o.ticket_id) || "—"),
+      "Kỹ thuật: " + (tech || "—"),
+      "Mã trạm: " + ((o && o.station) || "—"),
+      "Mã trụ: " + ((o && o.cp_id) || "—"),
+      "Thời gian xử lý: " + days + (typeof days === "number" ? " ngày" : ""),
+      "Mô tả lỗi: " + (((o && o.problem) || "").trim() || "—"),
+    ].join("\n");
+  }
+
+  function showResTip(html, clientX, clientY, pinned) {
+    if (resTipPinned && !pinned) return; // đang ghim — bỏ qua hover
     const el = ensureResTip();
     el.innerHTML = html;
     el.style.display = "block";
+    el.classList.toggle("pinned", !!pinned);
     const pad = 14;
     let left = clientX + pad;
     let top = clientY + pad;
-    // prevent overflow
+    // đo sau khi render
     const rect = el.getBoundingClientRect();
     if (left + rect.width > window.innerWidth - 8) left = clientX - rect.width - pad;
     if (top + rect.height > window.innerHeight - 8) top = clientY - rect.height - pad;
@@ -777,8 +920,37 @@
   }
 
   function hideResTip() {
+    if (resTipPinned) return;
     const el = document.getElementById("stats-res-tip");
-    if (el) el.style.display = "none";
+    if (el) {
+      el.style.display = "none";
+      el.classList.remove("pinned");
+    }
+  }
+
+  function unpinResTip() {
+    resTipPinned = false;
+    resTipPinnedData = null;
+    const el = document.getElementById("stats-res-tip");
+    if (el) {
+      el.style.display = "none";
+      el.classList.remove("pinned");
+      el.innerHTML = "";
+    }
+  }
+
+  function pinResTip(outlier, tech, clientX, clientY) {
+    resTipPinned = true;
+    resTipPinnedData = { outlier: outlier, tech: tech };
+    // tipHtmlOutlier được định nghĩa trong drawResolutionBoxplot — gọi bản pin qua event
+    showResTip(
+      (window._tipHtmlOutlierPinned
+        ? window._tipHtmlOutlierPinned(outlier, tech)
+        : ""),
+      clientX,
+      clientY,
+      true
+    );
   }
 
   function fmtDays(v) {
@@ -931,7 +1103,16 @@
             },
             ticks: {
               color: "#64748b",
-              callback: (v) => (v === axisMax ? axisMax + "+" : v),
+              stepSize: 1,
+              autoSkip: false,
+              maxRotation: 0,
+              callback: (v) => {
+                const n = Number(v);
+                if (n !== n) return "";
+                if (n === axisMax) return axisMax + "+";
+                if (n >= 0 && n <= axisMax && Math.abs(n - Math.round(n)) < 1e-6) return String(Math.round(n));
+                return "";
+              },
             },
             grid: { color: "rgba(148,163,184,.2)" },
           },
@@ -981,63 +1162,82 @@
       );
     }
 
-    canvas.onmousemove = function (evt) {
+    // Cho pinResTip gọi đúng HTML có nút Copy/Đóng
+    window._tipHtmlOutlierPinned = function (o, tech) {
+      return tipHtmlOutlier(o, tech, true);
+    };
+
+    function hitTestOutlier(evt) {
       const rect = canvas.getBoundingClientRect();
-      const scaleX = canvas.width / rect.width;
-      const scaleY = canvas.height / rect.height;
-      // Chart draws in CSS pixels when devicePixelRatio handled — use chart relative
       const mx = evt.clientX - rect.left;
       const my = evt.clientY - rect.top;
-      // Chart.js stores pixel coords in canvas coordinate space matching css if maintainAspectRatio false with sizing
-      // Use chart.getElements... area in CSS pixels: Chart 3+ uses chartArea in canvas pixels
       const dpr = chart.currentDevicePixelRatio || window.devicePixelRatio || 1;
       const cx = mx * (canvas.width / rect.width);
       const cy = my * (canvas.height / rect.height);
-
-      // Prefer outlier hits
-      let hitOut = null;
       for (let i = outlierHits.length - 1; i >= 0; i--) {
         const h = outlierHits[i];
         const dx = cx - h.x, dy = cy - h.y;
-        if (dx * dx + dy * dy <= (h.r * dpr) * (h.r * dpr)) { hitOut = h; break; }
+        if (dx * dx + dy * dy <= (h.r * dpr) * (h.r * dpr)) return h;
       }
-      // Also try CSS pixel space if dpr scaling differs
-      if (!hitOut) {
-        for (let i = outlierHits.length - 1; i >= 0; i--) {
-          const h = outlierHits[i];
-          const hx = h.x / dpr, hy = h.y / dpr;
-          const dx = mx - hx, dy = my - hy;
-          if (dx * dx + dy * dy <= h.r * h.r) { hitOut = h; break; }
-        }
+      for (let i = outlierHits.length - 1; i >= 0; i--) {
+        const h = outlierHits[i];
+        const hx = h.x / dpr, hy = h.y / dpr;
+        const dx = mx - hx, dy = my - hy;
+        if (dx * dx + dy * dy <= h.r * h.r) return h;
       }
+      return null;
+    }
 
+    canvas.onmousemove = function (evt) {
+      if (resTipPinned) {
+        canvas.style.cursor = hitTestOutlier(evt) ? "pointer" : "default";
+        return;
+      }
+      const hitOut = hitTestOutlier(evt);
       if (hitOut) {
-        showResTip(tipHtmlOutlier(hitOut.outlier, hitOut.tech), evt.clientX, evt.clientY);
+        showResTip(tipHtmlOutlier(hitOut.outlier, hitOut.tech, false), evt.clientX, evt.clientY, false);
         canvas.style.cursor = "pointer";
         return;
       }
-
-      // Box row hit (CSS space)
+      const rect = canvas.getBoundingClientRect();
+      const mx = evt.clientX - rect.left;
+      const my = evt.clientY - rect.top;
+      const dpr = chart.currentDevicePixelRatio || window.devicePixelRatio || 1;
       let hitBox = null;
       for (const h of boxHits) {
         const y0 = h.y0 / dpr, y1 = h.y1 / dpr;
         if (my >= y0 && my <= y1) { hitBox = h.box; break; }
       }
       if (hitBox) {
-        showResTip(tipHtmlBox(hitBox), evt.clientX, evt.clientY);
+        showResTip(tipHtmlBox(hitBox), evt.clientX, evt.clientY, false);
         canvas.style.cursor = "default";
       } else {
         hideResTip();
         canvas.style.cursor = "default";
       }
     };
-    canvas.onmouseleave = function () { hideResTip(); };
+    canvas.onclick = function (evt) {
+      const hitOut = hitTestOutlier(evt);
+      if (hitOut) {
+        pinResTip(hitOut.outlier, hitOut.tech, evt.clientX, evt.clientY);
+        // refresh pinned HTML (pinResTip gọi window helper)
+        showResTip(tipHtmlOutlier(hitOut.outlier, hitOut.tech, true), evt.clientX, evt.clientY, true);
+        resTipPinned = true;
+        resTipPinnedData = { outlier: hitOut.outlier, tech: hitOut.tech };
+        return;
+      }
+      // click chỗ trống → bỏ ghim
+      if (resTipPinned) unpinResTip();
+    };
+    canvas.onmouseleave = function () {
+      if (!resTipPinned) hideResTip();
+    };
 
     if (refs.resolutionNote) {
       refs.resolutionNote.textContent =
         resolutionRegion + " · boxplot ngang · X = ngày (0–" + axisMax +
         ") · n = " + (pack.total_tickets || 0) +
-        " ticket · hover box = thống kê (≤2 ngày / >2 ngày / TB…) · hover chấm = chi tiết ticket.";
+        " ticket · hover box = thống kê (≤2 ngày / >2 ngày / TB…) · hover chấm = chi tiết ticket · click chấm = ghim + copy.";
     }
   }
 
@@ -1168,15 +1368,15 @@
         <button type="button" data-view="matrix">Ma trận hiệu suất</button>
         <button type="button" data-view="resolution">Thời gian xử lý</button>
       </div>
-      <div class="region-tabs" style="display:none;"></div>
       <div class="card-header">
-        <div>
+        <div class="header-main">
           <h2 class="chart-title">Tỷ lệ Overdue</h2>
           <div class="desc chart-desc">
             Ticket đã đóng (Events → <strong>Pending for local team close</strong>) · <strong>30 ngày</strong> ·
             màu theo % OD · <strong>vạch + số</strong> = số ticket OD thực (đã trừ OD chủ quan VT/hẹn)
           </div>
         </div>
+        <div class="region-tabs header-region-filters" style="display:none;"></div>
       </div>
       <div class="loading chart-loading" style="display:none;">⏳ Đang tải tỷ lệ Overdue…</div>
       <div class="quad-legend" style="display:none;"></div>
@@ -1212,7 +1412,7 @@
 
   Core.registerChart({
     key: "overdue",
-    label: "Tỷ lệ Overdue",
+    label: "Hiệu quả công việc",
     mount,
     onShow,
     onCpTypeChange,

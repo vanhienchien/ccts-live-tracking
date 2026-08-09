@@ -21,6 +21,11 @@ import stats_data
 from ccts_data import get_static_data, filter_stations_for_user, filter_tech_by_region_for_user
 from location_hub import hub
 from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS, TRACCAR_TOKEN
+import os
+
+# auto | 1 | 0 — local test: set STATS_REFRESH_ON_STARTUP=0 để chỉ dùng cache có sẵn
+_STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "auto").strip().lower()
+
 
 app = FastAPI(title="CCTS Live Map")
 templates = Jinja2Templates(directory="templates")
@@ -153,10 +158,34 @@ async def on_startup():
     else:
         print("[stats] Chưa có cache — trang /stats tạm trống đến khi cào nền xong.")
 
-    # Mỗi lần restart: cào lại 45 ngày → 0h hôm nay (2 tài khoản cố định).
-    # Chạy NỀN (không await) — không chặn startup, không lag web. Việc tự
-    # retry / giữ cache cũ khi thất bại đã nằm sẵn trong refresh_stats_cache().
-    asyncio.create_task(_run_stats_refresh("khởi động"))
+    # Cào stats lúc startup:
+    #   STATS_REFRESH_ON_STARTUP=1     → luôn cào (prod / cần data mới)
+    #   STATS_REFRESH_ON_STARTUP=0     → không cào (local test, dùng cache sẵn)
+    #   STATS_REFRESH_ON_STARTUP=auto  → chỉ cào khi CHƯA có cache (mặc định)
+    # Lịch 0h VN và POST /api/admin/refresh-stats vẫn cào bình thường.
+    do_stats_startup = False
+    if _STATS_STARTUP_MODE in ("1", "true", "yes", "on"):
+        do_stats_startup = True
+    elif _STATS_STARTUP_MODE in ("0", "false", "no", "off"):
+        do_stats_startup = False
+    else:
+        do_stats_startup = not bool(stats_cached)
+
+    if do_stats_startup:
+        print(f"[stats] Startup: sẽ cào nền (mode={_STATS_STARTUP_MODE!r}, có_cache={bool(stats_cached)}).")
+        asyncio.create_task(_run_stats_refresh("khởi động"))
+    else:
+        print(f"[stats] Startup: BỎ QUA cào — dùng cache có sẵn (mode={_STATS_STARTUP_MODE!r}). "
+              f"Muốn cào: STATS_REFRESH_ON_STARTUP=1 hoặc admin refresh-stats / đợi 0h.")
+        # Cache cũ có thể chưa có charts đã nướng → bổ sung nền, không cào CCTS
+        if stats_cached:
+            async def _ensure_charts_bg():
+                try:
+                    for key in ("daily_volume", "overdue_rate", "heatmap", "error_codes"):
+                        stats_data.ensure_chart_in_cache(key)
+                except Exception as e:
+                    print(f"[stats] ensure charts nền lỗi: {e!r}")
+            asyncio.create_task(_ensure_charts_bg())
 
     try:
         await refresh_stations_once()
@@ -253,18 +282,13 @@ async def api_stats_overdue_rate(request: Request):
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    cache = stats_data.load_stats_cache()
-    if not cache:
+    payload = stats_data.ensure_chart_in_cache("overdue_rate")
+    if payload is None:
         return JSONResponse(
-            {"error": "Chưa có dữ liệu thống kê", "detail": "Đợi cào 0h hoặc restart."},
+            {"error": "Chưa có dữ liệu thống kê", "detail": "Đợi cào 0h hoặc admin refresh-stats."},
             status_code=503,
         )
-    try:
-        from stats_charts_overdue_rate import build_overdue_rate_payload_from_cache
-        return build_overdue_rate_payload_from_cache(cache)
-    except Exception as e:
-        print(f"[stats] Lỗi overdue-rate: {e!r}")
-        return JSONResponse({"error": str(e)}, status_code=500)
+    return payload
 
 
 
@@ -274,15 +298,25 @@ async def api_stats_error_codes(request: Request):
     user = get_current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
-    cache = stats_data.load_stats_cache()
-    if not cache:
+    payload = stats_data.ensure_chart_in_cache("error_codes")
+    if payload is None:
         return JSONResponse({"error": "Chưa có dữ liệu thống kê"}, status_code=503)
-    try:
-        from stats_charts_error_codes import build_error_codes_payload_from_cache
-        return build_error_codes_payload_from_cache(cache)
-    except Exception as e:
-        print(f"[stats] Lỗi error-codes: {e!r}")
-        return JSONResponse({"error": str(e)}, status_code=500)
+    return payload
+
+
+@app.get("/api/stats/heatmap")
+async def api_stats_heatmap(request: Request):
+    """Bản đồ nhiệt số ticket & ticket Overdue theo vị trí trạm, tách theo 5 khu vực."""
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    payload = stats_data.ensure_chart_in_cache("heatmap")
+    if payload is None:
+        return JSONResponse(
+            {"error": "Chưa có dữ liệu thống kê", "detail": "Đợi cào 0h hoặc admin refresh-stats."},
+            status_code=503,
+        )
+    return payload
 
 
 @app.post("/api/admin/refresh-stats")

@@ -4,12 +4,13 @@ model trụ sạc) TRỰC TIẾP từ GitHub qua GitHub Contents API tại runti
 thay vì đóng gói file cùng code khi deploy, và thay vì Google Sheets (chậm
 hơn nhiều do gspread phải gọi qua Google Sheets API).
 
-Cả 3 file đều là JSON (đổi từ Excel/json cũ sang JSON thuần để xử lý nhanh
-hơn):
+Các file JSON tĩnh (đổi từ Excel/json cũ sang JSON thuần để xử lý nhanh hơn):
 
 - StationAssignments.json : {region: {engineer_name: [station_code, ...]}}
 - StationCoords.json      : {station_code: {"lat": float, "lng": float}}
 - ChargePointModels.json  : {charge_point_model: name}
+- EngineerCoords.json     : {engineer_name: {"lat", "lng"}} hoặc team lead
+                            lồng {member: {"lat","lng"}} (vd. đội Lâm Đồng)
 
 Lợi ích: bạn chỉ cần sửa file trên máy, push lên GitHub - app sẽ tự tải lại
 dữ liệu mới ở lần làm mới kế tiếp (có cache TTL, xem CACHE_TTL_SECONDS bên
@@ -33,11 +34,18 @@ from config import (
     GITHUB_DATA_REPO, GITHUB_DATA_BRANCH, GITHUB_TOKEN,
     GITHUB_STATIONS_JSON_PATH, GITHUB_COORDS_JSON_PATH, GITHUB_CP_MODEL_JSON_PATH,
 )
+
+# Đường dẫn EngineerCoords trên repo data — có thể khai báo trong config;
+# mặc định "EngineerCoords.json" (cùng thư mục với 3 file kia).
+try:
+    from config import GITHUB_ENGINEER_COORDS_JSON_PATH  # type: ignore
+except Exception:
+    GITHUB_ENGINEER_COORDS_JSON_PATH = "EngineerCoords.json"
 from utils import extract_core_station_code
 
 CACHE_TTL_SECONDS = 300  # 5 phút - đủ nhanh để nhận thay đổi, không gọi GitHub API quá dày
 
-_cache = {"data": None, "ts": 0.0}
+_cache = {"data": None, "ts": 0.0, "engineer_homes": {}, "engineer_rollup": {}}
 
 
 def _github_headers():
@@ -58,6 +66,51 @@ def _fetch_github_json(path):
     res = requests.get(url, headers=_github_headers(), params=params, timeout=20)
     res.raise_for_status()
     return json.loads(res.content.decode("utf-8"))
+
+
+
+# Team lead có cấu trúc lồng trong EngineerCoords (đội Lâm Đồng).
+_TEAM_LEAD_NAMES = {"Nguyễn Hải Nguyên"}
+
+
+def _parse_engineer_coords(raw) -> tuple[dict, dict]:
+    """Parse EngineerCoords.json → (homes, rollup).
+
+    homes:  {tên KT: {"lat": float, "lng": float}}
+    rollup: {tên thành viên: tên team lead}  — metric gộp về lead
+    """
+    homes: dict = {}
+    rollup: dict = {}
+    if not isinstance(raw, dict):
+        return homes, rollup
+    for name, val in raw.items():
+        name = str(name).strip()
+        if not name or not isinstance(val, dict):
+            continue
+        # Team lead: value = {member: {lat, lng}}
+        if "lat" not in val and "lng" not in val:
+            for member, coord in val.items():
+                m = str(member).strip()
+                if not m or not isinstance(coord, dict):
+                    continue
+                try:
+                    lat, lng = float(coord["lat"]), float(coord["lng"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if not (math.isfinite(lat) and math.isfinite(lng)):
+                    continue
+                homes[m] = {"lat": lat, "lng": lng}
+                if name in _TEAM_LEAD_NAMES:
+                    rollup[m] = name
+            continue
+        try:
+            lat, lng = float(val["lat"]), float(val["lng"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not (math.isfinite(lat) and math.isfinite(lng)):
+            continue
+        homes[name] = {"lat": lat, "lng": lng}
+    return homes, rollup
 
 
 def load_static_data(force=False):
@@ -117,13 +170,29 @@ def load_static_data(force=False):
     except Exception as e:
         print(f"⚠️ Lỗi tải/đọc '{GITHUB_CP_MODEL_JSON_PATH}' từ GitHub: {e}")
 
+    engineer_homes: dict = {}
+    engineer_rollup: dict = {}
+    try:
+        eng_raw = _fetch_github_json(GITHUB_ENGINEER_COORDS_JSON_PATH)
+        engineer_homes, engineer_rollup = _parse_engineer_coords(eng_raw)
+        print(
+            f"[static] EngineerCoords: {len(engineer_homes)} nhà KT"
+            + (f", rollup {len(engineer_rollup)} thành viên → lead" if engineer_rollup else "")
+        )
+    except Exception as e:
+        print(f"⚠️ Lỗi tải/đọc '{GITHUB_ENGINEER_COORDS_JSON_PATH}' từ GitHub: {e}")
+
     data = (coords_map, tech_map, region_map, cp_model_map, tech_by_region)
 
     # Chỉ cache lại nếu tải được ít nhất 1 phần dữ liệu - tránh việc 1 lần lỗi
     # mạng tạm thời (rate limit, mất mạng...) xoá sạch dữ liệu đang có trong cache
-    if coords_map or tech_map or cp_model_map or _cache["data"] is None:
+    if coords_map or tech_map or cp_model_map or engineer_homes or _cache["data"] is None:
         _cache["data"] = data
         _cache["ts"] = now
+        # Engineer homes luôn cập nhật khi fetch thành công; nếu lỗi giữ bản cũ
+        if engineer_homes or _cache.get("engineer_homes") is None:
+            _cache["engineer_homes"] = engineer_homes
+            _cache["engineer_rollup"] = engineer_rollup
         return data
 
     print("⚠️ Không tải được dữ liệu mới từ GitHub - dùng lại dữ liệu tĩnh lần trước.")
@@ -132,3 +201,19 @@ def load_static_data(force=False):
 
 def reload_static_data():
     return load_static_data(force=True)
+
+
+def get_engineer_homes(force: bool = False) -> tuple[dict, dict]:
+    """Toạ độ nhà KT + rollup đội lead.
+
+    Trả (homes, rollup):
+      homes  = {tên: {"lat": float, "lng": float}}
+      rollup = {thành viên: team_lead}  (vd. Nguyễn Văn Mười → Nguyễn Hải Nguyên)
+
+    Tự gọi load_static_data() để dùng chung cache TTL / GitHub fetch.
+    """
+    load_static_data(force=force)
+    return (
+        dict(_cache.get("engineer_homes") or {}),
+        dict(_cache.get("engineer_rollup") or {}),
+    )
