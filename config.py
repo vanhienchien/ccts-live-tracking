@@ -35,6 +35,7 @@ GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 GITHUB_STATIONS_JSON_PATH = os.environ.get("GITHUB_STATIONS_JSON_PATH", "StationAssignments.json").strip()
 GITHUB_COORDS_JSON_PATH = os.environ.get("GITHUB_COORDS_JSON_PATH", "StationCoords.json").strip()
 GITHUB_CP_MODEL_JSON_PATH = os.environ.get("GITHUB_CP_MODEL_JSON_PATH", "ChargePointModels.json").strip()
+GITHUB_STATION_DATA_CSV_PATH = "StationData.csv"
 
 # ==================== CCTS ACCOUNTS ====================
 CCTS_ACCOUNTS = [

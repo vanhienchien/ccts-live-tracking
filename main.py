@@ -8,6 +8,8 @@ Xem README.md đi kèm để biết cách cấu hình biến môi trường & de
 """
 
 import asyncio
+import hashlib
+import json
 import uuid
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Form
@@ -40,6 +42,23 @@ _latest_tech_stats = {}
 _latest_ticket_rows = []
 _refresh_paused = False  # True = tạm dừng chu kỳ cào tự động (chỉ admin bật/tắt)
 
+# Chữ ký (hash) của lần broadcast_stations_update() gần nhất - dùng để BỎ QUA
+# việc gửi lại toàn bộ payload trạm qua WebSocket cho mọi client nếu dữ liệu
+# không hề đổi so với lần gửi trước (vd. chu kỳ cào này TẤT CẢ tài khoản đều
+# lỗi -> vẫn giữ dữ liệu cũ -> không có lý do gửi lại y hệt cho từng client).
+# Đây là nguồn tốn băng thông WebSocket lớn thứ 2 sau việc nhúng HTML vào
+# payload (đã bỏ ở ccts_data.py) - mỗi chu kỳ refresh_stations_loop() (mỗi
+# TICKET_REFRESH_SECONDS) trước đây LUÔN broadcast dù thất bại hay không.
+_last_broadcast_signature = None
+
+
+def _station_payload_signature(payload) -> str:
+    """Hash nội dung 'stations' (bỏ qua 'updated_at' vì trường này luôn đổi
+    mỗi chu kỳ dù dữ liệu ticket không đổi chút nào)."""
+    stations = payload.get("stations", [])
+    raw = json.dumps(stations, sort_keys=True, default=str, ensure_ascii=False)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
 
 def get_current_user(request: Request):
     token = request.cookies.get(SESSION_COOKIE_NAME)
@@ -52,10 +71,12 @@ def require_admin(user):
     return bool(user) and (user.get("role") or "").strip().lower() == "admin"
 
 
-async def refresh_stations_once():
+async def refresh_stations_once() -> bool:
     """Cào lại toàn bộ dữ liệu (trạm + thống kê hiệu suất + ticket chi tiết).
     Nếu TẤT CẢ tài khoản CCTS đều thất bại (fetch_success=False), GIỮ NGUYÊN
-    dữ liệu cũ trong bộ nhớ - không ghi đè bằng dữ liệu rỗng."""
+    dữ liệu cũ trong bộ nhớ - không ghi đè bằng dữ liệu rỗng.
+    Trả về True nếu có dữ liệu MỚI được chấp nhận (đáng để broadcast), False
+    nếu lần này thất bại và dữ liệu trong bộ nhớ không đổi."""
     global _latest_station_payload, _latest_tech_stats, _latest_ticket_rows
 
     new_payload, new_stats, new_rows = await ccts_data.refresh_all_ccts_data()
@@ -65,12 +86,26 @@ async def refresh_stations_once():
         _latest_tech_stats = new_stats
         _latest_ticket_rows = new_rows
         ccts_data.save_cache_to_file(new_payload, new_stats, new_rows)
+        return True
     else:
         print("⚠️ Tất cả tài khoản CCTS đều thất bại lần cào này - "
               "GIỮ NGUYÊN dữ liệu lần cào gần nhất thành công, không xoá bản đồ.")
+        return False
 
 
-async def broadcast_stations_update():
+async def broadcast_stations_update(force: bool = False):
+    """Gửi payload trạm mới nhất cho MỌI client đang mở WebSocket.
+    Mặc định (force=False): BỎ QUA việc gửi nếu nội dung 'stations' y hệt lần
+    gửi trước (vd. chu kỳ cào này thất bại toàn bộ, hoặc không ticket nào
+    thay đổi) - tránh phát lại payload giống hệt cho từng client, mỗi
+    TICKET_REFRESH_SECONDS, chiếm phần lớn băng thông WebSocket."""
+    global _last_broadcast_signature
+
+    signature = _station_payload_signature(_latest_station_payload)
+    if not force and signature == _last_broadcast_signature:
+        print("[ws] Dữ liệu trạm không đổi so với lần gửi trước - bỏ qua broadcast.")
+        return
+
     async with hub.lock:
         targets = list(hub.connections.items())
 
@@ -87,6 +122,8 @@ async def broadcast_stations_update():
         async with hub.lock:
             for ws in dead:
                 hub.connections.pop(ws, None)
+
+    _last_broadcast_signature = signature
 
 
 async def refresh_stations_loop():

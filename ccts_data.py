@@ -53,14 +53,10 @@ def _severity_color(hours):
         return "green", "#93ffab", "#26ac43", "#26ac43"
 
 
-
-
 def get_static_data():
     """Toạ độ trạm / phân công kỹ thuật viên / model trụ sạc - đọc trực tiếp
-    từ GitHub (github_data_store.py) tại runtime, không cần deploy lại khi
-    bạn cập nhật file và push lên. Đã tự lọc/chuẩn hoá các khu vực NGỪNG
-    quản lý (vd HCM, xem ccts_shared.DEPRECATED_REGIONS) thành
-    "KV không quản lý", nên không cần lọc lại ở nơi gọi."""
+    từ GitHub (github_data_store.py) tại runtime. Đã tự lọc/chuẩn hoá các
+    khu vực NGỪNG quản lý (vd HCM) thành "KV không quản lý"."""
     return load_static_data_filtered()
 
 
@@ -71,11 +67,6 @@ def reload_static_data():
 
 # ==========================================
 # Cào ticket - đa tài khoản
-# ==========================================
-# Session pool — tái sử dụng phiên đăng nhập giữa các chu kỳ (tránh login
-# liên tục → bị CCTS đá session tài khoản khác). Logic pool + tự relogin khi
-# bị đá session nằm chung ở ccts_shared.ClientPool (dùng chung với
-# stats_data.py, mỗi module giữ 1 instance riêng).
 # ==========================================
 _pool = ClientPool()
 
@@ -100,10 +91,8 @@ async def _post_find_tickets(client, username, ticket_statuses, start_str, stop_
 
 
 async def _fetch_tickets_window_single_account(username, password, ticket_statuses, start_str, stop_str):
-    """Cào ticket cho 1 tài khoản, theo khoảng thời gian & danh sách trạng
-    thái tuỳ ý. Tái sử dụng session đã login; nếu request lỗi (có thể bị đá
-    phiên) thì tự huỷ cache, login lại 1 lần rồi thử lại (qua ClientPool
-    dùng chung). Trả về (list_dict_thô, thành_công_bool)."""
+    """Cào ticket cho 1 tài khoản. Tái sử dụng session; lỗi thì relogin 1 lần.
+    Trả về (list_dict_thô, thành_công_bool)."""
 
     async def _action(client):
         return await _post_find_tickets(client, username, ticket_statuses, start_str, stop_str)
@@ -117,11 +106,6 @@ async def _fetch_tickets_window_multi_account(ticket_statuses, start_str, stop_s
 
     Trả về (list_dict_thô, all_success_bool).
     all_success = True chỉ khi *mọi* tài khoản đều lấy thành công.
-    Nếu thiếu dù 1 tài khoản → all_success=False để main giữ cache cũ
-    và thử lại chu kỳ sau (tránh dữ liệu thiếu nửa).
-
-    Dùng CCTS_API_LOCK chung với stats_data.py (export) để 2 module KHÔNG
-    BAO GIỜ gọi API CCTS cùng lúc — tránh đá session lẫn nhau.
     """
     all_raw = []
     success_count = 0
@@ -177,7 +161,9 @@ async def fetch_live_tickets():
     Trả về (DataFrame, fetch_success_bool).
     fetch_success=True chỉ khi mọi tài khoản CCTS đều cào thành công."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    raw, any_success = await _fetch_tickets_window_multi_account(OPEN_STATUSES, "2026-04-30 17:00:00", now_str)
+    raw, any_success = await _fetch_tickets_window_multi_account(
+        OPEN_STATUSES, "2026-04-30 17:00:00", now_str
+    )
 
     processed = _process_raw_tickets(raw)
     if not processed:
@@ -215,8 +201,7 @@ def _apply_south_filter_and_coords(df_tickets, coords_map):
         for _, row in missing_df.iterrows()
     ]
     if missing_coord_tickets:
-        print(f"[+] Có {len(missing_coord_tickets)} ticket thuộc trạm CHƯA CÓ toạ độ trong StationCoords.")
-
+        print(f"[+] Có {len(missing_coord_tickets)} ticket thuộc trạm CHƯA CÓ toạ độ trong StationData.")
 
     with_coords_df = df[~missing_mask].copy()
     before = len(with_coords_df)
@@ -230,9 +215,19 @@ def _apply_south_filter_and_coords(df_tickets, coords_map):
     return south_df, filtered_north_count, missing_coord_tickets
 
 
-def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_map, total_tickets_raw, missing_count, filtered_north_count, fetch_success, missing_coord_tickets=None):
-    """Phần TÍNH TOÁN THUẦN (không gọi mạng) - gộp ticket đang mở (đã lọc
-    miền Nam) với toạ độ trạm, trả về JSON sẵn sàng cho frontend."""
+def _build_station_payload(
+    df_tickets_filtered,
+    cp_model_map,
+    tech_map,
+    region_map,
+    total_tickets_raw,
+    missing_count,
+    filtered_north_count,
+    fetch_success,
+    missing_coord_tickets=None,
+):
+    """Gộp ticket đang mở (đã lọc miền Nam) với toạ độ trạm.
+    Chỉ gửi DỮ LIỆU THÔ — frontend tự dựng popup HTML."""
     stations = []
 
     if not df_tickets_filtered.empty:
@@ -248,81 +243,32 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
             if is_unmanaged_region(region):
                 continue
 
-            coords = group.iloc[0]["coords"]  # đã lọc nên chắc chắn có
+            coords = group.iloc[0]["coords"]
             lat, lng = coords["lat"], coords["lng"]
 
             tech_name = tech_map.get(core_code, "Unassigned")
             max_duration = group["Hours"].max()
             station_severity, _, _, _ = _severity_color(max_duration)
-            color = station_severity  # "red" / "orange" / "yellow" - màu marker trên bản đồ
+            color = station_severity
 
-            # Sắp xếp theo thời gian tồn đọng CAO -> THẤP
             group_sorted = group.sort_values("Hours", ascending=False)
 
-            rows_html = ""
+            tickets_out = []
             for _, row in group_sorted.iterrows():
-                status_color = _status_color(row["Ticket Status"])
-                _, bg_color, border_color, text_color = _severity_color(row["Hours"])
-
-                cp_id = str(row["Charge Point ID"])
-                # Cảnh báo riêng cho ticket SẮP quá hạn (45h <= tồn < 48h) - còn ~3h
-                # nữa sẽ chuyển sang mức "đỏ quá hạn", cần Điều phối thúc kỹ thuật xử lý gấp
-                near_overdue_html = ""
-                if 45 <= row["Hours"] < 48:
-                    remaining = 48 - row["Hours"]
-                    near_overdue_html = f"""
-                    <div style="margin-top:5px;padding:4px 8px;background:#2c3e50;color:#ffd166;
-                                border-radius:4px;font-size:11px;font-weight:700;
-                                animation:unassigned-pulse 1.5s infinite;">
-                        ⏰ Sắp quá hạn - còn ~{remaining:.1f}h!
-                    </div>
-                    """
-
-                rows_html += f"""
-                <div style="background:{bg_color};border:1px solid {border_color}55;border-left:4px solid {border_color};
-                            border-radius:6px;padding:8px 10px;margin-bottom:8px;
-                            box-shadow:0 1px 3px rgba(0,0,0,.06);">
-                    <div style="display:flex;justify-content:space-between;align-items:center;
-                                gap:6px;margin-bottom:4px;">
-                        <span style="font-weight:700;color:#2c3e50;font-size:12.5px;">{cp_id}</span>
-                        <span style="background:{status_color};color:#fff;font-size:10px;
-                                    padding:2px 8px;border-radius:10px;font-weight:600;white-space:nowrap;">
-                            {row['Ticket Status']}
-                        </span>
-                    </div>
-                    <div style="color:#999;font-size:11px;margin-bottom:5px;">
-                        {row['Model Name']} &nbsp;·&nbsp; ID {row['Ticket ID']}
-                        {f" &nbsp;·&nbsp; {row['Creator']}" if row.get('Creator') else ""}
-                    </div>
-                    <div style="color:{text_color};font-size:12px;font-weight:700;margin-bottom:5px;">
-                        🕐 {row['Ticket Duration']}
-                    </div>
-                    <div style="color:#555;font-size:12px;line-height:1.45;">
-                        {row['Problem Description']}
-                    </div>
-                    {near_overdue_html}
-                </div>
-                """
-
-            gmap_url = f"https://www.google.com/maps?q={lat},{lng}"
-            header_color = {"red": "#b32a1b", "orange": "#ce6b15", "green": "#26ac43"}.get(color, "#3498db")
-            popup_html = f"""
-            <div style="font-family:'Segoe UI',Arial,sans-serif;width:270px;max-width:82vw;box-sizing:border-box;">
-                <div style="background:{header_color};margin:-13px -13px 10px -13px;padding:10px 14px;
-                            border-radius:5px 5px 0 0;">
-                    <a href="{gmap_url}" target="_blank" rel="noopener noreferrer"
-                       style="color:#fff;text-decoration:none;font-size:15px;font-weight:700;">
-                        📍 {station_code}
-                    </a>
-                    <div style="color:rgba(255,255,255,.92);font-size:12px;margin-top:3px;">
-                        🧑‍🔧 {tech_name}
-                    </div>
-                </div>
-                <div style="max-height:250px;overflow-y:auto;padding-right:4px;margin-right:-4px;">
-                    {rows_html}
-                </div>
-            </div>
-            """
+                hours = float(row["Hours"])
+                severity_key, _, _, _ = _severity_color(hours)
+                tickets_out.append({
+                    "ticket_id": row["Ticket ID"],
+                    "cp_id": str(row["Charge Point ID"]),
+                    "status": row["Ticket Status"],
+                    "model_name": row["Model Name"],
+                    "creator": row.get("Creator") or "",
+                    "duration": row["Ticket Duration"],
+                    "hours": hours,
+                    "severity": severity_key,
+                    "description": row["Problem Description"],
+                    "is_near_overdue": 45 <= hours < 48,
+                })
 
             stations.append({
                 "code": core_code,
@@ -330,13 +276,15 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
                 "lat": lat,
                 "lng": lng,
                 "color": color,
-                "popup_html": popup_html,
+                "tickets": tickets_out,
                 "cp_count": int(len(group)),
                 "region": region,
                 "tech_name": tech_name,
                 "is_unassigned": (not tech_name) or tech_name.strip().lower() == "unassigned",
                 "is_bss_station": str(station_code).strip().upper().startswith("B."),
-                "has_near_overdue": bool(((group_sorted["Hours"] >= 45) & (group_sorted["Hours"] < 48)).any()),
+                "has_near_overdue": bool(
+                    ((group_sorted["Hours"] >= 45) & (group_sorted["Hours"] < 48)).any()
+                ),
             })
 
     return {
@@ -352,8 +300,7 @@ def _build_station_payload(df_tickets_filtered, cp_model_map, tech_map, region_m
 
 
 def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
-    """Danh sách ticket phẳng, chi tiết từng dòng (dùng cho panel danh sách
-    Ticket dạng bảng theo từng kỹ thuật viên) - sắp xếp CAO -> THẤP theo giờ tồn."""
+    """Danh sách ticket phẳng cho panel theo KT — sắp xếp CAO → THẤP theo giờ tồn."""
     if df_tickets_filtered.empty:
         return []
 
@@ -393,9 +340,7 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
 
 
 async def build_station_markers():
-    """Cào ticket mới nhất + gộp với toạ độ trạm, lọc khu vực miền Nam, trả
-    JSON cho frontend. Giữ lại để tương thích ngược (không dùng chung phiên
-    với thống kê hiệu suất)."""
+    """Cào ticket mới nhất + gộp toạ độ, lọc miền Nam — tương thích ngược."""
     coords_map, tech_map, region_map, cp_model_map, _ = get_static_data()
     df_tickets, any_success = await fetch_live_tickets()
 
@@ -404,7 +349,9 @@ async def build_station_markers():
     missing_coord_tickets = []
 
     if not df_tickets.empty:
-        df_tickets, filtered_north_count, missing_coord_tickets = _apply_south_filter_and_coords(df_tickets, coords_map)
+        df_tickets, filtered_north_count, missing_coord_tickets = _apply_south_filter_and_coords(
+            df_tickets, coords_map
+        )
 
     payload = _build_station_payload(
         df_tickets, cp_model_map, tech_map, region_map,
@@ -416,75 +363,28 @@ async def build_station_markers():
 
 
 async def build_tech_performance_stats(open_stations):
-    """Đếm ticket đã đóng (Pending for local team close / Pending for VOMS
-    confirm) tính từ 0h HÔM QUA tới hiện tại (giờ Việt Nam), tách riêng HÔM
-    QUA/HÔM NAY theo từng kỹ thuật viên, cộng số ticket đang tồn đọng hiện
-    tại của mỗi người (suy ra từ open_stations, không cần gọi thêm API)."""
-    _, tech_map, _, _, _ = get_static_data()
+    """Chỉ đếm ticket ĐANG MỞ theo KT — KHÔNG gọi API ticket đã đóng.
 
-    now_vn = datetime.now(VN_TZ)
-    today_start = now_vn.replace(hour=0, minute=0, second=0, microsecond=0)
-    yesterday_start = today_start - timedelta(days=1)
-    yesterday_end = today_start - timedelta(seconds=1)
-
-    def _dedupe(raw_tickets):
-        seen = set()
-        out = []
-        for t in raw_tickets:
-            tid = t.get("cctsTicketId")
-            if tid in seen:
-                continue
-            seen.add(tid)
-            out.append(t)
-        return out
-
-    def _count_by_tech(raw_tickets):
-        counts = {}
-        for item in raw_tickets:
-            station_code = item.get("stationCode")
-            core_code = extract_core_station_code(station_code) if station_code else None
-            tech_name = tech_map.get(core_code, "Unassigned") if core_code else "Unassigned"
-            counts[tech_name] = counts.get(tech_name, 0) + 1
-        return counts
-
-    try:
-        yesterday_raw, _ = await _fetch_tickets_window_multi_account(
-            CLOSED_STATUSES,
-            yesterday_start.strftime("%Y-%m-%d %H:%M:%S"),
-            yesterday_end.strftime("%Y-%m-%d %H:%M:%S"),
-        )
-        today_raw, _ = await _fetch_tickets_window_multi_account(
-            CLOSED_STATUSES,
-            today_start.strftime("%Y-%m-%d %H:%M:%S"),
-            now_vn.strftime("%Y-%m-%d %H:%M:%S"),
-        )
-    except Exception as e:
-        print(f"⚠️ Lỗi khi cào thống kê ticket đã đóng (bỏ qua, không ảnh hưởng dữ liệu trạm): {e!r}")
-        yesterday_raw, today_raw = [], []
-
-    closed_yesterday = _count_by_tech(_dedupe(yesterday_raw))
-    closed_today = _count_by_tech(_dedupe(today_raw))
-
-    open_counts = {}
+    closed_yesterday / closed_today tạm = 0.
+    Sau này thay bằng Engineer_info.csv (hoặc nguồn tĩnh khác).
+    """
+    open_counts: dict[str, int] = {}
     for s in open_stations:
         tech = s.get("tech_name") or "Unassigned"
         open_counts[tech] = open_counts.get(tech, 0) + int(s.get("cp_count") or 0)
 
-    all_techs = set(closed_yesterday) | set(closed_today) | set(open_counts)
     return {
         tech: {
-            "closed_yesterday": closed_yesterday.get(tech, 0),
-            "closed_today": closed_today.get(tech, 0),
-            "open_count": open_counts.get(tech, 0),
+            "closed_yesterday": 0,
+            "closed_today": 0,
+            "open_count": count,
         }
-        for tech in all_techs
+        for tech, count in open_counts.items()
     }
 
 
 async def refresh_all_ccts_data():
-    """Điểm vào DUY NHẤT cho 1 chu kỳ làm mới đầy đủ: trạm đang lỗi (đã lọc
-    miền Nam) + thống kê hiệu suất kỹ thuật viên + danh sách ticket chi tiết
-    cho panel. Trả về (station_payload, tech_stats, ticket_rows)."""
+    """1 chu kỳ làm mới đầy đủ: trạm + stats KT (chỉ open) + ticket rows."""
     coords_map, tech_map, region_map, cp_model_map, _ = get_static_data()
     df_tickets, any_success = await fetch_live_tickets()
 
@@ -494,7 +394,9 @@ async def refresh_all_ccts_data():
     df_filtered = df_tickets
 
     if not df_tickets.empty:
-        df_filtered, filtered_north_count, missing_coord_tickets = _apply_south_filter_and_coords(df_tickets, coords_map)
+        df_filtered, filtered_north_count, missing_coord_tickets = _apply_south_filter_and_coords(
+            df_tickets, coords_map
+        )
 
     station_payload = _build_station_payload(
         df_filtered, cp_model_map, tech_map, region_map,
@@ -504,16 +406,17 @@ async def refresh_all_ccts_data():
     ticket_rows = _build_ticket_rows(df_filtered, cp_model_map, tech_map, region_map)
     tech_stats = await build_tech_performance_stats(station_payload["stations"])
 
-    print(f"[+] Hoàn tất chu kỳ làm mới: {len(station_payload['stations'])} trạm, "
-          f"{total_tickets} ticket mở, {len(ticket_rows)} dòng ticket chi tiết, "
-          f"{len(missing_coord_tickets)} ticket thiếu toạ độ.")
+    print(
+        f"[+] Hoàn tất chu kỳ làm mới: {len(station_payload['stations'])} trạm, "
+        f"{total_tickets} ticket mở, {len(ticket_rows)} dòng ticket chi tiết, "
+        f"{len(missing_coord_tickets)} ticket thiếu toạ độ."
+    )
 
     return station_payload, tech_stats, ticket_rows
 
 
 # ==========================================
-# Cache ra file - dữ liệu không mất khi server khởi động lại, hoặc khi TẤT
-# CẢ tài khoản CCTS đều đăng nhập thất bại ngay sau lúc restart.
+# Cache ra file
 # ==========================================
 def save_cache_to_file(station_payload, tech_stats, ticket_rows):
     payload = {
@@ -525,7 +428,6 @@ def save_cache_to_file(station_payload, tech_stats, ticket_rows):
         from cache_store import save_map_cache
         save_map_cache(payload, CACHE_FILE)
     except Exception as e:
-        # fallback thuần local nếu cache_store lỗi
         try:
             with open(CACHE_FILE, "w", encoding="utf-8") as f:
                 json.dump(payload, f, ensure_ascii=False)
@@ -539,14 +441,22 @@ def load_cache_from_file():
         from cache_store import load_map_cache
         data = load_map_cache(CACHE_FILE)
         if isinstance(data, dict):
-            return data.get("station_payload"), data.get("tech_stats", {}), data.get("ticket_rows", [])
+            return (
+                data.get("station_payload"),
+                data.get("tech_stats", {}),
+                data.get("ticket_rows", []),
+            )
     except Exception as e:
         print(f"⚠️ cache_store load_map: {e}")
         try:
             if os.path.exists(CACHE_FILE):
                 with open(CACHE_FILE, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                    return data.get("station_payload"), data.get("tech_stats", {}), data.get("ticket_rows", [])
+                    return (
+                        data.get("station_payload"),
+                        data.get("tech_stats", {}),
+                        data.get("ticket_rows", []),
+                    )
         except Exception as e2:
             print(f"⚠️ Không thể đọc cache dữ liệu từ file: {e2}")
     return None, {}, []
@@ -556,9 +466,7 @@ def load_cache_from_file():
 # Giới hạn xem theo khu vực (Kỹ thuật viên)
 # ==========================================
 def filter_stations_for_user(stations, user):
-    """Kỹ thuật viên chỉ được xem trạm trong CHÍNH khu vực của họ. Trạm chưa
-    gán kỹ thuật viên (Unassigned) công khai cho TẤT CẢ, bất kể khu vực. Các
-    vai trò khác (Điều phối khu vực trở lên) xem được toàn bộ."""
+    """KT chỉ xem trạm trong khu vực của họ. Unassigned công khai cho tất cả."""
     role = (user.get("role") or "").strip().lower()
     if role != "kỹ thuật":
         return stations
@@ -577,8 +485,7 @@ def filter_stations_for_user(stations, user):
 
 
 def filter_tech_by_region_for_user(tech_by_region, user):
-    """Điều phối khu vực / Kỹ thuật chỉ thấy danh sách kỹ thuật viên trong
-    CHÍNH khu vực họ kiểm soát. Điều hành/Giám đốc/Admin thấy toàn bộ."""
+    """Điều phối KV / KT chỉ thấy KT trong khu vực mình. Cấp cao hơn thấy hết."""
     role = (user.get("role") or "").strip().lower()
     if role not in ("kỹ thuật", "điều phối khu vực"):
         return tech_by_region

@@ -146,6 +146,98 @@ if (document.getElementById('btn-toggle-refresh')) {
     loadRefreshStatus();
 }
 
+// ---------- Popup trạm: dựng HTML ở CLIENT từ dữ liệu thô (station.tickets) ----------
+// Trước đây backend (ccts_data.py) tự dựng sẵn popup_html cho từng trạm rồi gửi qua
+// WebSocket - chuỗi CSS/HTML lặp lại cho mỗi ticket khiến payload phình to rất nhiều
+// lần (thủ phạm chính gây tốn băng thông). Giờ backend chỉ gửi DỮ LIỆU THÔ
+// (station.tickets = mảng ticket gọn nhẹ), và HTML được dựng ngay tại đây, chỉ khi
+// người dùng thực sự mở popup đó (Leaflet gọi hàm này lười - lazy).
+const STATUS_COLORS = {
+    'open': '#e74c3c',
+    'appointment': '#3498db',
+    'pending for asp close': '#9b59b6',
+    'pending for spare parts': '#e67e22',
+    'pending for local team close': '#16a085',
+    'pending for voms confirm': '#16a085',
+};
+
+function statusColor(status) {
+    return STATUS_COLORS[(status || '').trim().toLowerCase()] || '#7f8c8d';
+}
+
+// Thang màu theo số giờ tồn đọng - PHẢI khớp với _severity_color() bên ccts_data.py
+// (backend chỉ gửi kèm khoá "severity": "red"/"orange"/"green" cho mỗi ticket).
+const SEVERITY_STYLES = {
+    red:    { bg: '#ff9f94', border: '#b32a1b', text: '#b32a1b' },
+    orange: { bg: '#ffca9c', border: '#ce6b15', text: '#ce6b15' },
+    green:  { bg: '#93ffab', border: '#26ac43', text: '#26ac43' },
+};
+
+const STATION_HEADER_COLORS = { red: '#b32a1b', orange: '#ce6b15', green: '#26ac43' };
+
+function buildStationPopup(s) {
+    const gmapUrl = `https://www.google.com/maps?q=${s.lat},${s.lng}`;
+    const headerColor = STATION_HEADER_COLORS[s.color] || '#3498db';
+
+    const rowsHtml = (s.tickets || []).map((t) => {
+        const sColor = statusColor(t.status);
+        const sev = SEVERITY_STYLES[t.severity] || SEVERITY_STYLES.green;
+
+        let nearOverdueHtml = '';
+        if (t.is_near_overdue) {
+            const remaining = Math.max(0, 48 - (t.hours || 0));
+            nearOverdueHtml = `
+            <div style="margin-top:5px;padding:4px 8px;background:#2c3e50;color:#ffd166;
+                        border-radius:4px;font-size:11px;font-weight:700;
+                        animation:unassigned-pulse 1.5s infinite;">
+                ⏰ Sắp quá hạn - còn ~${remaining.toFixed(1)}h!
+            </div>`;
+        }
+
+        return `
+        <div style="background:${sev.bg};border:1px solid ${sev.border}55;border-left:4px solid ${sev.border};
+                    border-radius:6px;padding:8px 10px;margin-bottom:8px;
+                    box-shadow:0 1px 3px rgba(0,0,0,.06);">
+            <div style="display:flex;justify-content:space-between;align-items:center;
+                        gap:6px;margin-bottom:4px;">
+                <span style="font-weight:700;color:#2c3e50;font-size:12.5px;">${t.cp_id}</span>
+                <span style="background:${sColor};color:#fff;font-size:10px;
+                            padding:2px 8px;border-radius:10px;font-weight:600;white-space:nowrap;">
+                    ${t.status}
+                </span>
+            </div>
+            <div style="color:#999;font-size:11px;margin-bottom:5px;">
+                ${t.model_name} &nbsp;·&nbsp; ID ${t.ticket_id}
+                ${t.creator ? ` &nbsp;·&nbsp; ${t.creator}` : ''}
+            </div>
+            <div style="color:${sev.text};font-size:12px;font-weight:700;margin-bottom:5px;">
+                🕐 ${t.duration}
+            </div>
+            <div style="color:#555;font-size:12px;line-height:1.45;">
+                ${t.description}
+            </div>
+            ${nearOverdueHtml}
+        </div>`;
+    }).join('');
+
+    return `
+    <div style="font-family:'Segoe UI',Arial,sans-serif;width:270px;max-width:82vw;box-sizing:border-box;">
+        <div style="background:${headerColor};margin:-13px -13px 10px -13px;padding:10px 14px;
+                    border-radius:5px 5px 0 0;">
+            <a href="${gmapUrl}" target="_blank" rel="noopener noreferrer"
+               style="color:#fff;text-decoration:none;font-size:15px;font-weight:700;">
+                📍 ${s.station_code}
+            </a>
+            <div style="color:rgba(255,255,255,.92);font-size:12px;margin-top:3px;">
+                🧑‍🔧 ${s.tech_name}
+            </div>
+        </div>
+        <div style="max-height:250px;overflow-y:auto;padding-right:4px;margin-right:-4px;">
+            ${rowsHtml}
+        </div>
+    </div>`;
+}
+
 // Vẽ marker trạm dựa trên allStations + bộ lọc kỹ thuật viên hiện tại (selectedTechs)
 // + bộ lọc loại trạm (showChargers/showBss)
 let showChargerStations = true;
@@ -162,7 +254,9 @@ function applyStationFilter() {
     stations.forEach((s) => {
         const icon = s.is_unassigned ? unassignedStationIcon(s.has_near_overdue) : stationIcon(s.color, s.has_near_overdue);
         const marker = L.marker([s.lat, s.lng], { icon });
-        marker.bindPopup(s.popup_html, { maxWidth: 340, maxHeight: 360, className: 'station-popup' });
+        // Hàm callback: Leaflet chỉ gọi buildStationPopup(s) khi popup thực sự
+        // được mở, không tốn CPU dựng HTML sẵn cho toàn bộ trạm mỗi lần vẽ lại.
+        marker.bindPopup(() => buildStationPopup(s), { maxWidth: 340, maxHeight: 360, className: 'station-popup' });
         marker._stationCode = s.station_code;
         marker.addTo(stationLayer);
     });
