@@ -31,18 +31,10 @@ from config import (
     GITHUB_DATA_REPO,
     GITHUB_DATA_BRANCH,
     GITHUB_TOKEN,
+    GITHUB_STATION_DATA_CSV_PATH,
     GITHUB_CP_MODEL_JSON_PATH,
+    GITHUB_ENGINEER_COORDS_JSON_PATH,
 )
-
-try:
-    from config import GITHUB_STATION_DATA_CSV_PATH  # type: ignore
-except Exception:
-    GITHUB_STATION_DATA_CSV_PATH = "StationData.csv"
-
-try:
-    from config import GITHUB_ENGINEER_COORDS_JSON_PATH  # type: ignore
-except Exception:
-    GITHUB_ENGINEER_COORDS_JSON_PATH = "EngineerCoords.json"
 
 from utils import extract_core_station_code
 

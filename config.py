@@ -18,24 +18,29 @@ SCOPES = [
 SPREADSHEET_URL = os.environ.get("SPREADSHEET_URL", "").strip()
 
 # ==================== NGUỒN DỮ LIỆU TĨNH (GitHub) ====================
-# Toạ độ trạm / phân công kỹ thuật viên / model trụ sạc được đọc TRỰC TIẾP từ
-# GitHub qua API tại runtime (không đóng gói cùng code khi deploy) - để bạn
-# chỉ cần sửa file & push GitHub là app tự nhận dữ liệu mới ở lần làm mới kế
-# tiếp, KHÔNG CẦN deploy lại toàn bộ project trên Render.
+# Đọc TRỰC TIẾP từ GitHub qua API tại runtime (không đóng gói khi deploy):
+#   - StationData.csv          : toạ độ + KT phụ trách + khu vực
+#   - ChargePointModels.json   : map model trụ sạc
+#   - EngineerCoords.json      : toạ độ nhà KT / team lead
+# Chỉ cần sửa file & push GitHub là app tự nhận dữ liệu mới (cache TTL),
+# KHÔNG CẦN deploy lại Render.
 #
 # GITHUB_DATA_REPO: dạng "ten-tai-khoan/ten-repo"
-# Khuyến nghị: để repo này (chứa 3 file data) TÁCH RIÊNG khỏi repo code app -
-# như vậy push data sẽ không bao giờ vô tình kích hoạt Render tự deploy lại.
+# Khuyến nghị: repo data TÁCH RIÊNG khỏi repo code app (tránh Auto-Deploy).
 GITHUB_DATA_REPO = os.environ.get("GITHUB_DATA_REPO", "").strip()
 GITHUB_DATA_BRANCH = os.environ.get("GITHUB_DATA_BRANCH", "main").strip()
-# Chỉ cần nếu repo data là PRIVATE - tạo Personal Access Token (Settings > Developer
-# settings > Fine-grained tokens), quyền "Contents: Read-only" trên đúng repo đó.
+# Chỉ cần nếu repo data là PRIVATE - PAT quyền "Contents: Read-only".
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN", "").strip()
 
-GITHUB_STATIONS_JSON_PATH = os.environ.get("GITHUB_STATIONS_JSON_PATH", "StationAssignments.json").strip()
-GITHUB_COORDS_JSON_PATH = os.environ.get("GITHUB_COORDS_JSON_PATH", "StationCoords.json").strip()
-GITHUB_CP_MODEL_JSON_PATH = os.environ.get("GITHUB_CP_MODEL_JSON_PATH", "ChargePointModels.json").strip()
-GITHUB_STATION_DATA_CSV_PATH = "StationData.csv"
+GITHUB_STATION_DATA_CSV_PATH = os.environ.get(
+    "GITHUB_STATION_DATA_CSV_PATH", "StationData.csv"
+).strip()
+GITHUB_CP_MODEL_JSON_PATH = os.environ.get(
+    "GITHUB_CP_MODEL_JSON_PATH", "ChargePointModels.json"
+).strip()
+GITHUB_ENGINEER_COORDS_JSON_PATH = os.environ.get(
+    "GITHUB_ENGINEER_COORDS_JSON_PATH", "EngineerCoords.json"
+).strip()
 
 # ==================== CCTS ACCOUNTS ====================
 CCTS_ACCOUNTS = [

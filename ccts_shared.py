@@ -48,7 +48,7 @@ UNMANAGED_REGION_LABEL = "KV không quản lý"
 # Các khu vực công ty đã RÚT KHỎI / NGỪNG quản lý. Khai báo ở đây để chỉ
 # cần sửa 1 chỗ duy nhất khi có thay đổi phạm vi hoạt động; toàn bộ chương
 # trình (bản đồ, danh sách ticket, thống kê) sẽ tự coi các khu vực này là
-# "KV không quản lý" — kể cả khi dữ liệu gốc trên GitHub (StationAssignments)
+# "KV không quản lý" — kể cả khi dữ liệu gốc trên GitHub (StationData.csv)
 # chưa kịp cập nhật.
 #   - HCM: công ty đã rút khỏi khu vực TP.HCM (từ 08/2026).
 DEPRECATED_REGIONS = {"HCM"}
