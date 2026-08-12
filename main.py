@@ -522,24 +522,20 @@ async def ws_location(websocket: WebSocket):
         await websocket.send_json({**_latest_station_payload, "stations": filtered, "type": "stations_update"})
         await websocket.send_json({"type": "presence_update", "online_usernames": hub.online_usernames()})
 
+        # LƯU Ý: đã bỏ nhận vị trí từ trình duyệt (web) qua WebSocket để tránh
+        # tốn dung lượng/pin của người dùng khi mở web. Vị trí giờ CHỈ đến từ
+        # app Traccar Client, qua endpoint GET /api/traccar bên dưới. Kết nối
+        # WebSocket ở đây chỉ còn dùng để: nhận snapshot ban đầu, nhận cập
+        # nhật trạm (stations_update) và presence - không còn nhận/gửi vị trí
+        # từ phía client nữa. Nếu client cũ vẫn gửi message "location" lên,
+        # server sẽ bỏ qua (không xử lý, không lưu, không broadcast).
         while True:
             try:
-                data = await websocket.receive_json()
+                await websocket.receive_json()
             except WebSocketDisconnect:
                 break
             except Exception:
                 continue
-
-            if data.get("type") == "location":
-                lat, lng = data.get("lat"), data.get("lng")
-                accuracy = data.get("accuracy")
-                if lat is not None and lng is not None:
-                    fresh_info = users_store.get_user_info(user["username"]) or user
-                    await hub.update_location(
-                        user["username"], fresh_info, lat, lng, accuracy,
-                        stations=_latest_station_payload["stations"],
-                        tech_stats=_tech_stats_for_user(fresh_info),
-                    )
     finally:
         await hub.unregister(websocket)
 

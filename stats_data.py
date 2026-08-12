@@ -718,11 +718,17 @@ def save_stats_cache(payload: dict) -> None:
     global _memory_cache
     _memory_cache = payload
     try:
-        with open(STATS_CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-        print(f"[stats] Đã lưu cache → {STATS_CACHE_FILE}")
+        from cache_store import save_stats_cache_file
+        save_stats_cache_file(payload, STATS_CACHE_FILE)
+        print(f"[stats] Đã lưu cache → {STATS_CACHE_FILE} (+ S3 nếu bật)")
     except Exception as e:
-        print(f"[stats] Lỗi ghi cache: {e}")
+        try:
+            with open(STATS_CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+            print(f"[stats] Đã lưu cache local → {STATS_CACHE_FILE}")
+        except Exception as e2:
+            print(f"[stats] Lỗi ghi cache: {e2}")
+        print(f"[stats] cache_store save: {e}")
 
 
 def load_stats_cache():
@@ -730,14 +736,22 @@ def load_stats_cache():
     if _memory_cache is not None:
         return _memory_cache
     try:
-        if os.path.exists(STATS_CACHE_FILE):
-            with open(STATS_CACHE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            if isinstance(data, dict) and ("tickets" in data or "labels" in data):
-                _memory_cache = data
-                return data
+        from cache_store import load_stats_cache_file
+        data = load_stats_cache_file(STATS_CACHE_FILE)
+        if isinstance(data, dict) and ("tickets" in data or "labels" in data or "charts" in data):
+            _memory_cache = data
+            return data
     except Exception as e:
-        print(f"[stats] Lỗi đọc cache: {e}")
+        print(f"[stats] cache_store load: {e}")
+        try:
+            if os.path.exists(STATS_CACHE_FILE):
+                with open(STATS_CACHE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and ("tickets" in data or "labels" in data):
+                    _memory_cache = data
+                    return data
+        except Exception as e2:
+            print(f"[stats] Lỗi đọc cache: {e2}")
     return None
 
 

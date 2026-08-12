@@ -516,25 +516,39 @@ async def refresh_all_ccts_data():
 # CẢ tài khoản CCTS đều đăng nhập thất bại ngay sau lúc restart.
 # ==========================================
 def save_cache_to_file(station_payload, tech_stats, ticket_rows):
+    payload = {
+        "station_payload": station_payload,
+        "tech_stats": tech_stats,
+        "ticket_rows": ticket_rows,
+    }
     try:
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
-            json.dump({
-                "station_payload": station_payload,
-                "tech_stats": tech_stats,
-                "ticket_rows": ticket_rows,
-            }, f, ensure_ascii=False)
+        from cache_store import save_map_cache
+        save_map_cache(payload, CACHE_FILE)
     except Exception as e:
-        print(f"⚠️ Không thể lưu cache dữ liệu ra file: {e}")
+        # fallback thuần local nếu cache_store lỗi
+        try:
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        except Exception as e2:
+            print(f"⚠️ Không thể lưu cache dữ liệu ra file: {e2}")
+        print(f"⚠️ cache_store save_map: {e}")
 
 
 def load_cache_from_file():
     try:
-        if os.path.exists(CACHE_FILE):
-            with open(CACHE_FILE, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                return data.get("station_payload"), data.get("tech_stats", {}), data.get("ticket_rows", [])
+        from cache_store import load_map_cache
+        data = load_map_cache(CACHE_FILE)
+        if isinstance(data, dict):
+            return data.get("station_payload"), data.get("tech_stats", {}), data.get("ticket_rows", [])
     except Exception as e:
-        print(f"⚠️ Không thể đọc cache dữ liệu từ file: {e}")
+        print(f"⚠️ cache_store load_map: {e}")
+        try:
+            if os.path.exists(CACHE_FILE):
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return data.get("station_payload"), data.get("tech_stats", {}), data.get("ticket_rows", [])
+        except Exception as e2:
+            print(f"⚠️ Không thể đọc cache dữ liệu từ file: {e2}")
     return None, {}, []
 
 

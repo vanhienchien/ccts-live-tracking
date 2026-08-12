@@ -1034,30 +1034,9 @@ fetch('/api/stations')
     })
     .catch(() => {});
 
-// ---------- Theo dõi vị trí liên tục ----------
-let lastSentAt = 0;
-const MIN_SEND_INTERVAL_MS = 3000;
-
-if (navigator.geolocation) {
-    navigator.geolocation.watchPosition(
-        (pos) => {
-            const now = Date.now();
-            if (now - lastSentAt < MIN_SEND_INTERVAL_MS) return;
-            lastSentAt = now;
-            if (ws && ws.readyState === WebSocket.OPEN) {
-                ws.send(JSON.stringify({
-                    type: 'location',
-                    lat: pos.coords.latitude,
-                    lng: pos.coords.longitude,
-                    accuracy: pos.coords.accuracy,
-                }));
-            }
-        },
-        (err) => {
-            console.warn('Không lấy được vị trí:', err.message);
-        },
-        { enableHighAccuracy: true, maximumAge: 2000, timeout: 20000 }
-    );
-} else {
-    console.warn('Trình duyệt không hỗ trợ định vị.');
-}
+// ---------- Theo dõi vị trí ----------
+// ĐÃ BỎ: trình duyệt không còn tự lấy GPS (navigator.geolocation.watchPosition)
+// và gửi lên server nữa, để tránh tốn pin/dung lượng khi mở web. Vị trí trên
+// bản đồ giờ CHỈ đến từ app Traccar Client (server nhận qua GET /api/traccar
+// rồi broadcast xuống qua WebSocket message "location_update" như cũ - phần
+// đó ở trên không đổi).
