@@ -26,7 +26,7 @@ from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS, TRACCAR_TOKEN
 import os
 
 # auto | 1 | 0 — local test: set STATS_REFRESH_ON_STARTUP=0 để chỉ dùng cache có sẵn
-_STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "auto").strip().lower()
+_STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "1").strip().lower()
 
 
 app = FastAPI(title="CCTS Live Map")
@@ -69,6 +69,14 @@ def get_current_user(request: Request):
 
 def require_admin(user):
     return bool(user) and (user.get("role") or "").strip().lower() == "admin"
+
+
+def can_view_stats(user) -> bool:
+    """Trang Thống kê: chỉ điều phối trở lên (không cho kỹ thuật viên)."""
+    if not user:
+        return False
+    role = (user.get("role") or "").strip().lower()
+    return role != "kỹ thuật"
 
 
 async def refresh_stations_once() -> bool:
@@ -276,10 +284,13 @@ async def map_page(request: Request):
 
 @app.get("/stats", response_class=HTMLResponse)
 async def stats_page(request: Request):
-    """Trang thống kê / trực quan dữ liệu ticket."""
+    """Trang thống kê / trực quan dữ liệu ticket.
+    Chỉ điều phối trở lên được xem; kỹ thuật viên bị chặn."""
     user = get_current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    if not can_view_stats(user):
+        return RedirectResponse("/", status_code=302)
     return templates.TemplateResponse(
         request=request, name="stats.html", context={"user": user}
     )
@@ -294,6 +305,8 @@ async def api_stats_daily_volume(request: Request):
     user = get_current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not can_view_stats(user):
+        return JSONResponse({"error": "forbidden", "detail": "Kỹ thuật viên không được xem thống kê."}, status_code=403)
 
     payload = stats_data.get_cached_daily_volume()
     if payload is None:
@@ -318,6 +331,8 @@ async def api_stats_overdue_rate(request: Request):
     user = get_current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not can_view_stats(user):
+        return JSONResponse({"error": "forbidden", "detail": "Kỹ thuật viên không được xem thống kê."}, status_code=403)
 
     payload = stats_data.ensure_chart_in_cache("overdue_rate")
     if payload is None:
@@ -335,6 +350,8 @@ async def api_stats_error_codes(request: Request):
     user = get_current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not can_view_stats(user):
+        return JSONResponse({"error": "forbidden", "detail": "Kỹ thuật viên không được xem thống kê."}, status_code=403)
     payload = stats_data.ensure_chart_in_cache("error_codes")
     if payload is None:
         return JSONResponse({"error": "Chưa có dữ liệu thống kê"}, status_code=503)
@@ -347,6 +364,8 @@ async def api_stats_heatmap(request: Request):
     user = get_current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not can_view_stats(user):
+        return JSONResponse({"error": "forbidden", "detail": "Kỹ thuật viên không được xem thống kê."}, status_code=403)
     payload = stats_data.ensure_chart_in_cache("heatmap")
     if payload is None:
         return JSONResponse(

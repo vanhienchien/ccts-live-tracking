@@ -10,7 +10,7 @@ stats_data.py — chỉ chịu trách nhiệm đăng nhập + cào + chuẩn hó
   khi có dữ liệu hoặc hết số vòng cho phép. Nếu sau cùng vẫn KHÔNG cào được
   ticket nào (từ cả 2 tài khoản), GIỮ NGUYÊN cache thống kê cũ (ngày hôm
   qua) thay vì ghi đè bằng dữ liệu rỗng.
-- Cửa sổ: 45 ngày kết thúc tại 0h hôm nay (KHÔNG gồm ngày hiện tại).
+- Cửa sổ: 60 ngày kết thúc tại 0h hôm nay (KHÔNG gồm ngày hiện tại).
 - Lọc BSS.No2, map Region/Tech, phân loại EV/BSS.
 - Ghi cache thô (danh sách ticket đã chuẩn hóa) cho các module biểu đồ dùng.
 - Dùng CCTS_API_LOCK dùng chung với ccts_data.py (qua ccts_shared) để 2
@@ -33,7 +33,7 @@ import pandas as pd
 
 from ccts_shared import VN_TZ, CCTS_API_LOCK, STATS_REFRESH_LOCK, STATS_SCRAPE_ACCOUNTS, ClientPool
 
-SCRAPE_LOOKBACK_DAYS = 45
+SCRAPE_LOOKBACK_DAYS = 60
 STATS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_daily_cache.json")
 SAMPLE_XLSX = os.path.join(os.path.dirname(__file__), "Tickets_esmanager_20260728_201743.xlsx")
 
@@ -233,7 +233,7 @@ def scrape_time_range() -> tuple[str, str, str]:
     """
     [start, end) giờ VN:
     - end = 0h hôm nay (KHÔNG gồm ngày hiện tại)
-    - start = end - 45 ngày
+    - start = end - 60 ngày
     """
     now = datetime.now(VN_TZ)
     end = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -603,10 +603,13 @@ async def fetch_all_accounts_tickets(start_time=None, end_time=None):
     vòng (KHÔNG giữ CCTS_API_LOCK trong lúc nghỉ, để không chặn ccts_data.py
     cào bản đồ realtime mỗi 15').
 
-    Trả (processed_df, source, meta, closed_enriched_df) nếu có ít nhất 1
-    tài khoản cào được; trả None nếu SAU TỐI ĐA số vòng vẫn không lấy được
-    ticket nào từ bất kỳ tài khoản nào (để refresh_stats_cache() giữ nguyên
-    cache cũ thay vì ghi đè dữ liệu rỗng).
+    Trả (processed_df, source, meta, closed_enriched_df, bundles) nếu có ít
+    nhất 1 tài khoản cào được; trả None nếu SAU TỐI ĐA số vòng vẫn không lấy
+    được ticket nào từ bất kỳ tài khoản nào (để refresh_stats_cache() giữ
+    nguyên cache cũ thay vì ghi đè dữ liệu rỗng).
+
+    bundles = {username: {sheet_name: DataFrame}} — dùng lại cho report
+    hằng ngày (không cào lần 2).
     """
     start_time, end_time, end_date_ex = scrape_time_range()
     print(f"[stats] Khoảng cào [start, end): {start_time} → {end_time} (không gồm {end_date_ex})")
@@ -698,7 +701,7 @@ async def fetch_all_accounts_tickets(start_time=None, end_time=None):
     )
     meta["source"] = source
     print(f"[stats] Sau chuẩn hóa TI: {len(processed)} ticket (source={source})")
-    return processed, source, meta, closed_enriched
+    return processed, source, meta, closed_enriched, bundles
 
 
 def tickets_df_to_records(df: pd.DataFrame) -> list:
@@ -787,8 +790,28 @@ def _build_payload(df, source, meta, closed_df) -> dict:
     }
 
 
+def _run_daily_report_safe(bundles: dict) -> None:
+    """Xuất Excel + upload Drive từ bundles vừa cào. Lỗi report không làm
+    hỏng cache thống kê."""
+    if not bundles:
+        return
+    try:
+        from report import run_daily_report_from_bundles
+        print("[stats] Bắt đầu tạo báo cáo Excel hằng ngày từ dữ liệu vừa cào...")
+        run_daily_report_from_bundles(bundles)
+        print("[stats] Báo cáo Excel + Drive hoàn tất.")
+    except Exception as e:
+        print(f"[stats] ⚠️ Lỗi khi tạo báo cáo Excel (cache stats vẫn giữ): {e!r}")
+
+
 async def _refresh_stats_cache_impl() -> dict:
-    """Phần thực thi thật sự (chạy dưới STATS_REFRESH_LOCK)."""
+    """Phần thực thi thật sự (chạy dưới STATS_REFRESH_LOCK).
+
+    Luồng thành công:
+      1) Cào 2 account (60 ngày) → bundles thô
+      2) Chuẩn hoá → cache JSON + charts (trang /stats)
+      3) Dùng lại bundles → Excel báo cáo + upload Drive
+    """
     result = await fetch_all_accounts_tickets()
 
     if result is None:
@@ -803,6 +826,7 @@ async def _refresh_stats_cache_impl() -> dict:
 
         # Chưa từng có cache nào (ví dụ lần deploy đầu tiên) → dùng file mẫu
         # làm phao cứu sinh CUỐI CÙNG để trang /stats không trống trơn.
+        # (Không chạy report từ sample — tránh Excel sai ngày.)
         sample = _load_sample_bundle()
         if sample is None:
             raise RuntimeError(
@@ -829,7 +853,7 @@ async def _refresh_stats_cache_impl() -> dict:
         print(f"[stats] Cache v2 (sample fallback): TI={meta.get('row_count', 0)}")
         return payload
 
-    df, source, meta, closed_df = result
+    df, source, meta, closed_df, bundles = result
     payload = _build_payload(df, source, meta, closed_df)
     payload = _prebuild_chart_payloads(payload)
     save_stats_cache(payload)
@@ -837,15 +861,21 @@ async def _refresh_stats_cache_impl() -> dict:
         f"[stats] Cache v2: TI={meta.get('row_count', 0)}, "
         f"closed30d={meta.get('closed_count', 0)}, source={source}"
     )
+
+    # Báo cáo Excel hằng ngày — dùng chung dữ liệu vừa cào (không cào lại).
+    _run_daily_report_safe(bundles)
+
     return payload
 
 
 async def refresh_stats_cache(**_kwargs) -> dict:
-    """Cào 2 tài khoản cố định, 45 ngày (không gồm hôm nay) → cache v2
-    (tickets + closed). Dùng STATS_REFRESH_LOCK kiểu "single-flight": nếu đã
-    có 1 lượt cào khác đang chạy (khởi động / lịch 0h / admin bấm tay xảy ra
-    gần nhau), lượt gọi này sẽ ĐỢI lượt kia xong rồi dùng luôn kết quả đó,
-    thay vì cào 2 lần chồng nhau."""
+    """Cào 2 tài khoản cố định, 60 ngày (không gồm hôm nay) → cache v2
+    (tickets + closed) + báo cáo Excel/Drive.
+
+    Dùng STATS_REFRESH_LOCK kiểu "single-flight": nếu đã có 1 lượt cào khác
+    đang chạy (khởi động / lịch 0h / admin bấm tay xảy ra gần nhau), lượt
+    gọi này sẽ ĐỢI lượt kia xong rồi dùng luôn kết quả đó, thay vì cào 2
+    lần chồng nhau."""
     if STATS_REFRESH_LOCK.locked():
         print("[stats] Đã có 1 lượt cào thống kê khác đang chạy — đợi kết quả đó, không cào lặp lại.")
         async with STATS_REFRESH_LOCK:
