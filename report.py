@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import warnings
 from datetime import datetime, timedelta
 from typing import Any
@@ -36,6 +37,17 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
 from ccts_shared import VN_TZ, load_static_data_filtered, is_unmanaged_region
+
+# Nạp file .env NẾU CÓ, để "python report.py" chạy standalone vẫn thấy được
+# GOOGLE_CREDENTIALS_JSON, GOOGLE_TOKEN_JSON... Khi chạy qua app chính
+# (app.py/main.py) mà module đó đã tự load_dotenv() rồi thì lệnh này chỉ là
+# no-op (không ghi đè biến đã có sẵn trong môi trường thật, ví dụ trên Render).
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
 
@@ -90,6 +102,29 @@ def get_drive_service():
                 creds = None
 
         if not creds:
+            # QUAN TRỌNG: trên server headless (Render, ...), KHÔNG có trình
+            # duyệt và không ai bấm xác thực -> flow.run_local_server() sẽ
+            # treo vô thời hạn chờ callback OAuth không bao giờ tới, khiến
+            # toàn bộ tiến trình báo cáo bị "đứng im" mà không có exception
+            # nào được raise (không lỗi hiển thị, chỉ đơn giản là không có
+            # file nào được upload). Phải chặn nhánh này lại và fail nhanh,
+            # rõ ràng thay vì treo.
+            is_deployed = bool(
+                os.environ.get("RENDER")
+                or os.environ.get("IS_PULL_REQUEST") is not None
+                or os.environ.get("DISABLE_OAUTH_INTERACTIVE_FLOW")
+                or not os.environ.get("DISPLAY", None) and os.name != "nt" and not sys.stdin.isatty()
+            )
+            if is_deployed:
+                print(
+                    "❌ Refresh token thất bại và đang chạy trên môi trường không "
+                    "tương tác (server/deploy) -> KHÔNG thể mở trình duyệt để "
+                    "đăng nhập lại. Hãy tạo token.json mới ở máy local (chạy "
+                    "get_drive_service() thủ công), rồi copy nội dung vào biến "
+                    "môi trường GOOGLE_TOKEN_JSON trên server và redeploy."
+                )
+                return None
+
             raw_creds = os.environ.get("GOOGLE_CREDENTIALS_JSON", "").strip()
             if not raw_creds:
                 print("⚠️ Chưa cấu hình biến môi trường GOOGLE_CREDENTIALS_JSON.")
