@@ -9,10 +9,9 @@ Tối ưu:
 - Trạng thái đóng/mở suy ra từ Events (mới → cũ): OPEN / VOMS / CLOSED.
   CLOSED lấy Close Time = Create Time của "Pending for local team close" mới nhất;
   mỗi ticket chỉ tính 1 lần trong tháng. Ticket mở lại = đang OPEN nhưng lịch sử
-  có VOMS hoặc local close. Status khác bỏ qua (công ty chỉ đóng đến local close).
+  có VOMS hoặc local close. Status khác bỏ qua.
 - Report đếm từ cùng tập Cleaned Tickets → khớp số ticket đóng tháng/ngày.
-- Không còn CUSTOM_TODAY / chạy lùi ngày / tải file local dự phòng.
-- Chỉ tập trung form Excel đúng + upload Drive.
+- Không ghi Excel lên disk (CCTS_Report); build in-memory rồi upload thẳng Drive.
 """
 from __future__ import annotations
 
@@ -22,6 +21,7 @@ import warnings
 from datetime import datetime, timedelta
 from typing import Any
 import json
+from io import BytesIO
 
 import pandas as pd
 from openpyxl import Workbook
@@ -33,7 +33,7 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaIoBaseUpload
 
 from ccts_shared import VN_TZ, load_static_data_filtered, is_unmanaged_region
 
@@ -125,13 +125,13 @@ def get_drive_service():
     _drive_service = build("drive", "v3", credentials=creds)
     return _drive_service
 
-def upload_file_to_drive(file_path: str, target_folder_id: str) -> None:
+def upload_bytes_to_drive(file_name: str, content: bytes, target_folder_id: str) -> None:
+    """Upload Excel bytes thẳng lên Drive — không ghi file local."""
     try:
         service = get_drive_service()
         if not service:
             return
 
-        file_name = os.path.basename(file_path)
         query = (
             f"'{target_folder_id}' in parents and name = '{file_name}' "
             f"and trashed = false"
@@ -140,8 +140,8 @@ def upload_file_to_drive(file_path: str, target_folder_id: str) -> None:
         items = results.get("files", [])
 
         file_metadata = {"name": file_name, "parents": [target_folder_id]}
-        media = MediaFileUpload(
-            file_path,
+        media = MediaIoBaseUpload(
+            BytesIO(content),
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             resumable=True,
         )
@@ -319,12 +319,6 @@ def report_time_window(now: datetime | None = None) -> tuple[datetime, datetime,
 # 4. Tổng hợp & định dạng Excel
 # ---------------------------------------------------------------------------
 
-def prepare_output_directory(dir_name: str = "CCTS_Report") -> str:
-    if not os.path.exists(dir_name):
-        os.makedirs(dir_name)
-    return dir_name
-
-
 def generate_report_dataframe(
     df_region_all: pd.DataFrame,
     df_region_closed: pd.DataFrame,
@@ -349,7 +343,6 @@ def generate_report_dataframe(
                 & (df_ktv_closed_month["Close Time_dt"] < end_today)
             ).sum()
 
-        # Ưu tiên Event_State (từ Events); fallback Ticket Status nếu thiếu cột.
         if "Event_State" in df_ktv_all.columns:
             is_open_mask = df_ktv_all["Event_State"] == "OPEN"
         else:
@@ -550,12 +543,11 @@ def export_multisheet_excel(
     report_df: pd.DataFrame | None,
     df_warning: pd.DataFrame | None,
     df_parts: pd.DataFrame | None,
-    output_path: str,
     yesterday_str: str,
     today_str: str,
     month: int,
     is_unassigned: bool = False,
-) -> None:
+) -> bytes:
     wb = Workbook()
     font_title = Font(name="Segoe UI", size=11, bold=True, color="FFFFFF")
     fill_blue_dark = PatternFill(start_color="1F4E78", end_color="1F4E78", fill_type="solid")
@@ -881,7 +873,9 @@ def export_multisheet_excel(
     for r in range(2, ws_dtl.max_row + 1):
         ws_dtl.row_dimensions[r].height = 22
 
-    wb.save(output_path)
+    buf = BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
 
 
 # ---------------------------------------------------------------------------
@@ -919,8 +913,6 @@ def process_and_clean_data(
         f"--- BÁO CÁO NGÀY {yesterday_str} "
         f"([{start_yesterday} → {end_today})) — THÁNG {month}/{report_year} ---"
     )
-
-    output_dir = prepare_output_directory("CCTS_Report")
 
     if not dfs_es and not dfs_its:
         print("❌ Không có dữ liệu đầu vào từ cả 2 tài khoản.")
@@ -998,20 +990,17 @@ def process_and_clean_data(
     voms_status = "Pending for VOMS confirm"
     local_close_status = "Pending for local team close"
 
-    # Event-derived state / close times (Events sorted newest → oldest).
-    # OPEN: gặp unclosed trước → đang mở; tiếp tục quét xuống, nếu gặp VOMS
-    #       hoặc local close → đánh dấu ticket mở lại, rồi dừng.
-    # VOMS: Pending for VOMS confirm → không đóng, không mở.
-    # CLOSED: gặp local close đầu tiên (mới nhất) → đã đóng,
-    #         Close Time = Create Time event đó; tiếp tục xét close cũ hơn
-    #         (mỗi ticket chỉ tính 1 lần/tháng theo close mới nhất).
-    # Status khác: bỏ qua (công ty chỉ đóng đến local close).
+    # Event-derived state (Events newest → oldest).
+    # OPEN: gặp unclosed → đang mở; quét tiếp, gặp VOMS/local close → mở lại.
+    # VOMS: không đóng, không mở.
+    # CLOSED: local close mới nhất = Close Time; mỗi ticket 1 lần/tháng.
+    # Status khác: bỏ qua.
     close_time_map: dict = {}
     first_close_map: dict = {}
     first_asp_map: dict = {}
     last_asp_map: dict = {}
     reopened_tickets_set: set = set()
-    event_state_map: dict = {}  # tid -> "OPEN" | "CLOSED" | "VOMS" | "UNKNOWN"
+    event_state_map: dict = {}
 
     if not df_events.empty and "Ticket Status" in df_events.columns:
         df_ev = df_events.copy()
@@ -1020,7 +1009,6 @@ def process_and_clean_data(
             df_ev["Create Time"], format="%Y-%m-%d %H:%M:%S", errors="coerce"
         )
         df_ev = df_ev.dropna(subset=["Event Time_dt"])
-        # Bảo đảm mới nhất → cũ nhất.
         df_ev = df_ev.sort_values(
             ["Ticket ID", "Event Time_dt"], ascending=[True, False]
         )
@@ -1035,7 +1023,6 @@ def process_and_clean_data(
                 if state is None:
                     if st in unclosed_statuses:
                         state = "OPEN"
-                        # Không break: tiếp tục quét để phát hiện mở lại
                         continue
                     if st == voms_status:
                         state = "VOMS"
@@ -1044,11 +1031,9 @@ def process_and_clean_data(
                         state = "CLOSED"
                         closes.append(t)
                         continue
-                    # Status khác → bỏ qua, tìm tiếp
                     continue
 
                 if state == "OPEN":
-                    # Đang mở nhưng lịch sử có VOMS / local close → ticket mở lại
                     if st == voms_status or st == local_close_status:
                         reopened_tickets_set.add(tid)
                         break
@@ -1061,7 +1046,6 @@ def process_and_clean_data(
                 state = "UNKNOWN"
             event_state_map[tid] = state
             if closes:
-                # closes[0] = lần close mới nhất; closes[-1] = lần close cũ nhất
                 close_time_map[tid] = closes[0]
                 first_close_map[tid] = closes[-1]
                 if len(closes) > 1:
@@ -1096,7 +1080,6 @@ def process_and_clean_data(
         df_raw["Create Time"], format="%Y-%m-%d %H:%M:%S", errors="coerce"
     )
 
-    # Fallback khi Events không cho state rõ: dùng Ticket Status từ TI.
     _unknown = df_raw["Event_State"] == "UNKNOWN"
     if _unknown.any():
         _ti_open = df_raw["Ticket Status"].isin(unclosed_statuses)
@@ -1104,8 +1087,6 @@ def process_and_clean_data(
         df_raw.loc[_unknown & _ti_open, "Event_State"] = "OPEN"
         df_raw.loc[_unknown & _ti_voms, "Event_State"] = "VOMS"
 
-    # CLOSED trong tháng: state CLOSED + Close Time thuộc tháng/năm.
-    # Mỗi ticket 1 Close Time (mới nhất) → không đếm trùng trong tháng.
     is_closed_in_month = (
         (df_raw["Event_State"] == "CLOSED")
         & df_raw["Close Time_dt"].notna()
@@ -1113,7 +1094,6 @@ def process_and_clean_data(
         & (df_raw["Close Time_dt"].dt.year == report_year)
     )
     is_open_backlog = df_raw["Event_State"] == "OPEN"
-    # VOMS: không đóng, không mở → loại khỏi cả hai nhóm.
 
     df_month_all = df_raw[is_closed_in_month | is_open_backlog].copy()
     if df_month_all.empty:
@@ -1292,9 +1272,13 @@ def process_and_clean_data(
     ]
     existing_target_cols = [c for c in target_columns if c in df_month_all.columns]
 
+    report_date_folder_name = start_yesterday.strftime("%d-%m-%Y")
+    print(f"\n☁️ Chuẩn bị thư mục Drive: {report_date_folder_name}")
+    target_drive_folder_id = get_or_create_date_folder(DRIVE_FOLDER_ID, report_date_folder_name)
+    print("-" * 60)
+
     df_unassigned = df_month_all[df_month_all["Kỹ thuật viên"] == "Chưa phân công"].copy()
     if not df_unassigned.empty:
-        output_unassigned = os.path.join(output_dir, "unassigned_stations.xlsx")
         cols_unassigned = [
             c
             for c in existing_target_cols
@@ -1311,33 +1295,29 @@ def process_and_clean_data(
                 "Ticket Duration",
             ]
         ]
-        export_multisheet_excel(
+        xlsx_bytes = export_multisheet_excel(
             df_unassigned[cols_unassigned],
             None,
             None,
             None,
-            output_unassigned,
             yesterday_str,
             today_str,
             month,
             is_unassigned=True,
         )
-        print(f"   ✅ Unassigned: {len(df_unassigned)} ticket → {output_unassigned}")
+        upload_bytes_to_drive(
+            "unassigned_stations.xlsx", xlsx_bytes, target_drive_folder_id
+        )
+        print(f"   ✅ Unassigned: {len(df_unassigned)} ticket → Drive")
 
     df_all_parts_yesterday = get_replaced_parts_yesterday(
         df_month_all, df_spare, start_yesterday, end_today
     )
 
-    report_date_folder_name = start_yesterday.strftime("%d-%m-%Y")
-    print(f"\n☁️ Chuẩn bị thư mục Drive: {report_date_folder_name}")
-    target_drive_folder_id = get_or_create_date_folder(DRIVE_FOLDER_ID, report_date_folder_name)
-    print("-" * 60)
-
     for region in df_month_all["Region_op"].unique():
         if region in ("Chưa phân công", "UNKNOWN") or is_unmanaged_region(region):
             continue
 
-        # Giữ Event_State để phân closed/open thống nhất với Cleaned Tickets.
         cols_region = list(existing_target_cols)
         if "Event_State" in df_month_all.columns and "Event_State" not in cols_region:
             cols_region.append("Event_State")
@@ -1347,15 +1327,14 @@ def process_and_clean_data(
         if df_region.empty:
             continue
 
-        # Cleaned Tickets = ticket CLOSED (theo Events) trong tháng.
-        # Report đếm trực tiếp từ tập này → khớp số dòng Cleaned Tickets.
+        # Cleaned = CLOSED theo Events; Report đếm từ cùng tập này.
         if "Event_State" in df_region.columns:
             df_region_cleaned = df_region[df_region["Event_State"] == "CLOSED"].copy()
         else:
             df_region_cleaned = df_region[
                 ~df_region["Ticket Status"].isin(unclosed_statuses)
             ].copy()
-        df_region_closed = df_region_cleaned  # cùng nguồn đếm cho Report
+        df_region_closed = df_region_cleaned
 
         report_df = generate_report_dataframe(
             df_region, df_region_closed, start_yesterday, end_today, unclosed_statuses
@@ -1374,9 +1353,7 @@ def process_and_clean_data(
         )
 
         file_name = f"{region}.xlsx"
-        output_path = os.path.join(output_dir, file_name)
 
-        # Format Close Time sau khi đã đếm xong (Report dùng datetime).
         if "Close Time_dt" in df_region_cleaned.columns:
             df_region_cleaned = df_region_cleaned.copy()
             df_region_cleaned["Close Time_dt"] = (
@@ -1401,19 +1378,18 @@ def process_and_clean_data(
         if "Khu vực" in cols_to_save:
             cols_to_save = [c for c in cols_to_save if c != "Khu vực"] + ["Khu vực"]
 
-        export_multisheet_excel(
+        xlsx_bytes = export_multisheet_excel(
             df_region_cleaned[cols_to_save],
             report_df,
             df_warning,
             df_region_parts,
-            output_path,
             yesterday_str,
             today_str,
             month,
             is_unassigned=False,
         )
-        print(f"   ✅ Vùng [{region}]: {len(df_region_cleaned)} ticket → {file_name}")
-        upload_file_to_drive(output_path, target_drive_folder_id)
+        upload_bytes_to_drive(file_name, xlsx_bytes, target_drive_folder_id)
+        print(f"   ✅ Vùng [{region}]: {len(df_region_cleaned)} ticket → Drive/{file_name}")
 
     print("\n🎉 HOÀN THÀNH BÁO CÁO NGÀY + ĐỒNG BỘ DRIVE!")
     return df_month_all
