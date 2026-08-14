@@ -1,6 +1,7 @@
 /**
  * stats_chart_heatmap.js — module "Bản đồ nhiệt": mật độ ticket & ticket
  * Đã tối giản UI: Ẩn panel bên phải, đưa Control lên map, ẩn marker trạm.
+ * + Tăng chiều cao map, thêm nút toàn màn hình.
  */
 (function () {
   "use strict";
@@ -12,12 +13,24 @@
       display: block; width: 100%;
     }
     .heatmap-map-wrap {
-      position: relative; height: 600px; width: 100%;
-      border-radius: 10px; overflow: hidden; border: 1px solid var(--border);
+      position: relative;
+      height: min(82vh, 900px);
+      min-height: 720px;
+      width: 100%;
+      border-radius: 10px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: #f8fafc;
+    }
+    .heatmap-map-wrap.is-fullscreen {
+      height: 100vh !important;
+      min-height: 100vh !important;
+      border-radius: 0;
+      border: none;
     }
     /* Đổi nền thành màu sáng nhẹ để nổi bật màu nhiệt */
     .heatmap-map { height: 100%; width: 100%; background: #f8fafc; }
-    
+
     /* Box điều khiển nổi trên bản đồ */
     .heatmap-map-overlay {
       position: absolute;
@@ -44,7 +57,34 @@
       font-size: 12.5px; font-weight: 600; color: #1e293b; cursor: pointer; user-select: none;
     }
     .heatmap-layer-toggle input { cursor: pointer; width: 16px; height: 16px; accent-color: #3b82f6; }
-    
+
+    /* Nút toàn màn hình — góc trên phải */
+    .heatmap-fs-btn {
+      position: absolute;
+      top: 12px;
+      right: 12px;
+      z-index: 1000;
+      width: 36px;
+      height: 36px;
+      border: none;
+      border-radius: 8px;
+      background: rgba(255, 255, 255, 0.95);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+      border: 1px solid rgba(0,0,0,0.06);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #1e293b;
+      padding: 0;
+      transition: background 0.15s, color 0.15s;
+    }
+    .heatmap-fs-btn:hover {
+      background: #0f172a;
+      color: #fff;
+    }
+    .heatmap-fs-btn svg { width: 18px; height: 18px; display: block; }
+
     .heatmap-loadfail { padding: 40px 20px; text-align: center; color: #b91c1c; font-size: 13px; }
     .leaflet-tooltip { font-family: inherit; font-size: 12px; font-weight: 600; padding: 4px 8px; border-radius: 6px; }
     .leaflet-popup-content { font-family: inherit; font-size: 13px; min-width: 180px; }
@@ -61,6 +101,9 @@
     "Tây Nguyên": "Tây Nguyên",
     "Mtay": "Miền Tây",
   };
+
+  const FS_ICON_ENTER = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3H5a2 2 0 0 0-2 2v3m18 0V5a2 2 0 0 0-2-2h-3m0 18h3a2 2 0 0 0 2-2v-3M3 16v3a2 2 0 0 0 2 2h3"/></svg>';
+  const FS_ICON_EXIT = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 3v3a2 2 0 0 1-2 2H3m18 0h-3a2 2 0 0 1-2-2V3m0 18v-3a2 2 0 0 1 2-2h3M3 16h3a2 2 0 0 1 2 2v3"/></svg>';
 
   let fullPayload = null;
   let currentPayload = null;
@@ -133,6 +176,7 @@
       popupAnchor: [0, -26]
     });
   }
+
   // Hàm render marker kỹ thuật viên với ghi chú rõ ràng khi click/hover
   function renderEngineerMarkers() {
     if (!map || !engineerLayer) return;
@@ -224,13 +268,13 @@
       return;
     }
     map = L.map(refs.mapEl, { center: [16.0, 106.0], zoom: 5, zoomControl: true, attributionControl: true });
-    
+
     // Đã chuyển sang sử dụng CartoDB Positron (Nền đơn sắc) để màu nhiệt nổi lên tuyệt đối
     L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 18,
       attribution: "&copy; OpenStreetMap",
     }).addTo(map);
-    
+
     engineerLayer = L.layerGroup().addTo(map);
     map.on("zoomend", () => {
       if (!heatLayer) return;
@@ -283,33 +327,6 @@
     setTimeout(() => { if (map) map.invalidateSize(); }, 60);
   }
 
-  function renderEngineerMarkers() {
-    if (!map || !engineerLayer) return;
-    engineerLayer.clearLayers();
-    if (!showEngineers) return;
-    
-    const engineers = currentPayload && currentPayload.engineers;
-    const list = (engineers && engineers.by_region && engineers.by_region[selectedRegion]) || [];
-    
-    list.forEach((eng) => {
-      const roleLabel = eng.role === "lead" 
-        ? "⭐ <b>Trưởng nhóm</b>" 
-        : (eng.role === "member" ? "Thành viên (TN: " + escapeHtml(eng.team_lead || "") + ")" : "KT độc lập");
-      const approxNote = eng.approx 
-        ? '<div class="station-popup-row" style="color:#d97706;font-size:12px;">⚠ Đang tham chiếu từ khu vực lân cận</div>' 
-        : "";
-      const popupHtml = (
-        '<div class="eng-popup-title">' + escapeHtml(eng.name) + '</div>' +
-        '<div class="station-popup-row">' + roleLabel + '</div>' +
-        approxNote
-      );
-      L.marker([eng.lat, eng.lng], { icon: engineerIcon(eng.role) })
-        .bindTooltip(eng.name, { direction: "top", offset: [0, -28] })
-        .bindPopup(popupHtml)
-        .addTo(engineerLayer);
-    });
-  }
-
   function renderKPIs() {
     const regionData = currentPayload ? (currentPayload.regions || {})[selectedRegion] : null;
     const vol = regionData ? regionData.volume : null;
@@ -318,7 +335,7 @@
     const odTotal = od ? od.total : 0;
     const odPct = volTotal ? Math.round((odTotal / volTotal) * 1000) / 10 : 0;
     const top = vol && vol.top_stations && vol.top_stations[0];
-    
+
     setKPIs([
       { label: "Tổng ticket", value: volTotal.toLocaleString("vi-VN"), sub: REGION_LABELS[selectedRegion] || selectedRegion },
       { label: "Overdue", value: odTotal.toLocaleString("vi-VN"), sub: odPct + "% tổng ticket khu vực" },
@@ -395,6 +412,56 @@
     if (panelEl.style.display !== "none") renderAll();
   }
 
+  function isFullscreen() {
+    return !!(document.fullscreenElement || document.webkitFullscreenElement);
+  }
+
+  function updateFsButton() {
+    if (!refs || !refs.fsBtn) return;
+    const on = isFullscreen();
+    refs.fsBtn.innerHTML = on ? FS_ICON_EXIT : FS_ICON_ENTER;
+    refs.fsBtn.title = on ? "Thoát toàn màn hình" : "Toàn màn hình";
+    refs.fsBtn.setAttribute("aria-label", refs.fsBtn.title);
+    if (refs.mapWrap) refs.mapWrap.classList.toggle("is-fullscreen", on);
+  }
+
+  function toggleFullscreen() {
+    const el = refs && refs.mapWrap;
+    if (!el) return;
+    if (isFullscreen()) {
+      const exit = document.exitFullscreen || document.webkitExitFullscreen;
+      if (exit) exit.call(document);
+    } else {
+      const req = el.requestFullscreen || el.webkitRequestFullscreen;
+      if (req) req.call(el);
+    }
+  }
+
+  function onFullscreenChange() {
+    updateFsButton();
+    // Leaflet cần invalidateSize sau khi đổi kích thước container
+    setTimeout(() => {
+      if (map) {
+        map.invalidateSize();
+        // Giữ vùng đang xem sau khi vào/ra fullscreen
+        const found = currentRegionLayer();
+        const layer = found && found.layer;
+        const bounds = layer && layer.bounds;
+        const boundaryGeom = currentRegionBoundaryGeometry();
+        if (boundaryGeom && window.turf) {
+          try {
+            const [minX, minY, maxX, maxY] = turf.bbox({ type: "Feature", properties: {}, geometry: boundaryGeom });
+            map.fitBounds([[minY, minX], [maxY, maxX]], { animate: false, padding: [10, 10] });
+            return;
+          } catch (err) {}
+        }
+        if (bounds) {
+          map.fitBounds([[bounds.min_lat, bounds.min_lng], [bounds.max_lat, bounds.max_lng]], { animate: false });
+        }
+      }
+    }, 80);
+  }
+
   function mount(panel) {
     panelEl = panel;
     // Đã gỡ bỏ thẻ <div class="heatmap-side"> ra khỏi bộ khung HTML
@@ -411,10 +478,11 @@
       </div>
       <div class="region-tabs"></div>
       <div class="loading chart-loading" style="display:none;">⏳ Đang tải bản đồ nhiệt…</div>
-      
+
       <div class="heatmap-body">
         <div class="heatmap-map-wrap">
           <div class="heatmap-map"></div>
+          <button type="button" class="heatmap-fs-btn" title="Toàn màn hình" aria-label="Toàn màn hình">${FS_ICON_ENTER}</button>
           <!-- Bảng điều khiển nổi (Legend + Toggle UI) -->
           <div class="heatmap-map-overlay">
             <div class="heatmap-legend"></div>
@@ -433,9 +501,11 @@
       desc: panel.querySelector(".chart-desc"),
       regionTabs: panel.querySelector(".region-tabs"),
       loading: panel.querySelector(".chart-loading"),
+      mapWrap: panel.querySelector(".heatmap-map-wrap"),
       mapEl: panel.querySelector(".heatmap-map"),
       legend: panel.querySelector(".heatmap-legend"),
       engToggle: panel.querySelector(".eng-toggle"),
+      fsBtn: panel.querySelector(".heatmap-fs-btn"),
       sourceNote: panel.querySelector(".source-note"),
     };
 
@@ -445,6 +515,15 @@
       showEngineers = refs.engToggle.checked;
       renderEngineerMarkers();
     });
+
+    refs.fsBtn.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      toggleFullscreen();
+    });
+
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    document.addEventListener("webkitfullscreenchange", onFullscreenChange);
 
     refs.viewToggle.addEventListener("click", (e) => {
       const btn = e.target.closest("button[data-view]");
