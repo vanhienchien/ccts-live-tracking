@@ -131,10 +131,24 @@ class CCTSClient:
         except:
             res_data = {"code": "500", "message": "Invalid JSON", "success": False}
 
-        # Tự động re-login nếu token hết hạn
+        # Tự động re-login nếu token hết hạn / bị đá phiên (do người khác
+        # đăng nhập cùng tài khoản — CCTS chỉ cho 1 phiên/tài khoản).
+        # LƯU Ý: trước đây code=="403" mà message KHÔNG chứa chữ "token" thì
+        # sẽ KHÔNG kích hoạt relogin (dù 403 đã nằm trong danh sách mã lỗi
+        # auth ở điều kiện ngoài) — CCTS có thể trả 403 kèm message khác
+        # (vd "Forbidden", rỗng...) khi phiên bị đá, khiến script cứ lặp lại
+        # request thất bại âm thầm mà không tự đăng nhập lại. Sửa: coi
+        # code nằm trong ["401", "403", "50001"] LÀ ĐỦ để relogin, không cần
+        # thêm điều kiện message chứa "token" nữa.
         if res_data.get("code") in ["401", "403", "50001"] or not res_data.get("success", True):
-            if "token" in str(res_data.get("message", "")).lower() or str(res_data.get("code")) in ["401", "50001"]:
-                print("[!] Token hết hạn. Đang re-login...")
+            is_auth_issue = (
+                str(res_data.get("code")) in ["401", "403", "50001"]
+                or "token" in str(res_data.get("message", "")).lower()
+            )
+            if is_auth_issue:
+                print(f"[!] Phiên đăng nhập không hợp lệ (code={res_data.get('code')!r}, "
+                      f"message={res_data.get('message')!r}) — có thể bị đá phiên do tài khoản "
+                      f"[{self.username}] được đăng nhập ở nơi khác. Đang re-login...")
                 await self.login()
                 # Thử lại lần nữa
                 if isinstance(payload, dict):

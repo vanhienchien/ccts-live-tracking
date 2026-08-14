@@ -41,6 +41,16 @@ SAMPLE_XLSX = os.path.join(os.path.dirname(__file__), "Tickets_esmanager_2026072
 MAX_SCRAPE_ROUNDS = 10
 SCRAPE_RETRY_DELAY_SECONDS = 20
 
+# Giới hạn thời gian chờ CCTS xử lý xong 1 lượt export/tài khoản. Nếu CCTS
+# không bao giờ trả status "sẵn sàng" (dữ liệu quá lớn / lỗi phía CCTS),
+# vòng chờ bên trong client.export_and_download_tickets() có thể chạy vô
+# hạn — mà lệnh gọi đó nằm TRONG CCTS_API_LOCK, nên nếu treo sẽ chặn luôn
+# ccts_data.py cào bản đồ realtime mỗi 15'. Bọc bằng asyncio.wait_for để tự
+# bỏ cuộc sau EXPORT_TIMEOUT_SECONDS, nhả khoá, rồi để cơ chế vòng lặp
+# round-based (MAX_SCRAPE_ROUNDS) thử lại bình thường thay vì treo cả hệ
+# thống.
+EXPORT_TIMEOUT_SECONDS = int(os.environ.get("EXPORT_TIMEOUT_SECONDS", "180"))
+
 # Công ty đã RÚT KHỎI khu vực HCM (08/2026) -> HCM không còn nằm trong danh
 # sách khu vực được quản lý; xem thêm ccts_shared.DEPRECATED_REGIONS (nơi
 # region_map gốc cũng được tự động chuẩn hoá HCM -> "KV không quản lý").
@@ -499,11 +509,20 @@ async def _export_one_account(username, password, start_time, end_time) -> dict 
     _source_account), hoặc None nếu thất bại."""
 
     async def _action(client):
-        dfs = await client.export_and_download_tickets(
-            start_time=start_time,
-            end_time=end_time,
-            ticket_status=None,
-        )
+        try:
+            dfs = await asyncio.wait_for(
+                client.export_and_download_tickets(
+                    start_time=start_time,
+                    end_time=end_time,
+                    ticket_status=None,
+                ),
+                timeout=EXPORT_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"export_and_download_tickets quá {EXPORT_TIMEOUT_SECONDS}s "
+                "(CCTS không trả về file sẵn sàng) — bỏ cuộc để nhả khoá."
+            )
         if not dfs:
             raise RuntimeError("export_and_download_tickets trả về rỗng")
         return dfs
