@@ -1307,7 +1307,7 @@ def process_and_clean_data(
     ]
     existing_target_cols = [c for c in target_columns if c in df_month_all.columns]
 
-    report_date_folder_name = start_yesterday.strftime("%d-%m-%Y")
+    report_date_folder_name = start_yesterday.strftime("%Y-%m-%d")
     print(f"\n☁️ Chuẩn bị thư mục Drive: {report_date_folder_name}")
     target_drive_folder_id = get_or_create_date_folder(DRIVE_FOLDER_ID, report_date_folder_name)
     print("-" * 60)
