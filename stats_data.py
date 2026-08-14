@@ -790,16 +790,42 @@ def _build_payload(df, source, meta, closed_df) -> dict:
     }
 
 
-def _run_daily_report_safe(bundles: dict) -> None:
+_REPORT_TIMEOUT_SECONDS = int(os.environ.get("REPORT_TIMEOUT_SECONDS", "600"))  # 10 phút
+
+
+async def _run_daily_report_safe(bundles: dict) -> None:
     """Xuất Excel + upload Drive từ bundles vừa cào. Lỗi report không làm
-    hỏng cache thống kê."""
+    hỏng cache thống kê.
+
+    QUAN TRỌNG: run_daily_report_from_bundles() là hàm ĐỒNG BỘ (blocking) —
+    tạo file Excel + gọi Google Drive API. Nếu gọi thẳng nó trong 1 hàm
+    async như trước đây, nó sẽ CHIẾM DỤNG event loop chính của toàn bộ
+    server: trong lúc nó chạy (và đặc biệt nếu nó bị TREO, vd do OAuth
+    refresh token lỗi), server sẽ ngưng phản hồi MỌI request (HTTP,
+    WebSocket...) chứ không chỉ riêng phần báo cáo — khiến cả app "đơ" tới
+    khi Render tự restart, và lần cào thống kê kế tiếp sẽ lặp lại y hệt.
+
+    Vì vậy: chạy nó trong 1 thread riêng (asyncio.to_thread) để KHÔNG chặn
+    event loop, và giới hạn thời gian bằng asyncio.wait_for — nếu quá
+    _REPORT_TIMEOUT_SECONDS thì tự huỷ chờ (thread nền có thể vẫn chạy dở,
+    nhưng server không còn bị treo theo nó nữa) và log rõ ràng để biết mà
+    kiểm tra Google Drive/token thay vì im lặng."""
     if not bundles:
         return
     try:
         from report import run_daily_report_from_bundles
         print("[stats] Bắt đầu tạo báo cáo Excel hằng ngày từ dữ liệu vừa cào...")
-        run_daily_report_from_bundles(bundles)
+        await asyncio.wait_for(
+            asyncio.to_thread(run_daily_report_from_bundles, bundles),
+            timeout=_REPORT_TIMEOUT_SECONDS,
+        )
         print("[stats] Báo cáo Excel + Drive hoàn tất.")
+    except asyncio.TimeoutError:
+        print(
+            f"[stats] ⚠️ Tạo báo cáo Excel quá {_REPORT_TIMEOUT_SECONDS}s — đã HUỶ CHỜ để "
+            "không treo server (thread nền có thể vẫn chạy dở). Rất có thể do Google Drive/"
+            "OAuth token bị kẹt — kiểm tra lại GOOGLE_TOKEN_JSON."
+        )
     except Exception as e:
         print(f"[stats] ⚠️ Lỗi khi tạo báo cáo Excel (cache stats vẫn giữ): {e!r}")
 
@@ -863,7 +889,7 @@ async def _refresh_stats_cache_impl() -> dict:
     )
 
     # Báo cáo Excel hằng ngày — dùng chung dữ liệu vừa cào (không cào lại).
-    _run_daily_report_safe(bundles)
+    await _run_daily_report_safe(bundles)
 
     return payload
 
