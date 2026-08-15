@@ -11,6 +11,8 @@ thay vì xoá sạch bản đồ.
 
 import os
 import json
+import re
+from collections import defaultdict
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -51,6 +53,78 @@ def _severity_color(hours):
         return "orange", "#ffca9c", "#ce6b15", "#ce6b15"
     else:
         return "green", "#93ffab", "#26ac43", "#26ac43"
+
+
+# Tài khoản tạo ticket (bỏ khỏi danh sách owner/assistant hiển thị)
+_CREATOR_ACCOUNTS = {"thailong", "quangle"}
+
+
+def _compact_account_list(raw_str, keep_es_its_only=False):
+    """Thu gọn danh sách account dạng 'A_1; A_2; A_3' → 'A_1 (2, 3)'.
+    - Loại bỏ thailong / quangle (người tạo ticket).
+    - Nếu keep_es_its_only=True: chỉ giữ account bắt đầu bằng ES hoặc ITS.
+    """
+    if not raw_str:
+        return ""
+    names = [n.strip() for n in str(raw_str).split(";") if n.strip()]
+    names = [n for n in names if n.lower() not in _CREATOR_ACCOUNTS]
+    if keep_es_its_only:
+        names = [n for n in names if n.upper().startswith(("ES", "ITS"))]
+    if not names:
+        return ""
+
+    groups = defaultdict(list)
+    singles = []
+    for name in names:
+        m = re.match(r"^(.+?)_(\d+)$", name)
+        if m:
+            base, num = m.group(1), m.group(2)
+            groups[base].append(num)
+        else:
+            singles.append(name)
+
+    result = []
+    seen_bases = []
+    for name in names:
+        m = re.match(r"^(.+?)_(\d+)$", name)
+        if m:
+            base = m.group(1)
+            if base not in seen_bases:
+                seen_bases.append(base)
+
+    for base in seen_bases:
+        nums = groups[base]
+        nums_sorted = sorted(nums, key=lambda x: int(x) if x.isdigit() else x)
+        if len(nums_sorted) == 1:
+            result.append(f"{base}_{nums_sorted[0]}")
+        else:
+            first = nums_sorted[0]
+            rest = ", ".join(nums_sorted[1:])
+            result.append(f"{base}_{first} ({rest})")
+
+    for name in singles:
+        if name not in result:
+            result.append(name)
+
+    return "; ".join(result)
+
+
+def _build_owners_display(owner_raw, assistant_raw):
+    """Gộp owner (chỉ ES/ITS) + assistant, đã lọc creator và thu gọn.
+    Khử trùng theo từng segment sau khi compact."""
+    owner_part = _compact_account_list(owner_raw, keep_es_its_only=True)
+    assist_part = _compact_account_list(assistant_raw, keep_es_its_only=False)
+    seen = set()
+    result = []
+    for part in (owner_part, assist_part):
+        if not part:
+            continue
+        for seg in part.split("; "):
+            seg = seg.strip()
+            if seg and seg not in seen:
+                seen.add(seg)
+                result.append(seg)
+    return "; ".join(result)
 
 
 def get_static_data():
@@ -152,6 +226,8 @@ def _process_raw_tickets(raw_tickets):
             "Creator": item.get("ticketCreator"),
             "Source_Account": item.get("_source_account"),
             "Address": item.get("address") or item.get("stationAddress") or "",
+            "OwnerUserName": item.get("cctsTicketOwnerUserName") or "",
+            "AssistantName": item.get("assistantName") or "",
         })
     return processed
 
@@ -253,6 +329,14 @@ def _build_station_payload(
 
             group_sorted = group.sort_values("Hours", ascending=False)
 
+            # Lấy address + owners từ ticket tồn lâu nhất (đại diện cho trạm)
+            top_row = group_sorted.iloc[0]
+            station_address = str(top_row.get("Address") or "").strip()
+            station_owners = _build_owners_display(
+                top_row.get("OwnerUserName") or "",
+                top_row.get("AssistantName") or "",
+            )
+
             tickets_out = []
             for _, row in group_sorted.iterrows():
                 hours = float(row["Hours"])
@@ -268,6 +352,7 @@ def _build_station_payload(
                     "severity": severity_key,
                     "description": row["Problem Description"],
                     "is_near_overdue": 45 <= hours < 48,
+                    "address": str(row.get("Address") or "").strip(),
                 })
 
             stations.append({
@@ -285,6 +370,8 @@ def _build_station_payload(
                 "has_near_overdue": bool(
                     ((group_sorted["Hours"] >= 45) & (group_sorted["Hours"] < 48)).any()
                 ),
+                "address": station_address,
+                "owners": station_owners,
             })
 
     return {
@@ -335,6 +422,10 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
             "region": region,
             "is_near_overdue": 45 <= hours < 48,
             "address": row.get("Address") or "",
+            "owners": _build_owners_display(
+                row.get("OwnerUserName") or "",
+                row.get("AssistantName") or "",
+            ),
         })
     return rows
 

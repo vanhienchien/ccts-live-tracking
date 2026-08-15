@@ -168,16 +168,39 @@ function statusColor(status) {
 // Thang màu theo số giờ tồn đọng - PHẢI khớp với _severity_color() bên ccts_data.py
 // (backend chỉ gửi kèm khoá "severity": "red"/"orange"/"green" cho mỗi ticket).
 const SEVERITY_STYLES = {
-    red:    { bg: '#ff9f94', border: '#b32a1b', text: '#b32a1b' },
-    orange: { bg: '#ffca9c', border: '#ce6b15', text: '#ce6b15' },
-    green:  { bg: '#93ffab', border: '#26ac43', text: '#26ac43' },
+    red:    { bg: '#fef2f2', border: '#ef4444', text: '#b91c1c', accent: '#dc2626' },
+    orange: { bg: '#fff7ed', border: '#f97316', text: '#c2410c', accent: '#ea580c' },
+    green:  { bg: '#f0fdf4', border: '#22c55e', text: '#15803d', accent: '#16a34a' },
 };
 
-const STATION_HEADER_COLORS = { red: '#b32a1b', orange: '#ce6b15', green: '#26ac43' };
+const STATION_HEADER_COLORS = { red: '#dc2626', orange: '#ea580c', green: '#16a34a' };
 
 function buildStationPopup(s) {
     const gmapUrl = `https://www.google.com/maps?q=${s.lat},${s.lng}`;
-    const headerColor = STATION_HEADER_COLORS[s.color] || '#3498db';
+    const headerColor = STATION_HEADER_COLORS[s.color] || '#3b82f6';
+    const ticketCount = (s.tickets || []).length;
+
+    // Meta section: address + owners (từ station level, đã xử lý backend)
+    let metaHtml = '';
+    if (s.address || s.owners) {
+        const addressBlock = s.address
+            ? `<div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:${s.owners ? '6px' : '0'};">
+                   <span style="flex-shrink:0;font-size:13px;line-height:1.4;">📍</span>
+                   <span style="font-size:12px;color:#475569;line-height:1.4;word-break:break-word;">${s.address}</span>
+               </div>`
+            : '';
+        const ownersBlock = s.owners
+            ? `<div style="display:flex;gap:6px;align-items:flex-start;">
+                   <span style="flex-shrink:0;font-size:13px;line-height:1.4;">👥</span>
+                   <span style="font-size:11.5px;color:#64748b;line-height:1.4;word-break:break-word;">${s.owners}</span>
+               </div>`
+            : '';
+        metaHtml = `
+        <div style="padding:10px 12px;background:#f8fafc;border-bottom:1px solid #e2e8f0;">
+            ${addressBlock}
+            ${ownersBlock}
+        </div>`;
+    }
 
     const rowsHtml = (s.tickets || []).map((t) => {
         const sColor = statusColor(t.status);
@@ -187,53 +210,66 @@ function buildStationPopup(s) {
         if (t.is_near_overdue) {
             const remaining = Math.max(0, 48 - (t.hours || 0));
             nearOverdueHtml = `
-            <div style="margin-top:5px;padding:4px 8px;background:#2c3e50;color:#ffd166;
-                        border-radius:4px;font-size:11px;font-weight:700;
+            <div style="margin-top:6px;display:inline-flex;align-items:center;gap:4px;
+                        padding:3px 8px;background:#1e293b;color:#fbbf24;
+                        border-radius:6px;font-size:10.5px;font-weight:700;
                         animation:unassigned-pulse 1.5s infinite;">
-                ⏰ Sắp quá hạn - còn ~${remaining.toFixed(1)}h!
+                ⏰ Sắp quá hạn · còn ~${remaining.toFixed(1)}h
             </div>`;
         }
 
         return `
-        <div style="background:${sev.bg};border:1px solid ${sev.border}55;border-left:4px solid ${sev.border};
-                    border-radius:6px;padding:8px 10px;margin-bottom:8px;
-                    box-shadow:0 1px 3px rgba(0,0,0,.06);">
-            <div style="display:flex;justify-content:space-between;align-items:center;
-                        gap:6px;margin-bottom:4px;">
-                <span style="font-weight:700;color:#2c3e50;font-size:12.5px;">${t.cp_id}</span>
-                <span style="background:${sColor};color:#fff;font-size:10px;
-                            padding:2px 8px;border-radius:10px;font-weight:600;white-space:nowrap;">
+        <div style="background:${sev.bg};border:1px solid ${sev.border}40;border-left:3px solid ${sev.accent};
+                    border-radius:8px;padding:10px 11px;margin-bottom:8px;">
+            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:5px;">
+                <span style="font-weight:700;color:#0f172a;font-size:12.5px;letter-spacing:-0.01em;">${t.cp_id}</span>
+                <span style="background:${sColor};color:#fff;font-size:10px;padding:2px 8px;
+                            border-radius:999px;font-weight:600;white-space:nowrap;letter-spacing:0.02em;">
                     ${t.status}
                 </span>
             </div>
-            <div style="color:#999;font-size:11px;margin-bottom:5px;">
-                ${t.model_name} &nbsp;·&nbsp; ID ${t.ticket_id}
-                ${t.creator ? ` &nbsp;·&nbsp; ${t.creator}` : ''}
+            <div style="color:#94a3b8;font-size:11px;margin-bottom:5px;display:flex;flex-wrap:wrap;gap:4px 8px;">
+                <span>${t.model_name || 'N/A'}</span>
+                <span style="color:#cbd5e1;">·</span>
+                <span>ID ${t.ticket_id}</span>
+                ${t.creator ? `<span style="color:#cbd5e1;">·</span><span>${t.creator}</span>` : ''}
             </div>
-            <div style="color:${sev.text};font-size:12px;font-weight:700;margin-bottom:5px;">
-                🕐 ${t.duration}
+            <div style="color:${sev.text};font-size:12px;font-weight:700;margin-bottom:5px;display:flex;align-items:center;gap:4px;">
+                <span style="font-size:13px;">🕐</span> ${t.duration}
             </div>
-            <div style="color:#555;font-size:12px;line-height:1.45;">
-                ${t.description}
+            <div style="color:#334155;font-size:12px;line-height:1.5;">
+                ${t.description || ''}
             </div>
             ${nearOverdueHtml}
         </div>`;
     }).join('');
 
     return `
-    <div style="font-family:'Segoe UI',Arial,sans-serif;width:270px;max-width:82vw;box-sizing:border-box;">
-        <div style="background:${headerColor};margin:-13px -13px 10px -13px;padding:10px 14px;
-                    border-radius:5px 5px 0 0;">
+    <div style="font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+                width:300px;max-width:88vw;box-sizing:border-box;margin:-2px;">
+        <!-- Header -->
+        <div style="background:linear-gradient(135deg, ${headerColor} 0%, ${headerColor}dd 100%);
+                    margin:-14px -14px 0 -14px;padding:12px 14px 11px;
+                    border-radius:10px 10px 0 0;">
             <a href="${gmapUrl}" target="_blank" rel="noopener noreferrer"
-               style="color:#fff;text-decoration:none;font-size:15px;font-weight:700;">
-                📍 ${s.station_code}
+               style="color:#fff;text-decoration:none;font-size:15px;font-weight:700;
+                      letter-spacing:-0.02em;display:inline-flex;align-items:center;gap:5px;">
+                <span style="font-size:14px;">📍</span> ${s.station_code}
             </a>
-            <div style="color:rgba(255,255,255,.92);font-size:12px;margin-top:3px;">
-                🧑‍🔧 ${s.tech_name}
+            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:5px;gap:8px;">
+                <div style="color:rgba(255,255,255,.9);font-size:12px;display:flex;align-items:center;gap:4px;">
+                    <span>🧑‍🔧</span> ${s.tech_name || 'Unassigned'}
+                </div>
+                <div style="background:rgba(255,255,255,.2);color:#fff;font-size:10.5px;font-weight:600;
+                            padding:2px 7px;border-radius:999px;white-space:nowrap;">
+                    ${ticketCount} ticket${ticketCount !== 1 ? 's' : ''}
+                </div>
             </div>
         </div>
-        <div style="max-height:250px;overflow-y:auto;padding-right:4px;margin-right:-4px;">
-            ${rowsHtml}
+        ${metaHtml}
+        <!-- Ticket list -->
+        <div style="max-height:260px;overflow-y:auto;padding:10px 2px 2px 0;margin-right:-4px;">
+            ${rowsHtml || '<div style="padding:16px;text-align:center;color:#94a3b8;font-size:13px;">Không có ticket</div>'}
         </div>
     </div>`;
 }
@@ -502,8 +538,17 @@ function renderTechPanel(data) {
     }
 
     techPanel.innerHTML = `
-        <div class="panel-head-text">
-            <h3>🧑‍🔧 Lọc kỹ thuật viên</h3>
+        <div class="panel-head-text" style="display:flex;align-items:center;justify-content:space-between;gap:8px;">
+            <h3 style="margin:0;">🧑‍🔧 Lọc kỹ thuật viên</h3>
+            <button type="button" id="tech-filter-close" title="Đóng"
+                    style="flex-shrink:0;width:28px;height:28px;border:none;border-radius:8px;
+                           background:#f1f5f9;color:#64748b;font-size:16px;font-weight:700;
+                           cursor:pointer;display:flex;align-items:center;justify-content:center;
+                           line-height:1;transition:background .15s,color .15s;"
+                    onmouseover="this.style.background='#e2e8f0';this.style.color='#0f172a'"
+                    onmouseout="this.style.background='#f1f5f9';this.style.color='#64748b'">
+                ✕
+            </button>
         </div>
         <div class="panel-body">${bodyHtml}</div>
         <div id="tech-filter-actions">

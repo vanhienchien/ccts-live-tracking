@@ -61,7 +61,16 @@ def _station_payload_signature(payload) -> str:
 
 
 def get_current_user(request: Request):
+    """Lấy user hiện tại từ cookie (web) HOẶC header 'Authorization: Bearer
+    <token>' (app di động). Cả 2 đều tra cùng 1 dict SESSIONS - token của
+    app tạo ra ở POST /api/mobile/login cũng nằm trong dict này, nên mọi
+    endpoint hiện có (/api/stations, /api/technicians...) dùng lại được
+    nguyên vẹn, không cần sửa gì thêm."""
     token = request.cookies.get(SESSION_COOKIE_NAME)
+    if not token:
+        auth_header = request.headers.get("authorization") or ""
+        if auth_header.lower().startswith("bearer "):
+            token = auth_header[7:].strip()
     if not token:
         return None
     return SESSIONS.get(token)
@@ -262,6 +271,41 @@ async def login_submit(request: Request, username: str = Form(...), password: st
     response = RedirectResponse("/", status_code=302)
     response.set_cookie(SESSION_COOKIE_NAME, token, httponly=True, samesite="lax", max_age=60 * 60 * 12)
     return response
+
+
+@app.post("/api/mobile/login")
+async def api_mobile_login(request: Request):
+    """Đăng nhập dành cho APP DI ĐỘNG - nhận/trả JSON, KHÔNG redirect và
+    KHÔNG set cookie như /login (dành cho web). Dùng lại đúng
+    users_store.verify_login() nên không cần sửa gì bên users_store.
+
+    Token trả về được lưu vào CHUNG dict SESSIONS với web - nhờ vậy
+    get_current_user() ở trên tự nhận diện được, không cần route/logic
+    riêng cho từng endpoint dữ liệu (/api/stations, /api/technicians...).
+
+    LƯU Ý: token này KHÔNG tự hết hạn (giống hệt cách SESSIONS đang hoạt
+    động cho web hiện tại - chỉ mất khi server restart). Nếu sau này cần
+    "đăng xuất từ xa" 1 thiết bị, thêm hàm xoá theo token hoặc theo
+    username tại đây.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Dữ liệu gửi lên không hợp lệ."}, status_code=400)
+
+    username = (body.get("username") or "").strip()
+    password = (body.get("password") or "").strip()
+    if not username or not password:
+        return JSONResponse({"error": "Vui lòng nhập tên đăng nhập và mật khẩu."}, status_code=400)
+
+    user = users_store.verify_login(username, password)
+    if not user:
+        return JSONResponse({"error": "Sai tên đăng nhập hoặc mật khẩu."}, status_code=401)
+
+    token = uuid.uuid4().hex
+    SESSIONS[token] = user
+
+    return {"status": "ok", "token": token, "user": user}
 
 
 @app.get("/logout")
