@@ -419,47 +419,6 @@ async def api_stats_heatmap(request: Request):
     return payload
 
 
-@app.post("/api/cron/refresh-stats")
-async def api_cron_refresh_stats(request: Request):
-    """Endpoint DÀNH CHO CRON BÊN NGOÀI (Render Cron Job / GitHub Actions /
-    cron-job.org...) gọi tới đúng giờ VN cần cào (vd 00:00). Khác với
-    /api/admin/refresh-stats (cần cookie đăng nhập admin), endpoint này xác
-    thực bằng header 'X-Cron-Secret' so với biến môi trường CRON_SECRET —
-    phù hợp để gọi từ hệ thống lập lịch bên ngoài, không có cookie.
-
-    LÝ DO CẦN ENDPOINT NÀY: nếu Render service đang ở gói free, nó sẽ TỰ
-    NGỦ (dừng hẳn tiến trình) sau ~15 phút không có request HTTP nào — khi
-    đó task `stats_midnight_loop()` đang `asyncio.sleep()` chờ tới 0h cũng
-    bị dừng theo và KHÔNG BAO GIỜ chạy nếu không có ai truy cập đúng lúc.
-    Một cron job bên ngoài gọi vào endpoint này mỗi ngày sẽ tự đánh thức
-    service dậy (Render sẽ khởi động lại khi có request) và đảm bảo báo cáo
-    luôn được cào + upload Drive đúng giờ, không phụ thuộc app có "thức"
-    sẵn hay không.
-    """
-    import os as _os
-
-    cron_secret = _os.environ.get("CRON_SECRET", "").strip()
-    if not cron_secret:
-        return JSONResponse(
-            {"error": "Chưa cấu hình biến môi trường CRON_SECRET trên server."},
-            status_code=500,
-        )
-    if request.headers.get("X-Cron-Secret", "") != cron_secret:
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-
-    try:
-        payload = await stats_data.refresh_stats_cache()
-        return {
-            "status": "ok",
-            "message": f"Đã cập nhật thống kê + báo cáo ({payload.get('total_tickets', 0)} ticket).",
-            "generated_at": payload.get("generated_at"),
-            "total_tickets": payload.get("total_tickets", 0),
-        }
-    except Exception as e:
-        print(f"[cron] Lỗi refresh-stats qua cron: {e!r}")
-        return JSONResponse({"error": str(e)}, status_code=500)
-
-
 @app.post("/api/admin/refresh-stats")
 async def api_admin_refresh_stats(request: Request):
     """Admin: ép cào lại thống kê ngay (không đợi 0h)."""
