@@ -223,8 +223,6 @@ def extract_handling_type_map(additional_df: pd.DataFrame | None) -> dict[str, s
     return out
 
 
-
-
 def _parse_create_time(val) -> datetime | None:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return None
@@ -622,13 +620,10 @@ async def fetch_all_accounts_tickets(start_time=None, end_time=None):
     vòng (KHÔNG giữ CCTS_API_LOCK trong lúc nghỉ, để không chặn ccts_data.py
     cào bản đồ realtime mỗi 15').
 
-    Trả (processed_df, source, meta, closed_enriched_df, bundles) nếu có ít
+    Trả (processed_df, source, meta, closed_enriched_df) nếu có ít
     nhất 1 tài khoản cào được; trả None nếu SAU TỐI ĐA số vòng vẫn không lấy
     được ticket nào từ bất kỳ tài khoản nào (để refresh_stats_cache() giữ
     nguyên cache cũ thay vì ghi đè dữ liệu rỗng).
-
-    bundles = {username: {sheet_name: DataFrame}} — dùng lại cho report
-    hằng ngày (không cào lần 2).
     """
     start_time, end_time, end_date_ex = scrape_time_range()
     print(f"[stats] Khoảng cào [start, end): {start_time} → {end_time} (không gồm {end_date_ex})")
@@ -720,7 +715,7 @@ async def fetch_all_accounts_tickets(start_time=None, end_time=None):
     )
     meta["source"] = source
     print(f"[stats] Sau chuẩn hóa TI: {len(processed)} ticket (source={source})")
-    return processed, source, meta, closed_enriched, bundles
+    return processed, source, meta, closed_enriched
 
 
 def tickets_df_to_records(df: pd.DataFrame) -> list:
@@ -809,53 +804,12 @@ def _build_payload(df, source, meta, closed_df) -> dict:
     }
 
 
-_REPORT_TIMEOUT_SECONDS = int(os.environ.get("REPORT_TIMEOUT_SECONDS", "600"))  # 10 phút
-
-
-async def _run_daily_report_safe(bundles: dict) -> None:
-    """Xuất Excel + upload Drive từ bundles vừa cào. Lỗi report không làm
-    hỏng cache thống kê.
-
-    QUAN TRỌNG: run_daily_report_from_bundles() là hàm ĐỒNG BỘ (blocking) —
-    tạo file Excel + gọi Google Drive API. Nếu gọi thẳng nó trong 1 hàm
-    async như trước đây, nó sẽ CHIẾM DỤNG event loop chính của toàn bộ
-    server: trong lúc nó chạy (và đặc biệt nếu nó bị TREO, vd do OAuth
-    refresh token lỗi), server sẽ ngưng phản hồi MỌI request (HTTP,
-    WebSocket...) chứ không chỉ riêng phần báo cáo — khiến cả app "đơ" tới
-    khi Render tự restart, và lần cào thống kê kế tiếp sẽ lặp lại y hệt.
-
-    Vì vậy: chạy nó trong 1 thread riêng (asyncio.to_thread) để KHÔNG chặn
-    event loop, và giới hạn thời gian bằng asyncio.wait_for — nếu quá
-    _REPORT_TIMEOUT_SECONDS thì tự huỷ chờ (thread nền có thể vẫn chạy dở,
-    nhưng server không còn bị treo theo nó nữa) và log rõ ràng để biết mà
-    kiểm tra Google Drive/token thay vì im lặng."""
-    if not bundles:
-        return
-    try:
-        from report import run_daily_report_from_bundles
-        print("[stats] Bắt đầu tạo báo cáo Excel hằng ngày từ dữ liệu vừa cào...")
-        await asyncio.wait_for(
-            asyncio.to_thread(run_daily_report_from_bundles, bundles),
-            timeout=_REPORT_TIMEOUT_SECONDS,
-        )
-        print("[stats] Báo cáo Excel + Drive hoàn tất.")
-    except asyncio.TimeoutError:
-        print(
-            f"[stats] ⚠️ Tạo báo cáo Excel quá {_REPORT_TIMEOUT_SECONDS}s — đã HUỶ CHỜ để "
-            "không treo server (thread nền có thể vẫn chạy dở). Rất có thể do Google Drive/"
-            "OAuth token bị kẹt — kiểm tra lại GOOGLE_TOKEN_JSON."
-        )
-    except Exception as e:
-        print(f"[stats] ⚠️ Lỗi khi tạo báo cáo Excel (cache stats vẫn giữ): {e!r}")
-
-
 async def _refresh_stats_cache_impl() -> dict:
     """Phần thực thi thật sự (chạy dưới STATS_REFRESH_LOCK).
 
     Luồng thành công:
       1) Cào 2 account (60 ngày) → bundles thô
       2) Chuẩn hoá → cache JSON + charts (trang /stats)
-      3) Dùng lại bundles → Excel báo cáo + upload Drive
     """
     result = await fetch_all_accounts_tickets()
 
@@ -898,7 +852,7 @@ async def _refresh_stats_cache_impl() -> dict:
         print(f"[stats] Cache v2 (sample fallback): TI={meta.get('row_count', 0)}")
         return payload
 
-    df, source, meta, closed_df, bundles = result
+    df, source, meta, closed_df = result
     payload = _build_payload(df, source, meta, closed_df)
     payload = _prebuild_chart_payloads(payload)
     save_stats_cache(payload)
@@ -907,15 +861,12 @@ async def _refresh_stats_cache_impl() -> dict:
         f"closed30d={meta.get('closed_count', 0)}, source={source}"
     )
 
-    # Báo cáo Excel hằng ngày — dùng chung dữ liệu vừa cào (không cào lại).
-    await _run_daily_report_safe(bundles)
-
     return payload
 
 
 async def refresh_stats_cache(**_kwargs) -> dict:
     """Cào 2 tài khoản cố định, 60 ngày (không gồm hôm nay) → cache v2
-    (tickets + closed) + báo cáo Excel/Drive.
+    (tickets + closed).
 
     Dùng STATS_REFRESH_LOCK kiểu "single-flight": nếu đã có 1 lượt cào khác
     đang chạy (khởi động / lịch 0h / admin bấm tay xảy ra gần nhau), lượt
@@ -991,7 +942,7 @@ def ensure_chart_in_cache(chart_key: str):
     charts[chart_key] = payload
     cache["charts"] = charts
     save_stats_cache(cache)
-    print(f"[stats] ensure_chart: đã bổ sung {chart_key} vào cache")
+    print(f"[stats] ensure_chart: đã bổ theo {chart_key} vào cache")
     return payload
 
 

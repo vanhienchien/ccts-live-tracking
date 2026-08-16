@@ -22,7 +22,7 @@ import ccts_data
 import stats_data
 from ccts_data import get_static_data, filter_stations_for_user, filter_tech_by_region_for_user
 from location_hub import hub
-from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS, TRACCAR_TOKEN
+from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS
 import os
 
 # auto | 1 | 0 — local test: set STATS_REFRESH_ON_STARTUP=0 để chỉ dùng cache có sẵn
@@ -554,19 +554,45 @@ def _tech_stats_for_user(user_info):
     return _latest_tech_stats.get(full_name, {"closed_yesterday": 0, "closed_today": 0, "open_count": 0})
 
 
-@app.get("/api/traccar")
-async def api_traccar(id: str, lat: float, lon: float, accuracy: float = None, token: str = None):
-    if TRACCAR_TOKEN and token != TRACCAR_TOKEN:
-        return JSONResponse({"error": "invalid token"}, status_code=403)
+@app.post("/api/location")
+async def api_mobile_location(request: Request):
+    """Nhận vị trí GPS gửi lên TỪ APP DI ĐỘNG CCTS (Flutter) - đây là NGUỒN
+    VỊ TRÍ DUY NHẤT của kỹ thuật viên. Đã bỏ hẳn app Traccar Client và
+    endpoint GET /api/traccar cũ (dùng 1 token tĩnh dùng chung + tham số
+    'id' tự khai, ai biết token cũng gọi được) - endpoint này xác thực theo
+    ĐÚNG người dùng đang đăng nhập trên app (Bearer token từ
+    POST /api/mobile/login, tra qua get_current_user() y hệt mọi endpoint
+    dữ liệu khác), an toàn hơn và không cần quản lý thêm 1 token riêng.
 
-    user_info = users_store.get_user_info(id)
-    if not user_info:
-        return JSONResponse({"error": f"Không tìm thấy tài khoản '{id}'"}, status_code=404)
+    Gọi hub.update_location() - dữ liệu đi thẳng vào LocationHub (chỉ lưu
+    RAM, KHÔNG ghi Google Sheets) và được broadcast qua WebSocket cho các
+    client (web/app) khác đang được phép xem.
+    """
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Dữ liệu gửi lên không hợp lệ."}, status_code=400)
+
+    try:
+        lat = float(body.get("lat"))
+        lng = float(body.get("lng"))
+    except (TypeError, ValueError):
+        return JSONResponse({"error": "Thiếu hoặc sai định dạng lat/lng."}, status_code=400)
+
+    accuracy = body.get("accuracy")
+    try:
+        accuracy = float(accuracy) if accuracy is not None else None
+    except (TypeError, ValueError):
+        accuracy = None
 
     await hub.update_location(
-        id, user_info, lat, lon, accuracy,
+        user["username"], user, lat, lng, accuracy,
         stations=_latest_station_payload["stations"],
-        tech_stats=_tech_stats_for_user(user_info),
+        tech_stats=_tech_stats_for_user(user),
     )
     return {"status": "ok"}
 
@@ -624,11 +650,13 @@ async def ws_location(websocket: WebSocket):
 
         # LƯU Ý: đã bỏ nhận vị trí từ trình duyệt (web) qua WebSocket để tránh
         # tốn dung lượng/pin của người dùng khi mở web. Vị trí giờ CHỈ đến từ
-        # app Traccar Client, qua endpoint GET /api/traccar bên dưới. Kết nối
-        # WebSocket ở đây chỉ còn dùng để: nhận snapshot ban đầu, nhận cập
-        # nhật trạm (stations_update) và presence - không còn nhận/gửi vị trí
-        # từ phía client nữa. Nếu client cũ vẫn gửi message "location" lên,
-        # server sẽ bỏ qua (không xử lý, không lưu, không broadcast).
+        # 1 nguồn HTTP duy nhất (không qua WebSocket này): app di động CCTS
+        # (Flutter) qua POST /api/location - đã bỏ hẳn app Traccar Client và
+        # endpoint /api/traccar cũ. Kết nối WebSocket ở đây chỉ còn dùng để:
+        # nhận snapshot ban đầu, nhận cập nhật trạm (stations_update) và
+        # presence - không còn nhận/gửi vị trí từ phía client nữa. Nếu client
+        # cũ vẫn gửi message "location" lên, server sẽ bỏ qua (không xử lý,
+        # không lưu, không broadcast).
         while True:
             try:
                 await websocket.receive_json()

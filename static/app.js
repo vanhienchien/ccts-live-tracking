@@ -14,6 +14,30 @@ L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
 }).addTo(map);
 
 const stationLayer = L.layerGroup().addTo(map);
+
+// Popup trạm: chỉ 1 thanh cuộn dọc bên trong danh sách ticket, không scroll ngang / scroll kép
+(function injectStationPopupCSS() {
+    if (document.getElementById('ccts-station-popup-css')) return;
+    const style = document.createElement('style');
+    style.id = 'ccts-station-popup-css';
+    style.textContent = `
+      .leaflet-popup.station-popup .leaflet-popup-content-wrapper {
+        overflow: visible !important;
+        border-radius: 10px;
+        box-shadow: 0 8px 28px rgba(15,23,42,.18);
+      }
+      .leaflet-popup.station-popup .leaflet-popup-content {
+        margin: 12px 14px 10px !important;
+        overflow: visible !important;
+        min-width: 0 !important;
+      }
+      .leaflet-popup.station-popup .leaflet-popup-content::-webkit-scrollbar { display: none; }
+      .ccts-station-popup { overflow: hidden; }
+      .ccts-station-popup * { box-sizing: border-box; }
+    `;
+    document.head.appendChild(style);
+})();
+
 const staffMarkers = {}; // username -> { marker, wrenchMarker }
 
 let allStations = [];          // cache toàn bộ trạm nhận được gần nhất (đã lọc theo quyền ở server)
@@ -168,110 +192,197 @@ function statusColor(status) {
 // Thang màu theo số giờ tồn đọng - PHẢI khớp với _severity_color() bên ccts_data.py
 // (backend chỉ gửi kèm khoá "severity": "red"/"orange"/"green" cho mỗi ticket).
 const SEVERITY_STYLES = {
-    red:    { bg: '#fef2f2', border: '#ef4444', text: '#b91c1c', accent: '#dc2626' },
-    orange: { bg: '#fff7ed', border: '#f97316', text: '#c2410c', accent: '#ea580c' },
-    green:  { bg: '#f0fdf4', border: '#22c55e', text: '#15803d', accent: '#16a34a' },
+    red:    { bg: '#fecaca', border: '#ef4444', text: '#991b1b', accent: '#dc2626' },
+    orange: { bg: '#fed7aa', border: '#f97316', text: '#9a3412', accent: '#ea580c' },
+    green:  { bg: '#bbf7d0', border: '#22c55e', text: '#166534', accent: '#16a34a' },
 };
 
 const STATION_HEADER_COLORS = { red: '#dc2626', orange: '#ea580c', green: '#16a34a' };
 
+function copyText(text, btnEl) {
+    if (!text) return;
+    const done = () => {
+        if (!btnEl) return;
+        const prev = btnEl.textContent;
+        btnEl.textContent = '✓';
+        btnEl.style.color = '#16a34a';
+        setTimeout(() => {
+            btnEl.textContent = prev;
+            btnEl.style.color = '';
+        }, 1200);
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done).catch(() => {
+            // fallback
+            const ta = document.createElement('textarea');
+            ta.value = text;
+            ta.style.position = 'fixed';
+            ta.style.left = '-9999px';
+            document.body.appendChild(ta);
+            ta.select();
+            try { document.execCommand('copy'); done(); } catch (_) {}
+            document.body.removeChild(ta);
+        });
+    } else {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        try { document.execCommand('copy'); done(); } catch (_) {}
+        document.body.removeChild(ta);
+    }
+}
+
+// Expose for inline onclick in popup HTML
+window.__cctsCopy = copyText;
+
 function buildStationPopup(s) {
     const gmapUrl = `https://www.google.com/maps?q=${s.lat},${s.lng}`;
     const headerColor = STATION_HEADER_COLORS[s.color] || '#3b82f6';
-    const ticketCount = (s.tickets || []).length;
+    const tickets = s.tickets || [];
+    const stationCode = s.station_code || '';
 
-    // Meta section: address + owners (từ station level, đã xử lý backend)
-    let metaHtml = '';
-    if (s.address || s.owners) {
-        const addressBlock = s.address
-            ? `<div style="display:flex;gap:6px;align-items:flex-start;margin-bottom:${s.owners ? '6px' : '0'};">
-                   <span style="flex-shrink:0;font-size:13px;line-height:1.4;">📍</span>
-                   <span style="font-size:12px;color:#475569;line-height:1.4;word-break:break-word;">${s.address}</span>
-               </div>`
-            : '';
-        const ownersBlock = s.owners
-            ? `<div style="display:flex;gap:6px;align-items:flex-start;">
-                   <span style="flex-shrink:0;font-size:13px;line-height:1.4;">👥</span>
-                   <span style="font-size:11.5px;color:#64748b;line-height:1.4;word-break:break-word;">${s.owners}</span>
-               </div>`
-            : '';
-        metaHtml = `
-        <div style="padding:10px 12px;background:#f8fafc;border-bottom:1px solid #e2e8f0;">
-            ${addressBlock}
-            ${ownersBlock}
-        </div>`;
-    }
+    const esc = v => String(v ?? '')
+        .replace(/&/g,'&amp;')
+        .replace(/</g,'&lt;')
+        .replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;')
+        .replace(/'/g,'&#039;');
 
-    const rowsHtml = (s.tickets || []).map((t) => {
-        const sColor = statusColor(t.status);
+    const address = s.address ? `
+        <div class="ccts-popup-address">
+            <span>📍</span>
+            <span>${esc(s.address)}</span>
+        </div>` : '';
+
+    const rows = tickets.map(t => {
         const sev = SEVERITY_STYLES[t.severity] || SEVERITY_STYLES.green;
+        const color = statusColor(t.status);
+        const cp = t.cp_id || '';
 
-        let nearOverdueHtml = '';
-        if (t.is_near_overdue) {
-            const remaining = Math.max(0, 48 - (t.hours || 0));
-            nearOverdueHtml = `
-            <div style="margin-top:6px;display:inline-flex;align-items:center;gap:4px;
-                        padding:3px 8px;background:#1e293b;color:#fbbf24;
-                        border-radius:6px;font-size:10.5px;font-weight:700;
-                        animation:unassigned-pulse 1.5s infinite;">
-                ⏰ Sắp quá hạn · còn ~${remaining.toFixed(1)}h
-            </div>`;
-        }
+        const overdue = t.is_near_overdue ? `
+            <div style="
+                margin-top:6px;
+                display:inline-flex;
+                align-items:center;
+                gap:4px;
+                padding:3px 8px;
+                background:#1e293b;
+                color:#fbbf24;
+                border-radius:6px;
+                font-size:10.5px;
+                font-weight:700;
+                animation:unassigned-pulse 1.5s infinite;">
+                ⏰ Sắp quá hạn · còn ~${Math.max(0, 48 - Number(t.hours || 0)).toFixed(1)}h
+            </div>` : '';
+
+        const owners = t.owners ? `
+            <div class="ccts-ticket-owner">
+                👥 <span>${esc(t.owners)}</span>
+            </div>` : '';
 
         return `
-        <div style="background:${sev.bg};border:1px solid ${sev.border}40;border-left:3px solid ${sev.accent};
-                    border-radius:8px;padding:10px 11px;margin-bottom:8px;">
-            <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:5px;">
-                <span style="font-weight:700;color:#0f172a;font-size:12.5px;letter-spacing:-0.01em;">${t.cp_id}</span>
-                <span style="background:${sColor};color:#fff;font-size:10px;padding:2px 8px;
-                            border-radius:999px;font-weight:600;white-space:nowrap;letter-spacing:0.02em;">
-                    ${t.status}
-                </span>
-            </div>
-            <div style="color:#94a3b8;font-size:11px;margin-bottom:5px;display:flex;flex-wrap:wrap;gap:4px 8px;">
-                <span>${t.model_name || 'N/A'}</span>
-                <span style="color:#cbd5e1;">·</span>
-                <span>ID ${t.ticket_id}</span>
-                ${t.creator ? `<span style="color:#cbd5e1;">·</span><span>${t.creator}</span>` : ''}
-            </div>
-            <div style="color:${sev.text};font-size:12px;font-weight:700;margin-bottom:5px;display:flex;align-items:center;gap:4px;">
-                <span style="font-size:13px;">🕐</span> ${t.duration}
-            </div>
-            <div style="color:#334155;font-size:12px;line-height:1.5;">
-                ${t.description || ''}
-            </div>
-            ${nearOverdueHtml}
-        </div>`;
+            <div class="ccts-ticket"
+                 style="background:${sev.bg};
+                        border-color:${sev.border}55;
+                        border-left-color:${sev.accent}">
+
+                <div class="ccts-ticket-top">
+                    <span class="ccts-cpid">
+                        <span class="ccts-cpid-text">${esc(cp)}</span>
+                        <button class="ccts-ticket-copy"
+                            onclick="event.stopPropagation();window.__cctsCopy('${cp.replace(/'/g,"\\'")}',this)">
+                            📋
+                        </button>
+                    </span>
+
+                    <span class="ccts-status" style="background:${color}">
+                        ${esc(t.status)}
+                    </span>
+                </div>
+
+                <div class="ccts-ticket-meta">
+                    ${esc(t.model_name || 'N/A')}
+                    · ID ${esc(t.ticket_id || '')}
+                    ${t.creator ? ` · ${esc(t.creator)}` : ''}
+                </div>
+
+                <div class="ccts-ticket-duration" style="color:${sev.text}">
+                    🕐 ${esc(t.duration || '')}
+                </div>
+
+                <div class="ccts-ticket-description">
+                    ${esc(t.description || '')}
+                </div>
+
+                ${owners}
+                ${overdue}
+            </div>`;
     }).join('');
 
     return `
-    <div style="font-family:Inter,system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
-                width:300px;max-width:88vw;box-sizing:border-box;margin:-2px;">
-        <!-- Header -->
-        <div style="background:linear-gradient(135deg, ${headerColor} 0%, ${headerColor}dd 100%);
-                    margin:-14px -14px 0 -14px;padding:12px 14px 11px;
-                    border-radius:10px 10px 0 0;">
-            <a href="${gmapUrl}" target="_blank" rel="noopener noreferrer"
-               style="color:#fff;text-decoration:none;font-size:15px;font-weight:700;
-                      letter-spacing:-0.02em;display:inline-flex;align-items:center;gap:5px;">
-                <span style="font-size:14px;">📍</span> ${s.station_code}
-            </a>
-            <div style="display:flex;align-items:center;justify-content:space-between;margin-top:5px;gap:8px;">
-                <div style="color:rgba(255,255,255,.9);font-size:12px;display:flex;align-items:center;gap:4px;">
-                    <span>🧑‍🔧</span> ${s.tech_name || 'Unassigned'}
+        <div class="ccts-station-popup">
+
+            <div class="ccts-popup-header"
+                 style="background:linear-gradient(135deg,${headerColor},${headerColor}E8)">
+
+                <div class="ccts-station-row">
+                    <a href="${gmapUrl}"
+                       target="_blank"
+                       rel="noopener noreferrer"
+                       class="ccts-station-link">
+
+                        <span class="ccts-station-code">
+                            ${esc(stationCode)}
+                        </span>
+
+                        <button class="ccts-copy-btn"
+                            title="Copy mã trạm"
+                            onclick="
+                                event.preventDefault();
+                                event.stopPropagation();
+                                window.__cctsCopy(
+                                    '${stationCode.replace(/'/g,"\\'")}',
+                                    this
+                                )">
+
+                            <svg width="13" height="13"
+                                 viewBox="0 0 24 24"
+                                 fill="none"
+                                 stroke="currentColor"
+                                 stroke-width="2"
+                                 stroke-linecap="round"
+                                 stroke-linejoin="round">
+                                <rect x="9" y="9" width="13" height="13" rx="2"/>
+                                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>
+                            </svg>
+                        </button>
+                    </a>
                 </div>
-                <div style="background:rgba(255,255,255,.2);color:#fff;font-size:10.5px;font-weight:600;
-                            padding:2px 7px;border-radius:999px;white-space:nowrap;">
-                    ${ticketCount} ticket${ticketCount !== 1 ? 's' : ''}
+
+                <div class="ccts-tech-row">
+                    <span class="ccts-tech-icon">🧑‍🔧</span>
+
+                    <span class="ccts-tech-name">
+                        ${esc(s.tech_name || 'Unassigned')}
+                    </span>
+
+                    <span class="ccts-ticket-count">
+                        ${tickets.length} ${tickets.length === 1 ? 'ticket' : 'tickets'}
+                    </span>
                 </div>
+
             </div>
-        </div>
-        ${metaHtml}
-        <!-- Ticket list -->
-        <div style="max-height:260px;overflow-y:auto;padding:10px 2px 2px 0;margin-right:-4px;">
-            ${rowsHtml || '<div style="padding:16px;text-align:center;color:#94a3b8;font-size:13px;">Không có ticket</div>'}
-        </div>
-    </div>`;
+
+            ${address}
+
+            <div class="ccts-popup-scroll">
+                ${rows || '<div style="padding:18px;text-align:center;color:#94a3b8">Không có ticket</div>'}
+            </div>
+
+        </div>`;
 }
 
 // Vẽ marker trạm dựa trên allStations + bộ lọc kỹ thuật viên hiện tại (selectedTechs)
@@ -292,7 +403,7 @@ function applyStationFilter() {
         const marker = L.marker([s.lat, s.lng], { icon });
         // Hàm callback: Leaflet chỉ gọi buildStationPopup(s) khi popup thực sự
         // được mở, không tốn CPU dựng HTML sẵn cho toàn bộ trạm mỗi lần vẽ lại.
-        marker.bindPopup(() => buildStationPopup(s), { maxWidth: 340, maxHeight: 360, className: 'station-popup' });
+        marker.bindPopup(() => buildStationPopup(s), { maxWidth: 340, className: 'station-popup' });
         marker._stationCode = s.station_code;
         marker.addTo(stationLayer);
     });

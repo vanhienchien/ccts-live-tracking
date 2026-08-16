@@ -3,9 +3,14 @@ Quản lý vị trí trực tiếp (in-memory) & phát (broadcast) qua WebSocket
 
 QUAN TRỌNG: vị trí KHÔNG được lưu xuống Google Sheets nữa - đây là dữ liệu tức
 thời, chỉ tồn tại trong bộ nhớ khi server đang chạy. Nếu server khởi động lại,
-vị trí sẽ được cập nhật lại ngay khi có ping tiếp theo (từ trình duyệt hoặc từ
-app Traccar Client). Lựa chọn này giúp hệ thống đơn giản và tránh gọi Google
-Sheets API dồn dập khi có nhiều người cùng di chuyển liên tục.
+vị trí sẽ được cập nhật lại ngay khi có ping tiếp theo từ app di động CCTS.
+Lựa chọn này giúp hệ thống đơn giản và tránh gọi Google Sheets API dồn dập
+khi có nhiều người cùng di chuyển liên tục.
+
+Nguồn vị trí DUY NHẤT: app di động CCTS (Flutter, chính người dùng đăng
+nhập) -> POST /api/location (main.py) -> hub.update_location() ở dưới. Đã bỏ
+hẳn app Traccar Client / endpoint /api/traccar cũ - kỹ thuật viên không cần
+cài thêm app nào khác ngoài CCTS.
 """
 
 import asyncio

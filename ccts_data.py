@@ -69,7 +69,15 @@ def _compact_account_list(raw_str, keep_es_its_only=False):
     names = [n.strip() for n in str(raw_str).split(";") if n.strip()]
     names = [n for n in names if n.lower() not in _CREATOR_ACCOUNTS]
     if keep_es_its_only:
-        names = [n for n in names if n.upper().startswith(("ES", "ITS"))]
+        # Giữ account bắt đầu ES/ITS hoặc chứa Esmanager/Itsmanager (không phân biệt hoa thường)
+        def _keep(n):
+            u = n.upper()
+            return (
+                u.startswith(("ES", "ITS"))
+                or "ESMANAGER" in u
+                or "ITSMANAGER" in u
+            )
+        names = [n for n in names if _keep(n)]
     if not names:
         return ""
 
@@ -329,18 +337,18 @@ def _build_station_payload(
 
             group_sorted = group.sort_values("Hours", ascending=False)
 
-            # Lấy address + owners từ ticket tồn lâu nhất (đại diện cho trạm)
+            # Address trạm lấy từ ticket tồn lâu nhất
             top_row = group_sorted.iloc[0]
             station_address = str(top_row.get("Address") or "").strip()
-            station_owners = _build_owners_display(
-                top_row.get("OwnerUserName") or "",
-                top_row.get("AssistantName") or "",
-            )
 
             tickets_out = []
             for _, row in group_sorted.iterrows():
                 hours = float(row["Hours"])
                 severity_key, _, _, _ = _severity_color(hours)
+                ticket_owners = _build_owners_display(
+                    row.get("OwnerUserName") or "",
+                    row.get("AssistantName") or "",
+                )
                 tickets_out.append({
                     "ticket_id": row["Ticket ID"],
                     "cp_id": str(row["Charge Point ID"]),
@@ -353,6 +361,7 @@ def _build_station_payload(
                     "description": row["Problem Description"],
                     "is_near_overdue": 45 <= hours < 48,
                     "address": str(row.get("Address") or "").strip(),
+                    "owners": ticket_owners,
                 })
 
             stations.append({
@@ -371,7 +380,6 @@ def _build_station_payload(
                     ((group_sorted["Hours"] >= 45) & (group_sorted["Hours"] < 48)).any()
                 ),
                 "address": station_address,
-                "owners": station_owners,
             })
 
     return {
