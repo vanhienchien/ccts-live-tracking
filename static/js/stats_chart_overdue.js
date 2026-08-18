@@ -697,8 +697,11 @@
               },
               afterBody: (items) => {
                 const i = items[0].dataIndex;
+                // region/tech/top_od: population = ticket TẠO 30 ngày (mở+đóng).
+                // top_eff/top_vol: population = ticket ĐÃ ĐÓNG 30 ngày (như cũ).
+                const popLabel = (currentView === "top_eff" || currentView === "top_vol") ? "Đã đóng" : "Tạo mới";
                 const lines = [
-                  "Đã đóng: " + (closed[i] ?? "—"),
+                  popLabel + ": " + (closed[i] ?? "—"),
                   "Overdue: " + (overdue[i] ?? "—"),
                   "OD chủ quan (VT/hẹn): " + (overdueSubj[i] ?? "—"),
                 ];
@@ -760,14 +763,14 @@
   }
 
   function renderKPIs(payload) {
-    const totalC = payload.total_closed || 0;
+    const totalC = payload.total_closed || 0; // = tổng ticket TẠO trong 30 ngày (mọi trạng thái)
     const totalO = payload.total_overdue || 0;
     const rate = payload.overall_rate_pct != null ? payload.overall_rate_pct : 0;
     setKPIs([
-      { label: "Đã đóng", value: totalC.toLocaleString("vi-VN"), sub: "30 ngày (Close Time)" },
-      { label: "Overdue", value: totalO.toLocaleString("vi-VN"), sub: "trong ticket đã đóng" },
+      { label: "Tạo mới", value: totalC.toLocaleString("vi-VN"), sub: "30 ngày (Create Time), mở+đóng" },
+      { label: "Overdue", value: totalO.toLocaleString("vi-VN"), sub: "trong ticket tạo 30 ngày" },
       { label: "Tỷ lệ OD", value: rate + "%", sub: "toàn bộ filter" },
-      { label: "Closed (filter)", value: (payload.counts && payload.counts[Core.cpType]) || totalC, sub: Core.cpType.toUpperCase() },
+      { label: "Tạo mới (filter)", value: (payload.counts && payload.counts[Core.cpType]) || totalC, sub: Core.cpType.toUpperCase() },
     ]);
   }
 
@@ -1270,19 +1273,19 @@
     });
     if (view === "region") {
       refs.title.textContent = "Tỷ lệ Overdue theo khu vực";
-      refs.desc.innerHTML = "Thanh = % OD · <strong>vạch + số</strong> = số ticket OD thực (đã trừ OD chủ quan VT/hẹn) · 30 ngày";
+      refs.desc.innerHTML = "Thanh = % OD · <strong>vạch + số</strong> = số ticket OD thực (đã trừ OD chủ quan VT/hẹn) · ticket <strong>tạo trong 30 ngày</strong> (mở lẫn đóng)";
     } else if (view === "tech") {
       refs.title.textContent = "% Overdue theo KT · " + selectedRegion;
-      refs.desc.innerHTML = "Kỹ thuật viên khu vực <strong>" + selectedRegion + "</strong> · vạch + số = OD thực (trừ VT/hẹn) · 30 ngày";
+      refs.desc.innerHTML = "Kỹ thuật viên khu vực <strong>" + selectedRegion + "</strong> · vạch + số = OD thực (trừ VT/hẹn) · ticket <strong>tạo trong 30 ngày</strong> (mở lẫn đóng)";
     } else if (view === "top_od") {
       refs.title.textContent = "Top 10 KT — tỷ lệ Overdue cao nhất";
-      refs.desc.innerHTML = "Toàn công ty · tối thiểu 3 ticket đóng · vạch + số = OD thực (trừ VT/hẹn) · 30 ngày";
+      refs.desc.innerHTML = "Toàn công ty · tối thiểu 3 ticket tạo trong 30 ngày · vạch + số = OD thực (trừ VT/hẹn) · mở lẫn đóng";
     } else if (view === "top_eff") {
       refs.title.textContent = "Top 10 KT — hiệu quả cao nhất";
-      refs.desc.innerHTML = "Hiệu quả = 100% − % Overdue · tối thiểu 3 ticket đóng";
+      refs.desc.innerHTML = "Hiệu quả = % ticket đã đóng có SLA Ontime · tối thiểu 3 ticket đóng · 30 ngày (Close Time)";
     } else if (view === "top_vol") {
       refs.title.textContent = "Top 10 KT — xử lý nhiều sự cố nhất";
-      refs.desc.innerHTML = "Cột = tổng đã đóng · <strong>vạch nâu + số</strong> = ticket <strong>Tại trạm</strong> · 30 ngày";
+      refs.desc.innerHTML = "Cột = tổng đã đóng · <strong>vạch nâu + số</strong> = ticket <strong>Tại trạm</strong> · 30 ngày (Close Time)";
     } else if (view === "resolution") {
       refs.title.textContent = "Thời gian xử lý · " + resolutionRegion;
       refs.desc.innerHTML = "Boxplot ngang · <strong>Y = KT</strong> · <strong>X = ngày</strong> (0–30, outlier xa hơn = chấm đỏ + …) · Close − Create · closed 30 ngày";
@@ -1291,7 +1294,7 @@
       const mx = (currentPayload && currentPayload.performance_matrix) || {};
       refs.desc.innerHTML =
         "Mỗi điểm = 1 KT · kích thước ∝ khối lượng · X = <strong>" + (mx.x_axis_label || "Ticket Tại trạm") +
-        "</strong> · Y = % OD · đường đứt = median (vol " + (mx.median_volume ?? "—") +
+        "</strong> (đã đóng, 30 ngày) · Y = % OD (ticket <strong>tạo trong 30 ngày</strong>) · đường đứt = median (vol " + (mx.median_volume ?? "—") +
         " · OD " + (mx.median_rate_pct ?? "—") + "%) · tên chỉ hiện khi OD&gt;30% và volume&gt;300 · tối thiểu " +
         (mx.min_closed || 3) + " ticket đóng";
     }
@@ -1322,7 +1325,8 @@
     Core.setSourceBadge(payload.source === "sample" ? "Dữ liệu mẫu" : "Cache");
     Core.setGeneratedAt(payload.generated_at);
     refs.sourceNote.textContent =
-      "Closed 30d · Events: Pending for local team close · " + (payload.generated_at || "");
+      "Overdue: ticket tạo 30d (mở+đóng) · Hiệu suất/khối lượng: closed 30d (Events: Pending for local team close) · " +
+      (payload.generated_at || "");
   }
 
   async function load() {
@@ -1372,7 +1376,7 @@
         <div class="header-main">
           <h2 class="chart-title">Tỷ lệ Overdue</h2>
           <div class="desc chart-desc">
-            Ticket đã đóng (Events → <strong>Pending for local team close</strong>) · <strong>30 ngày</strong> ·
+            Ticket <strong>tạo trong 30 ngày</strong> (mở lẫn đóng), đang ở SLA <strong>Overdue</strong> ·
             màu theo % OD · <strong>vạch + số</strong> = số ticket OD thực (đã trừ OD chủ quan VT/hẹn)
           </div>
         </div>

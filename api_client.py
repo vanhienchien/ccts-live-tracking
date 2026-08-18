@@ -159,6 +159,106 @@ class CCTSClient:
         return res_data
 
     # ------------------------------------------------------------------
+    # Tra cứu chi tiết ticket (search + lịch sử trạng thái) — dùng để làm
+    # giàu dữ liệu cho các ticket "Open" đang overdue trên bản đồ.
+    # ------------------------------------------------------------------
+    async def get_ticket_follow_records(self, ticket_pk, page_num=1, page_size=10):
+        """Lấy lịch sử xử lý (follow record) thô của 1 ticket.
+        Endpoint thật: POST /ccts/cctsTicketHistory/list
+        Payload: {"cctsTicketPk": ..., "page": {"pageNum":1,"pageSize":10}, "token": ...}
+        ("token" được _post tự gắn vào, không cần truyền tay)."""
+        payload = {
+            "cctsTicketPk": ticket_pk,
+            "page": {"pageNum": page_num, "pageSize": page_size},
+        }
+        return await self._post("/ccts/cctsTicketHistory/list", payload)
+
+    async def get_ticket_timeline(self, ticket_pk):
+        """
+        Lấy danh sách lịch sử xử lý của Ticket và parse nội dung JSON trong 'content'
+        thành cấu trúc: followRecordStatus, followRecordContent, createTime.
+        """
+        res = await self.get_ticket_follow_records(ticket_pk)
+        data = res.get("data", {})
+        records = data.get("list", []) if isinstance(data, dict) else []
+        if not isinstance(records, list):
+            records = data.get("records", []) if isinstance(data, dict) else []
+
+        timeline = []
+        for item in records:
+            create_time = item.get("createTime", "")
+            raw_content = item.get("content", "")
+            status = None
+            content_text = ""
+            if raw_content:
+                try:
+                    content_dict = json.loads(raw_content)
+                    status = content_dict.get("followRecordStatus")
+                    content_text = content_dict.get("followRecordContent", "")
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            # Nếu không tìm thấy followRecordStatus (hoặc content rỗng), đây là bản ghi tạo ticket ban đầu
+            if not status:
+                timeline.append({
+                    "followRecordStatus": "Open",
+                    "createTime": create_time,
+                })
+            else:
+                entry = {
+                    "followRecordStatus": status,
+                    "createTime": create_time,
+                }
+                if content_text:
+                    entry["followRecordContent"] = content_text
+                timeline.append(entry)
+        return timeline
+
+    async def search_ticket(self, ticket_name_or_id):
+        """
+        Tìm kiếm ticket theo ID hoặc Name, sau đó tự động lấy danh sách
+        lịch sử trạng thái (timeline) đã được bóc tách dữ liệu.
+        """
+        endpoint = "/ccts/cctsTicket/findCCTSTicket"
+        payload_by_id = {
+            "page": {"pageNum": 1, "pageSize": 10},
+            "cctsTicketId": ticket_name_or_id,
+            "timezoneOffset": 420,
+        }
+        res_id = await self._post(endpoint, payload_by_id)
+        data_id = res_id.get("data", {})
+        list_id = data_id.get("list", []) if isinstance(data_id, dict) else data_id
+        if not isinstance(list_id, list):
+            list_id = data_id.get("records", [])
+
+        ticket_info = None
+        if list_id:
+            ticket_info = list_id[0]
+        else:
+            payload_by_name = {
+                "page": {"pageNum": 1, "pageSize": 10},
+                "cctsTicketName": ticket_name_or_id,
+                "timezoneOffset": 420,
+            }
+            res_name = await self._post(endpoint, payload_by_name)
+            data_name = res_name.get("data", {})
+            list_name = data_name.get("list", []) if isinstance(data_name, dict) else data_name
+            if not isinstance(list_name, list):
+                list_name = data_name.get("records", [])
+            if list_name:
+                ticket_info = list_name[0]
+
+        if not ticket_info:
+            return None
+
+        # Trích xuất cctsTicketPk để gọi API lấy danh sách lịch sử
+        ccts_ticket_pk = ticket_info.get("cctsTicketPk")
+        timeline = await self.get_ticket_timeline(ccts_ticket_pk) if ccts_ticket_pk else []
+        return {
+            "ticket": ticket_info,
+            "timeline": timeline,
+        }
+
+    # ------------------------------------------------------------------
     # Export ticket → Excel (dùng cho thống kê / visualization)
     # ------------------------------------------------------------------
     async def create_export_task(self, start_time, end_time, ticket_status=None, sla_timeout=None, offset=420):

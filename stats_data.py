@@ -12,6 +12,12 @@ stats_data.py — chỉ chịu trách nhiệm đăng nhập + cào + chuẩn hó
   qua) thay vì ghi đè bằng dữ liệu rỗng.
 - Cửa sổ: 60 ngày kết thúc tại 0h hôm nay (KHÔNG gồm ngày hiện tại).
 - Lọc BSS.No2, map Region/Tech, phân loại EV/BSS.
+- Mỗi ticket (kể cả đang MỞ) đều được gắn is_overdue (từ SLA Status hiện
+  tại) + has_spare_wait/has_appointment/is_overdue_excuse, để
+  stats_charts_overdue_rate.py tính tỷ lệ Overdue theo cửa sổ NGÀY TẠO
+  (30 ngày gần nhất, mọi trạng thái) — tách biệt với closed_tickets (ticket
+  ĐÃ ĐÓNG trong 30 ngày qua Events) vẫn dùng riêng để tính hiệu suất công
+  việc (top hiệu quả/khối lượng, boxplot thời gian xử lý).
 - Ghi cache thô (danh sách ticket đã chuẩn hóa) cho các module biểu đồ dùng.
 - Dùng CCTS_API_LOCK dùng chung với ccts_data.py (qua ccts_shared) để 2
   module không bao giờ gọi API CCTS cùng lúc; và STATS_REFRESH_LOCK (single-
@@ -259,11 +265,20 @@ def process_ticket_information(
     tech_map=None,
     end_date_exclusive: str | None = None,
     handling_map: dict[str, str] | None = None,
+    spare_ids: set | None = None,
+    appointment_ids: set | None = None,
 ) -> pd.DataFrame:
+    """
+    spare_ids / appointment_ids: dùng để gắn cờ has_spare_wait / has_appointment
+    cho TOÀN BỘ ticket (không riêng ticket đã đóng) — phục vụ tính overdue
+    theo cửa sổ NGÀY TẠO (xem stats_charts_overdue_rate.py), song song với
+    is_overdue lấy trực tiếp từ SLA Status hiện tại của ticket.
+    """
     cols_out = [
         "Ticket ID", "Station Code", "Charge Point ID", "Create Time", "Create Date",
         "Region", "Tech", "cp_type", "SLA Status", "Severity", "Problem Description", "Address",
-        "Error Code", "handling_type",
+        "Error Code", "handling_type", "is_overdue", "has_spare_wait", "has_appointment",
+        "is_overdue_excuse",
     ]
     if df is None or df.empty:
         return pd.DataFrame(columns=cols_out)
@@ -320,6 +335,19 @@ def process_ticket_information(
         )
     else:
         df["handling_type"] = None
+
+    # SLA hiện tại của ticket (áp dụng cho CẢ ticket mở lẫn đã đóng) — dùng
+    # để tính overdue theo cửa sổ ngày TẠO, khác với is_overdue của
+    # enrich_closed_with_ticket_info (chỉ tính trên ticket đã đóng).
+    sla_l = (
+        df["SLA Status"].astype(str).str.strip().str.lower()
+        if "SLA Status" in df.columns
+        else pd.Series([""] * len(df), index=df.index)
+    )
+    df["is_overdue"] = sla_l.eq("overdue")
+    df["has_spare_wait"] = df["Ticket ID"].isin(spare_ids) if spare_ids else False
+    df["has_appointment"] = df["Ticket ID"].isin(appointment_ids) if appointment_ids else False
+    df["is_overdue_excuse"] = df["is_overdue"] & (df["has_spare_wait"] | df["has_appointment"])
 
     keep = [col for col in cols_out if col in df.columns]
     return df[keep].reset_index(drop=True)
@@ -559,6 +587,8 @@ def _finalize_from_raw(raw, events_raw, spare_raw, appt_raw, meta_extra: dict, a
         tech_map=tech_map,
         end_date_exclusive=end_date_ex,
         handling_map=handling_map,
+        spare_ids=spare_ids,
+        appointment_ids=appointment_ids,
     )
 
     closed_basic = extract_closed_tickets_from_events(
@@ -825,7 +855,6 @@ async def _refresh_stats_cache_impl() -> dict:
 
         # Chưa từng có cache nào (ví dụ lần deploy đầu tiên) → dùng file mẫu
         # làm phao cứu sinh CUỐI CÙNG để trang /stats không trống trơn.
-        # (Không chạy report từ sample — tránh Excel sai ngày.)
         sample = _load_sample_bundle()
         if sample is None:
             raise RuntimeError(
@@ -942,7 +971,7 @@ def ensure_chart_in_cache(chart_key: str):
     charts[chart_key] = payload
     cache["charts"] = charts
     save_stats_cache(cache)
-    print(f"[stats] ensure_chart: đã bổ theo {chart_key} vào cache")
+    print(f"[stats] ensure_chart: đã bổ sung {chart_key} vào cache")
     return payload
 
 

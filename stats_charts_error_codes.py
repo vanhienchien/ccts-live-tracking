@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
+from stats_charts_top_error_poles import build_top_error_poles
 from stats_data import (
     is_excluded_tech,
     is_managed_region,
@@ -147,8 +148,10 @@ def build_top_errors(df: pd.DataFrame) -> dict[str, Any]:
 
 def _payload_for_df(df: pd.DataFrame) -> dict[str, Any]:
     top = build_top_errors(df)
+    top_poles = build_top_error_poles(df)
     return {
         "top20": top,
+        "top_poles": top_poles,
         "total_tickets": int(len(df)) if df is not None else 0,
         "total_with_error_code": top.get("total_tickets_with_code", 0),
     }

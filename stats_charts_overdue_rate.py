@@ -1,10 +1,22 @@
 """
-stats_charts_overdue_rate.py — tỷ lệ Overdue khi đóng + ranking KT.
+stats_charts_overdue_rate.py — tỷ lệ Overdue + ranking KT.
 
-- rates_pct: % overdue / closed
-- rates_tick_pct: % (overdue - overdue_chủ_quan) / closed
+Hai nguồn dữ liệu SONG SONG (không còn dùng chung 1 tập "closed" như trước):
+
+- df_created — ticket được TẠO trong CHART_LOOKBACK_DAYS ngày gần nhất, MỌI
+  trạng thái (đang mở lẫn đã đóng). Overdue = SLA Status hiện tại ==
+  "Overdue". Dùng cho: by_region_rates, by_tech_rates, top10_overdue, và
+  trục % Overdue (Y) của performance_matrix.
+- df_closed — ticket ĐÃ ĐÓNG trong 30 ngày (Events → Pending for local team
+  close), như cũ. Dùng cho: top10_efficiency, top10_volume,
+  resolution_boxplot, và trục khối lượng (X) của performance_matrix.
+  Hiệu suất (efficiency) = tỷ lệ ticket đóng có SLA Ontime, tính tương
+  đương 1 − overdue/closed trên chính tập đã đóng.
+
+- rates_pct: % overdue / (số ticket trong nhóm — TẠO trong 30 ngày)
+- rates_tick_pct: % (overdue - overdue_chủ_quan) / nhóm
   overdue_chủ_quan = overdue có chờ VT hoặc hẹn khách
-- top10_overdue / top10_efficiency / top10_volume
+- top10_overdue: xếp theo df_created · top10_efficiency/top10_volume: xếp theo df_closed
 """
 
 from __future__ import annotations
@@ -107,7 +119,9 @@ def _pack_bar_series(labels, details_list: list[dict]) -> dict[str, Any]:
     }
 
 
-def aggregate_rate_by_region(df: pd.DataFrame) -> dict[str, Any]:
+def aggregate_rate_by_region(df_created: pd.DataFrame) -> dict[str, Any]:
+    """df_created: ticket TẠO trong 30 ngày (mọi trạng thái)."""
+    df = df_created
     labels = list(ALLOWED_REGIONS)
     details_list = []
     for r in ALLOWED_REGIONS:
@@ -122,9 +136,11 @@ def aggregate_rate_by_region(df: pd.DataFrame) -> dict[str, Any]:
 
 
 def aggregate_rate_by_tech_per_region(
-    df: pd.DataFrame,
+    df_created: pd.DataFrame,
     tech_by_region: dict | None = None,
 ) -> dict[str, Any]:
+    """df_created: ticket TẠO trong 30 ngày (mọi trạng thái)."""
+    df = df_created
     result = {}
     for region in ALLOWED_REGIONS:
         sub = df[df["Region"] == region] if not df.empty else df
@@ -172,10 +188,15 @@ def _all_tech_stats(df: pd.DataFrame) -> list[dict[str, Any]]:
     return rows
 
 
-def top10_rankings(df: pd.DataFrame) -> dict[str, Any]:
-    stats = _all_tech_stats(df)
+def top10_rankings(df_created: pd.DataFrame, df_closed: pd.DataFrame) -> dict[str, Any]:
+    """
+    top10_overdue: xếp theo tỷ lệ overdue trên ticket TẠO trong 30 ngày (df_created).
+    top10_efficiency / top10_volume: xếp theo ticket ĐÃ ĐÓNG trong 30 ngày (df_closed) — như cũ.
+    """
+    od_stats = _all_tech_stats(df_created)
+    perf_stats = _all_tech_stats(df_closed)
 
-    def _pack_top(items: list[dict], value_key: str, as_pct: bool = True) -> dict[str, Any]:
+    def _pack_top(items: list[dict], value_key: str) -> dict[str, Any]:
         labels = [x["tech"] for x in items]
         details_list = items
         pack = _pack_bar_series(labels, details_list)
@@ -188,18 +209,18 @@ def top10_rankings(df: pd.DataFrame) -> dict[str, Any]:
         pack["regions"] = [x.get("region", "") for x in items]
         return pack
 
-    # Top OD rate (cao nhất) — cần đủ closed
-    by_rate = [x for x in stats if x["closed"] >= MIN_CLOSED_FOR_RATE_RANK]
+    # Top OD rate (cao nhất) — trên ticket TẠO 30 ngày, cần đủ số lượng
+    by_rate = [x for x in od_stats if x["closed"] >= MIN_CLOSED_FOR_RATE_RANK]
     by_rate.sort(key=lambda x: (x["rate"], x["overdue"], x["closed"]), reverse=True)
     top_od = by_rate[:10]
 
-    # Top efficiency = 100% - OD rate
-    by_eff = [x for x in stats if x["closed"] >= MIN_CLOSED_FOR_RATE_RANK]
+    # Top efficiency = 100% - OD rate — trên ticket ĐÃ ĐÓNG 30 ngày
+    by_eff = [x for x in perf_stats if x["closed"] >= MIN_CLOSED_FOR_RATE_RANK]
     by_eff.sort(key=lambda x: (x["efficiency"], x["closed"]), reverse=True)
     top_eff = by_eff[:10]
 
-    # Top volume = closed count
-    by_vol = sorted(stats, key=lambda x: (x["closed"], -x["rate"]), reverse=True)[:10]
+    # Top volume = số ticket đã đóng
+    by_vol = sorted(perf_stats, key=lambda x: (x["closed"], -x["rate"]), reverse=True)[:10]
 
     return {
         "top10_overdue": _pack_top(top_od, "rate"),
@@ -228,13 +249,17 @@ def _median(vals: list[float]) -> float:
     return float(s[mid - 1] + s[mid]) / 2.0
 
 
-def performance_quadrant(df: pd.DataFrame) -> dict[str, Any]:
-    """Scatter matrix: X = số ticket đóng, Y = % overdue.
+def performance_quadrant(df_created: pd.DataFrame, df_closed: pd.DataFrame) -> dict[str, Any]:
+    """Scatter matrix: X = khối lượng (ticket đã đóng / tại trạm), Y = % overdue.
+
+    X lấy từ df_closed (khối lượng công việc thực đã xử lý — như cũ).
+    Y (% overdue) lấy từ df_created (ticket TẠO trong 30 ngày, mọi trạng thái).
     Chia 4 góc bằng median volume & median overdue rate toàn công ty.
-    Chỉ KT có ≥ MIN_CLOSED_FOR_RATE_RANK ticket đóng.
+    Chỉ KT có ≥ MIN_CLOSED_FOR_RATE_RANK ticket đã đóng (đủ dữ liệu khối lượng).
     """
-    stats = _all_tech_stats(df)
-    eligible = [x for x in stats if x["closed"] >= MIN_CLOSED_FOR_RATE_RANK]
+    od_stats = {x["tech"]: x for x in _all_tech_stats(df_created)}
+    perf_stats = _all_tech_stats(df_closed)
+    eligible = [x for x in perf_stats if x["closed"] >= MIN_CLOSED_FOR_RATE_RANK]
     if not eligible:
         return {
             "points": [],
@@ -258,7 +283,10 @@ def performance_quadrant(df: pd.DataFrame) -> dict[str, Any]:
         float(x.get("onsite") or 0) if use_onsite else float(x["closed"])
         for x in eligible
     ]
-    rates = [float(x["rate"]) * 100.0 for x in eligible]
+    rates = [
+        float(od_stats[x["tech"]]["rate"]) * 100.0 if x["tech"] in od_stats else 0.0
+        for x in eligible
+    ]
     med_vol = _median(volumes)
     med_rate = _median(rates)
 
@@ -274,7 +302,9 @@ def performance_quadrant(df: pd.DataFrame) -> dict[str, Any]:
         onsite = int(x.get("onsite") or 0)
         remote = int(x.get("remote") or 0)
         vol_x = onsite if use_onsite else closed
-        rate_pct = round(float(x["rate"]) * 100.0, 1)
+        od = od_stats.get(x["tech"])
+        overdue_n = int(od["overdue"]) if od else 0
+        rate_pct = round(float(od["rate"]) * 100.0, 1) if od else 0.0
         high_vol = vol_x >= med_vol
         high_od = rate_pct >= med_rate
         if high_vol and not high_od:
@@ -290,7 +320,7 @@ def performance_quadrant(df: pd.DataFrame) -> dict[str, Any]:
             "tech": x["tech"],
             "region": x.get("region") or "",
             "closed": closed,
-            "overdue": int(x["overdue"]),
+            "overdue": overdue_n,
             "rate_pct": rate_pct,
             "onsite": onsite,
             "remote": remote,
@@ -467,18 +497,20 @@ def aggregate_resolution_boxplot(
     }
 
 
-def _payload_for_df(df: pd.DataFrame, tech_by_region: dict | None) -> dict[str, Any]:
-    by_region = aggregate_rate_by_region(df)
-    by_tech = aggregate_rate_by_tech_per_region(df, tech_by_region)
-    tops = top10_rankings(df)
-    quad = performance_quadrant(df)
-    reso = aggregate_resolution_boxplot(df, tech_by_region)
+def _payload_for_df(df_created: pd.DataFrame, df_closed: pd.DataFrame, tech_by_region: dict | None) -> dict[str, Any]:
+    by_region = aggregate_rate_by_region(df_created)
+    by_tech = aggregate_rate_by_tech_per_region(df_created, tech_by_region)
+    tops = top10_rankings(df_created, df_closed)
+    quad = performance_quadrant(df_created, df_closed)
+    reso = aggregate_resolution_boxplot(df_closed, tech_by_region)
     return {
         "by_region_rates": by_region,
         "by_tech_rates": by_tech,
         **tops,
         "performance_matrix": quad,
         "resolution_boxplot": reso,
+        # total_closed/total_overdue/overall_rate_pct: tính trên ticket TẠO
+        # trong 30 ngày (df_created) — đây là số liệu Overdue chính của chart.
         "total_closed": by_region.get("total_closed", 0),
         "total_overdue": by_region.get("total_overdue", 0),
         "overall_rate_pct": round(
@@ -486,22 +518,53 @@ def _payload_for_df(df: pd.DataFrame, tech_by_region: dict | None) -> dict[str, 
         )
         if by_region.get("total_closed")
         else 0.0,
+        # Số ticket ĐÃ ĐÓNG thực tế trong 30 ngày (để đối chiếu / hiển thị phụ).
+        "total_closed_actual": int(len(df_closed)) if df_closed is not None else 0,
     }
+
+
+def _created_window_df(cache: dict[str, Any]) -> pd.DataFrame:
+    """Ticket được TẠO trong CHART_LOOKBACK_DAYS ngày gần nhất, mọi trạng thái
+    (mở lẫn đóng). Nguồn: cache["tickets"] (60 ngày) đã có is_overdue/
+    has_spare_wait/has_appointment/is_overdue_excuse từ stats_data.py."""
+    meta = cache.get("meta") or {}
+    end_date_ex = meta.get("end_date_exclusive")
+    df = records_to_tickets_df(cache.get("tickets") or [])
+    if df.empty:
+        return df
+    if "Region" in df.columns:
+        df = df[df["Region"].apply(is_managed_region)].copy()
+    for col in ("is_overdue", "has_spare_wait", "has_appointment", "is_overdue_excuse"):
+        if col in df.columns:
+            df[col] = df[col].astype(bool)
+        else:
+            df[col] = False
+    if end_date_ex and "Create Date" in df.columns:
+        try:
+            end_dt = pd.Timestamp(end_date_ex)
+            start_dt = end_dt - pd.Timedelta(days=CHART_LOOKBACK_DAYS)
+            cd = pd.to_datetime(df["Create Date"], errors="coerce")
+            df = df[(cd >= start_dt) & (cd < end_dt)].copy()
+        except Exception as e:
+            print(f"[stats] overdue_rate: lỗi lọc cửa sổ ngày tạo: {e!r}")
+    return df
 
 
 def build_overdue_rate_payload_from_cache(cache: dict[str, Any]) -> dict[str, Any]:
     meta = cache.get("meta") or {}
     tech_by_region = meta.get("tech_by_region") or {}
-    df = records_to_tickets_df(cache.get("closed_tickets") or [])
 
-    if not df.empty and "Region" in df.columns:
-        df = df[df["Region"].apply(is_managed_region)].copy()
+    df_closed = records_to_tickets_df(cache.get("closed_tickets") or [])
+    if not df_closed.empty and "Region" in df_closed.columns:
+        df_closed = df_closed[df_closed["Region"].apply(is_managed_region)].copy()
     for col in ("is_overdue", "has_spare_wait", "has_appointment", "is_overdue_excuse"):
-        if not df.empty and col in df.columns:
-            df[col] = df[col].astype(bool)
+        if not df_closed.empty and col in df_closed.columns:
+            df_closed[col] = df_closed[col].astype(bool)
 
-    if df.empty:
-        empty = _payload_for_df(df, tech_by_region)
+    df_created = _created_window_df(cache)
+
+    if df_created.empty and df_closed.empty:
+        empty = _payload_for_df(df_created, df_closed, tech_by_region)
         return {
             "chart": "overdue_rate",
             "cp_type": "all",
@@ -516,9 +579,9 @@ def build_overdue_rate_payload_from_cache(cache: dict[str, Any]) -> dict[str, An
         }
 
     by_cp = {
-        "all": _payload_for_df(df, tech_by_region),
-        "ev": _payload_for_df(_filter_cp(df, "ev"), tech_by_region),
-        "bss": _payload_for_df(_filter_cp(df, "bss"), tech_by_region),
+        "all": _payload_for_df(df_created, df_closed, tech_by_region),
+        "ev": _payload_for_df(_filter_cp(df_created, "ev"), _filter_cp(df_closed, "ev"), tech_by_region),
+        "bss": _payload_for_df(_filter_cp(df_created, "bss"), _filter_cp(df_closed, "bss"), tech_by_region),
     }
     root = dict(by_cp["all"])
     root["chart"] = "overdue_rate"
@@ -535,9 +598,9 @@ def build_overdue_rate_payload_from_cache(cache: dict[str, Any]) -> dict[str, An
     root["source"] = meta.get("source", "unknown")
     root["generated_at"] = meta.get("generated_at")
     root["counts"] = {
-        "all": int(len(df)),
-        "ev": int(len(_filter_cp(df, "ev"))),
-        "bss": int(len(_filter_cp(df, "bss"))),
+        "all": int(len(df_created)),
+        "ev": int(len(_filter_cp(df_created, "ev"))),
+        "bss": int(len(_filter_cp(df_created, "bss"))),
     }
     root["meta"] = {
         "end_date_exclusive": meta.get("end_date_exclusive"),

@@ -12,6 +12,7 @@ thay vì xoá sạch bản đồ.
 import os
 import json
 import re
+import asyncio
 from collections import defaultdict
 from datetime import datetime, timedelta
 
@@ -38,6 +39,27 @@ OPEN_STATUSES = ["Open", "Appointment", "Pending for ASP close", "Pending for sp
 ENDPOINT_FIND_TICKET = "/ccts/cctsTicket/findCCTSTicket"
 
 NORTH_LAT_THRESHOLD = 16.2  # Trạm có lat >= ngưỡng này bị coi là miền Bắc -> loại bỏ
+
+# ==========================================
+# Làm giàu dữ liệu ticket "Open" đang overdue (>48h) — CHỈ áp dụng cho trụ
+# SẠC (EV), KHÔNG áp dụng cho trụ đổi pin (BSS).
+#
+# - Nếu timeline cho thấy ticket từng ở 1 trong các trạng thái "đã xử lý
+#   xong" (Pending for local team close / Pending for VOMS confirm /
+#   Pending for ASP close) trước khi quay lại Open -> ticket này ĐÃ MỞ LẠI,
+#   hiển thị trạng thái là "Open (mở lại)".
+# - Nếu ticket Open mà timeline KHÔNG có bất kỳ thông tin xử lý nào (chỉ có
+#   đúng bản ghi tạo ticket ban đầu) -> cực kỳ nguy hiểm (khó giải trình cho
+#   bên thứ 3), tô màu RIÊNG (tím đậm) để cảnh báo.
+# ==========================================
+REOPEN_TRIGGER_STATUSES = {
+    "pending for local team close",
+    "pending for voms confirm",
+    "pending for asp close",
+}
+REOPEN_LABEL_SUFFIX = " (mở lại)"
+NO_INFO_SEVERITY_KEY = "purple_critical"  # frontend cần map key này -> màu tím đậm
+ENRICH_MAX_CONCURRENCY = 4  # số request tra cứu chi tiết chạy song song tối đa (tránh bị đá session / rate-limit)
 
 
 def _status_color(status):
@@ -69,7 +91,6 @@ def _compact_account_list(raw_str, keep_es_its_only=False):
     names = [n.strip() for n in str(raw_str).split(";") if n.strip()]
     names = [n for n in names if n.lower() not in _CREATOR_ACCOUNTS]
     if keep_es_its_only:
-        # Giữ account bắt đầu ES/ITS hoặc chứa Esmanager/Itsmanager (không phân biệt hoa thường)
         def _keep(n):
             u = n.upper()
             return (
@@ -186,13 +207,17 @@ async def _fetch_tickets_window_single_account(username, password, ticket_status
 async def _fetch_tickets_window_multi_account(ticket_statuses, start_str, stop_str):
     """Cào từ TẤT CẢ tài khoản trong CCTS_ACCOUNTS, gộp lại (chưa khử trùng).
 
-    Trả về (list_dict_thô, all_success_bool).
+    Trả về (list_dict_thô, all_success_bool, success_accounts).
     all_success = True chỉ khi *mọi* tài khoản đều lấy thành công.
+    success_accounts = [(username, password), ...] các tài khoản cào thành
+    công, theo đúng thứ tự trong CCTS_ACCOUNTS — dùng lại cho các bước tra
+    cứu chi tiết ticket (đỡ phải login thêm tài khoản mới).
     """
     all_raw = []
     success_count = 0
     total = len(CCTS_ACCOUNTS)
     failed_accounts = []
+    success_accounts = []
 
     async with CCTS_API_LOCK:
         print("[ccts_data] Đã giữ CCTS_API_LOCK — cào live tickets...")
@@ -204,6 +229,7 @@ async def _fetch_tickets_window_multi_account(ticket_statuses, start_str, stop_s
             if ok:
                 success_count += 1
                 all_raw.extend(tickets)
+                success_accounts.append((username, account["password"]))
             else:
                 failed_accounts.append(username)
         print("[ccts_data] Nhả CCTS_API_LOCK.")
@@ -217,7 +243,7 @@ async def _fetch_tickets_window_multi_account(ticket_statuses, start_str, stop_s
             f"(lỗi: {', '.join(failed_accounts) or 'n/a'}) "
             f"→ không chấp nhận dữ liệu mới, giữ cache cũ."
         )
-    return all_raw, all_success
+    return all_raw, all_success, success_accounts
 
 
 def _process_raw_tickets(raw_tickets):
@@ -242,16 +268,18 @@ def _process_raw_tickets(raw_tickets):
 
 async def fetch_live_tickets():
     """Cào ticket ĐANG MỞ từ TẤT CẢ tài khoản, gộp + khử trùng theo Ticket ID.
-    Trả về (DataFrame, fetch_success_bool).
-    fetch_success=True chỉ khi mọi tài khoản CCTS đều cào thành công."""
+    Trả về (DataFrame, fetch_success_bool, success_accounts).
+    fetch_success=True chỉ khi mọi tài khoản CCTS đều cào thành công.
+    success_accounts = [(username, password), ...] các tài khoản đã cào
+    thành công trong chu kỳ này."""
     now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    raw, any_success = await _fetch_tickets_window_multi_account(
+    raw, any_success, success_accounts = await _fetch_tickets_window_multi_account(
         OPEN_STATUSES, "2026-04-30 17:00:00", now_str
     )
 
     processed = _process_raw_tickets(raw)
     if not processed:
-        return pd.DataFrame(), any_success
+        return pd.DataFrame(), any_success, success_accounts
 
     df = pd.DataFrame(processed)
     df = df.fillna("")
@@ -262,7 +290,7 @@ async def fetch_live_tickets():
         df = df[~df["Problem Description"].astype(str).str.strip().str.startswith("BSS.No2")].copy()
 
     print(f"[+] Tổng cộng: {len(df)} tickets sau khi gộp và lọc.")
-    return df, any_success
+    return df, any_success, success_accounts
 
 
 def _apply_south_filter_and_coords(df_tickets, coords_map):
@@ -299,6 +327,120 @@ def _apply_south_filter_and_coords(df_tickets, coords_map):
     return south_df, filtered_north_count, missing_coord_tickets
 
 
+def _is_ev_charge_point(cp_id) -> bool:
+    """True nếu là trụ SẠC (EV) — mã CP KHÔNG bắt đầu bằng 'BSS' (trụ đổi pin).
+    Chỉ trụ EV mới cần tra cứu chi tiết / đổi màu cảnh báo theo yêu cầu."""
+    return not str(cp_id or "").strip().upper().startswith("BSS")
+
+
+def _classify_ticket_timeline(timeline):
+    """Từ timeline (list dict followRecordStatus/createTime) của 1 ticket
+    Open-overdue, xác định:
+    - is_reopened: từng ở 1 trong các trạng thái "đã xử lý xong" trước đó
+      (Pending for local team close / VOMS confirm / ASP close) rồi quay
+      lại Open.
+    - has_no_info: timeline KHÔNG có bất kỳ bản ghi xử lý nào ngoài bản ghi
+      tạo ticket ban đầu (rất nguy hiểm, khó giải trình bên thứ 3)."""
+    timeline = timeline or []
+    is_reopened = any(
+        str(entry.get("followRecordStatus", "")).strip().lower() in REOPEN_TRIGGER_STATUSES
+        for entry in timeline
+    )
+    has_no_info = len(timeline) <= 1
+    return {"is_reopened": is_reopened, "has_no_info": has_no_info}
+
+
+async def _lookup_ticket_enrichment(client, ticket_id):
+    """Gọi search_ticket() cho 1 ticket, trả về dict phân loại hoặc None nếu
+    tra cứu thất bại / không tìm thấy (lỗi từng ticket được nuốt lại, không
+    làm hỏng cả chu kỳ làm mới bản đồ)."""
+    try:
+        result = await client.search_ticket(ticket_id)
+    except Exception as e:
+        print(f"[!] Lỗi tra cứu chi tiết ticket {ticket_id}: {e}")
+        return None
+    if not result:
+        return None
+    return _classify_ticket_timeline(result.get("timeline"))
+
+
+async def _enrich_open_overdue_ev_tickets(df_tickets_filtered, success_accounts):
+    """Với các ticket đang Open + overdue (>48h) + là trụ EV (không phải
+    BSS): tra cứu chi tiết qua CCTSClient.search_ticket() (song song có
+    giới hạn ENRICH_MAX_CONCURRENCY) để phát hiện ticket "mở lại" và ticket
+    Open-overdue chưa có bất kỳ thông tin xử lý nào.
+
+    Dùng lại tài khoản CCTS ĐẦU TIÊN đã cào live thành công trong chu kỳ
+    này (success_accounts) — không login thêm tài khoản mới.
+
+    Trả về dict {ticket_id_str: {"is_reopened": bool, "has_no_info": bool}}
+    — chỉ chứa các ticket đã tra cứu thành công. Không raise."""
+    if df_tickets_filtered.empty or not success_accounts:
+        return {}
+
+    df = df_tickets_filtered.copy()
+    df["Hours"] = df["Ticket Duration"].apply(parse_duration_to_hours)
+
+    mask = (
+        (df["Ticket Status"].astype(str).str.strip().str.lower() == "open")
+        & (df["Hours"] > 48)
+        & (df["Charge Point ID"].apply(_is_ev_charge_point))
+    )
+    targets = df[mask]
+    if targets.empty:
+        return {}
+
+    ticket_ids = sorted({str(t) for t in targets["Ticket ID"].tolist() if t})
+    if not ticket_ids:
+        return {}
+
+    username, password = success_accounts[0]
+
+    async with CCTS_API_LOCK:
+        print(
+            f"[ccts_data] Đã giữ CCTS_API_LOCK — tra cứu chi tiết {len(ticket_ids)} "
+            f"ticket Open-overdue (EV) bằng [{username}]..."
+        )
+        try:
+            client, _ = await _pool.get_or_login(username, password)
+        except Exception as e:
+            print(f"[!] Không thể đăng nhập [{username}] để tra cứu ticket Open-overdue: {e}")
+            print("[ccts_data] Nhả CCTS_API_LOCK (tra cứu chi tiết - lỗi login).")
+            return {}
+
+        semaphore = asyncio.Semaphore(ENRICH_MAX_CONCURRENCY)
+
+        async def _bounded_lookup(ticket_id):
+            async with semaphore:
+                return ticket_id, await _lookup_ticket_enrichment(client, ticket_id)
+
+        results = await asyncio.gather(*(_bounded_lookup(tid) for tid in ticket_ids))
+        print("[ccts_data] Nhả CCTS_API_LOCK (tra cứu chi tiết).")
+
+    enrichment_map = {tid: data for tid, data in results if data is not None}
+    print(
+        f"[+] Tra cứu chi tiết thành công {len(enrichment_map)}/{len(ticket_ids)} "
+        f"ticket Open-overdue (EV)."
+    )
+    return enrichment_map
+
+
+def _apply_enrichment(status, ticket_id, enrichment_map):
+    """Trả về (status_display, severity_override, is_reopened, is_no_info_critical)
+    cho 1 ticket, dựa trên enrichment_map (có thể rỗng / không chứa ticket này
+    — khi đó trả về mặc định, không đổi gì)."""
+    enrich = enrichment_map.get(str(ticket_id)) if enrichment_map else None
+    if not enrich:
+        return status, None, False, False
+
+    is_reopened = bool(enrich.get("is_reopened"))
+    has_no_info = bool(enrich.get("has_no_info"))
+
+    status_display = f"{status}{REOPEN_LABEL_SUFFIX}" if is_reopened else status
+    severity_override = NO_INFO_SEVERITY_KEY if has_no_info else None
+    return status_display, severity_override, is_reopened, has_no_info
+
+
 def _build_station_payload(
     df_tickets_filtered,
     cp_model_map,
@@ -309,9 +451,16 @@ def _build_station_payload(
     filtered_north_count,
     fetch_success,
     missing_coord_tickets=None,
+    enrichment_map=None,
 ):
     """Gộp ticket đang mở (đã lọc miền Nam) với toạ độ trạm.
-    Chỉ gửi DỮ LIỆU THÔ — frontend tự dựng popup HTML."""
+    Chỉ gửi DỮ LIỆU THÔ — frontend tự dựng popup HTML.
+
+    enrichment_map: dict {ticket_id: {"is_reopened":.., "has_no_info":..}} —
+    kết quả tra cứu chi tiết cho ticket Open-overdue (EV), dùng để đổi tên
+    trạng thái hiển thị ("Open (mở lại)") và ép severity "purple_critical"
+    (frontend cần tự map key này sang màu tím đậm)."""
+    enrichment_map = enrichment_map or {}
     stations = []
 
     if not df_tickets_filtered.empty:
@@ -342,9 +491,19 @@ def _build_station_payload(
             station_address = str(top_row.get("Address") or "").strip()
 
             tickets_out = []
+            station_has_no_info_critical = False
             for _, row in group_sorted.iterrows():
                 hours = float(row["Hours"])
                 severity_key, _, _, _ = _severity_color(hours)
+
+                status_display, severity_override, is_reopened, is_no_info_critical = _apply_enrichment(
+                    row["Ticket Status"], row["Ticket ID"], enrichment_map
+                )
+                if severity_override:
+                    severity_key = severity_override
+                if is_no_info_critical:
+                    station_has_no_info_critical = True
+
                 ticket_owners = _build_owners_display(
                     row.get("OwnerUserName") or "",
                     row.get("AssistantName") or "",
@@ -353,6 +512,7 @@ def _build_station_payload(
                     "ticket_id": row["Ticket ID"],
                     "cp_id": str(row["Charge Point ID"]),
                     "status": row["Ticket Status"],
+                    "status_display": status_display,
                     "model_name": row["Model Name"],
                     "creator": row.get("Creator") or "",
                     "duration": row["Ticket Duration"],
@@ -360,9 +520,17 @@ def _build_station_payload(
                     "severity": severity_key,
                     "description": row["Problem Description"],
                     "is_near_overdue": 45 <= hours < 48,
+                    "is_reopened": is_reopened,
+                    "is_no_info_critical": is_no_info_critical,
                     "address": str(row.get("Address") or "").strip(),
                     "owners": ticket_owners,
                 })
+
+            # Trạm có ít nhất 1 ticket EV "Open, overdue, chưa có thông tin xử
+            # lý" -> ưu tiên tô màu cảnh báo tím đậm cho cả trạm, ghi đè lên
+            # màu theo thang giờ tồn đọng thông thường.
+            if station_has_no_info_critical:
+                color = NO_INFO_SEVERITY_KEY
 
             stations.append({
                 "code": core_code,
@@ -379,6 +547,7 @@ def _build_station_payload(
                 "has_near_overdue": bool(
                     ((group_sorted["Hours"] >= 45) & (group_sorted["Hours"] < 48)).any()
                 ),
+                "has_no_info_critical": station_has_no_info_critical,
                 "address": station_address,
             })
 
@@ -394,10 +563,12 @@ def _build_station_payload(
     }
 
 
-def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
+def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map, enrichment_map=None):
     """Danh sách ticket phẳng cho panel theo KT — sắp xếp CAO → THẤP theo giờ tồn."""
     if df_tickets_filtered.empty:
         return []
+
+    enrichment_map = enrichment_map or {}
 
     df = df_tickets_filtered.copy()
     df["Model Name"] = df["Charge Box Model"].map(cp_model_map).fillna("N/A")
@@ -414,6 +585,11 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
             continue
         cp_id = str(row.get("Charge Point ID") or "")
         hours = float(row.get("Hours") or 0)
+
+        status_display, severity_override, is_reopened, is_no_info_critical = _apply_enrichment(
+            row.get("Ticket Status"), row.get("Ticket ID"), enrichment_map
+        )
+
         rows.append({
             "ticket_id": row.get("Ticket ID"),
             "duration": row.get("Ticket Duration"),
@@ -424,6 +600,7 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
             "is_bss": cp_id.strip().upper().startswith("BSS"),
             "model_name": row.get("Model Name"),
             "status": row.get("Ticket Status"),
+            "status_display": status_display,
             "description": row.get("Problem Description"),
             "creator": row.get("Creator"),
             "tech_name": tech_name,
@@ -434,6 +611,9 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
                 row.get("OwnerUserName") or "",
                 row.get("AssistantName") or "",
             ),
+            "severity_override": severity_override,
+            "is_reopened": is_reopened,
+            "is_no_info_critical": is_no_info_critical,
         })
     return rows
 
@@ -441,7 +621,7 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map):
 async def build_station_markers():
     """Cào ticket mới nhất + gộp toạ độ, lọc miền Nam — tương thích ngược."""
     coords_map, tech_map, region_map, cp_model_map, _ = get_static_data()
-    df_tickets, any_success = await fetch_live_tickets()
+    df_tickets, any_success, success_accounts = await fetch_live_tickets()
 
     total_tickets = 0 if df_tickets.empty else len(df_tickets)
     filtered_north_count = 0
@@ -452,10 +632,13 @@ async def build_station_markers():
             df_tickets, coords_map
         )
 
+    enrichment_map = await _enrich_open_overdue_ev_tickets(df_tickets, success_accounts)
+
     payload = _build_station_payload(
         df_tickets, cp_model_map, tech_map, region_map,
         total_tickets, len(missing_coord_tickets), filtered_north_count, any_success,
         missing_coord_tickets=missing_coord_tickets,
+        enrichment_map=enrichment_map,
     )
     print(f"[+] Hoàn tất build markers: {len(payload['stations'])} trạm, {total_tickets} tickets ban đầu.")
     return payload
@@ -485,7 +668,7 @@ async def build_tech_performance_stats(open_stations):
 async def refresh_all_ccts_data():
     """1 chu kỳ làm mới đầy đủ: trạm + stats KT (chỉ open) + ticket rows."""
     coords_map, tech_map, region_map, cp_model_map, _ = get_static_data()
-    df_tickets, any_success = await fetch_live_tickets()
+    df_tickets, any_success, success_accounts = await fetch_live_tickets()
 
     total_tickets = 0 if df_tickets.empty else len(df_tickets)
     filtered_north_count = 0
@@ -497,12 +680,15 @@ async def refresh_all_ccts_data():
             df_tickets, coords_map
         )
 
+    enrichment_map = await _enrich_open_overdue_ev_tickets(df_filtered, success_accounts)
+
     station_payload = _build_station_payload(
         df_filtered, cp_model_map, tech_map, region_map,
         total_tickets, len(missing_coord_tickets), filtered_north_count, any_success,
         missing_coord_tickets=missing_coord_tickets,
+        enrichment_map=enrichment_map,
     )
-    ticket_rows = _build_ticket_rows(df_filtered, cp_model_map, tech_map, region_map)
+    ticket_rows = _build_ticket_rows(df_filtered, cp_model_map, tech_map, region_map, enrichment_map=enrichment_map)
     tech_stats = await build_tech_performance_stats(station_payload["stations"])
 
     print(
