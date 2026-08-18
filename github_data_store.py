@@ -65,9 +65,26 @@ def _fetch_github_raw(path: str) -> bytes:
         )
     url = f"https://api.github.com/repos/{GITHUB_DATA_REPO}/contents/{path}"
     params = {"ref": GITHUB_DATA_BRANCH} if GITHUB_DATA_BRANCH else {}
-    res = requests.get(url, headers=_github_headers(), params=params, timeout=20)
-    res.raise_for_status()
-    return res.content
+    
+    max_retries = 5
+    for attempt in range(max_retries):
+        try:
+            # Thêm timeout (20s) để tránh treo vô thời hạn
+            res = requests.get(url, headers=_github_headers(), params=params, timeout=20)
+            res.raise_for_status()
+            return res.content
+            
+        except requests.exceptions.RequestException as e:
+            # Nếu là lần thử cuối cùng thì văng lỗi để hàm gọi nó xử lý
+            if attempt == max_retries - 1:
+                print(f"❌ Thất bại sau {max_retries} lần tải '{path}' từ GitHub: {e}")
+                raise e
+            
+            # Tính toán thời gian chờ: 1s, 2s, 4s, 8s (Exponential backoff)
+            delay = 2 ** attempt
+            print(f"⚠️ Lỗi kết nối GitHub khi tải '{path}' (lần thử {attempt + 1}/{max_retries}): {e}")
+            print(f"⏳ Đang thử lại sau {delay} giây...")
+            time.sleep(delay)
 
 
 def _fetch_github_json(path: str):

@@ -188,10 +188,130 @@ def _all_tech_stats(df: pd.DataFrame) -> list[dict[str, Any]]:
     return rows
 
 
+def _safe_str(val, default: str = "—") -> str:
+    """Chuyển giá trị pandas/None/NaN thành str an toàn cho JSON."""
+    if val is None:
+        return default
+    try:
+        if isinstance(val, float) and pd.isna(val):
+            return default
+    except Exception:
+        pass
+    s = str(val).strip()
+    if not s or s.lower() in {"nan", "none", "null", "----", "-"}:
+        return default
+    return s
+
+
+def _serialize_overdue_tickets_for_tech(df: pd.DataFrame, tech: str) -> list[dict[str, Any]]:
+    """Danh sách ticket is_overdue==True của 1 KT (từ df_created), sort Create Time cũ → mới.
+
+    Cấu trúc gần giống open_long để frontend tái sử dụng style bảng.
+    Mọi field đều được làm sạch NaN để JSON-safe.
+    """
+    if df is None or df.empty or "Tech" not in df.columns:
+        return []
+    sub = df[df["Tech"].astype(str).str.strip() == str(tech).strip()].copy()
+    if sub.empty or "is_overdue" not in sub.columns:
+        return []
+    sub = sub[sub["is_overdue"].astype(bool)].copy()
+    if sub.empty:
+        return []
+
+    # sort theo Create Time tăng dần (cũ nhất trước)
+    if "Create Time" in sub.columns:
+        sub = sub.copy()
+        sub["_sort_dt"] = pd.to_datetime(sub["Create Time"], errors="coerce")
+        sub = sub.sort_values("_sort_dt", ascending=True, na_position="last")
+
+    rows: list[dict[str, Any]] = []
+    for _, row in sub.iterrows():
+        err = row.get("Error Code")
+        if (
+            err is None
+            or (isinstance(err, float) and pd.isna(err))
+            or str(err).strip() in ("", "----", "-", "nan", "None", "null")
+        ):
+            err = row.get("Problem Description") or ""
+        err = _safe_str(err, "—")
+
+        has_spare = bool(row.get("has_spare_wait")) if "has_spare_wait" in row.index else False
+        has_appt = bool(row.get("has_appointment")) if "has_appointment" in row.index else False
+        # tránh NaN khi đọc bool
+        try:
+            if pd.isna(has_spare):
+                has_spare = False
+        except Exception:
+            has_spare = bool(has_spare)
+        try:
+            if pd.isna(has_appt):
+                has_appt = False
+        except Exception:
+            has_appt = bool(has_appt)
+
+        is_excuse = bool(row.get("is_overdue_excuse")) if "is_overdue_excuse" in row.index else (has_spare or has_appt)
+        try:
+            if pd.isna(is_excuse):
+                is_excuse = has_spare or has_appt
+        except Exception:
+            pass
+
+        excuse_parts = []
+        if has_spare:
+            excuse_parts.append("chờ VT")
+        if has_appt:
+            excuse_parts.append("hẹn khách")
+        excuse_note = " · ".join(excuse_parts) if excuse_parts else ""
+
+        # handling_type: có thể là NaN → phải None hoặc str, không được để float nan
+        ht_raw = row.get("handling_type") if "handling_type" in row.index else None
+        if ht_raw is None or (isinstance(ht_raw, float) and pd.isna(ht_raw)):
+            ht = None
+        else:
+            ht_s = str(ht_raw).strip().lower()
+            ht = ht_s if ht_s and ht_s not in {"nan", "none", "null", ""} else None
+
+        region_val = row.get("Region")
+        if region_val is None or (isinstance(region_val, float) and pd.isna(region_val)):
+            region_val = None
+        else:
+            region_val = str(region_val).strip() or None
+
+        cp_type_val = row.get("cp_type")
+        if cp_type_val is None or (isinstance(cp_type_val, float) and pd.isna(cp_type_val)):
+            cp_type_val = None
+        else:
+            cp_type_val = str(cp_type_val).strip() or None
+
+        rows.append({
+            "Ticket ID": _safe_str(row.get("Ticket ID"), ""),
+            "Station Code": _safe_str(row.get("Station Code"), "—"),
+            "Charge Point ID": _safe_str(row.get("Charge Point ID"), "—"),
+            "Ticket Status": _safe_str(row.get("Ticket Status"), "—"),
+            "Create Time": _safe_str(row.get("Create Time"), "—"),
+            "Create Date": _safe_str(row.get("Create Date"), "—"),
+            "Error Code": err,
+            "SLA Status": _safe_str(row.get("SLA Status"), "—"),
+            "Severity": _safe_str(row.get("Severity"), "—"),
+            "Region": region_val,
+            "Tech": tech,
+            "cp_type": cp_type_val,
+            "handling_type": ht,          # None hoặc "onsite"/"remote" — không còn nan
+            "has_spare_wait": bool(has_spare),
+            "has_appointment": bool(has_appt),
+            "is_overdue_excuse": bool(is_excuse),
+            "excuse_note": excuse_note,
+        })
+    return rows
+
+
 def top10_rankings(df_created: pd.DataFrame, df_closed: pd.DataFrame) -> dict[str, Any]:
     """
     top10_overdue: xếp theo tỷ lệ overdue trên ticket TẠO trong 30 ngày (df_created).
     top10_efficiency / top10_volume: xếp theo ticket ĐÃ ĐÓNG trong 30 ngày (df_closed) — như cũ.
+
+    top10_overdue còn kèm overdue_tickets: {tech: [ticket_dict, ...]} để frontend
+    hiển thị danh sách chứng minh khi user bấm nút mở rộng.
     """
     od_stats = _all_tech_stats(df_created)
     perf_stats = _all_tech_stats(df_closed)
@@ -214,6 +334,15 @@ def top10_rankings(df_created: pd.DataFrame, df_closed: pd.DataFrame) -> dict[st
     by_rate.sort(key=lambda x: (x["rate"], x["overdue"], x["closed"]), reverse=True)
     top_od = by_rate[:10]
 
+    # Danh sách ticket Overdue thực tế cho từng KT trong top 10
+    overdue_tickets: dict[str, list[dict[str, Any]]] = {}
+    for item in top_od:
+        tech = item["tech"]
+        overdue_tickets[tech] = _serialize_overdue_tickets_for_tech(df_created, tech)
+
+    top_od_pack = _pack_top(top_od, "rate")
+    top_od_pack["overdue_tickets"] = overdue_tickets
+
     # Top efficiency = 100% - OD rate — trên ticket ĐÃ ĐÓNG 30 ngày
     by_eff = [x for x in perf_stats if x["closed"] >= MIN_CLOSED_FOR_RATE_RANK]
     by_eff.sort(key=lambda x: (x["efficiency"], x["closed"]), reverse=True)
@@ -223,12 +352,11 @@ def top10_rankings(df_created: pd.DataFrame, df_closed: pd.DataFrame) -> dict[st
     by_vol = sorted(perf_stats, key=lambda x: (x["closed"], -x["rate"]), reverse=True)[:10]
 
     return {
-        "top10_overdue": _pack_top(top_od, "rate"),
+        "top10_overdue": top_od_pack,
         "top10_efficiency": _pack_top(top_eff, "efficiency"),
         "top10_volume": _pack_top(by_vol, "closed"),
         "min_closed_for_rate_rank": MIN_CLOSED_FOR_RATE_RANK,
     }
-
 
 
 # Góc phần tư performance matrix (volume × overdue rate)

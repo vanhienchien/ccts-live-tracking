@@ -1,12 +1,10 @@
 /**
  * stats_chart_errors.js — module panel "Top mã lỗi".
  * Nguồn dữ liệu: GET /api/stats/error-codes.
- * Panel gồm 2 biểu đồ riêng biệt, chuyển qua lại bằng view-toggle (giống
- * pattern "Theo khu vực / Theo kỹ thuật viên / …" ở panel khác):
- *   1. "Top 10 mã lỗi"   — payload.top20    (đã có sẵn)
- *   2. "Top 20 trụ lỗi"  — payload.top_poles (tính trong
- *      stats_charts_top_error_poles.py, được stats_charts_error_codes.py
- *      gộp sẵn vào cùng payload nên chỉ cần 1 lần fetch)
+ * Panel gồm 3 view, chuyển qua lại bằng view-toggle:
+ *   1. "Top 10 mã lỗi"      — payload.top20
+ *   2. "Top 20 trụ lỗi"     — payload.top_poles
+ *   3. "Top thời gian tồn"  — payload.open_long (top 20 ticket đang mở lâu nhất)
  * Xem stats_core.js để biết cách thêm module mới.
  */
 (function () {
@@ -25,7 +23,7 @@
   let currentPayload = null;
   let panelEl = null;
   let refs = null;
-  let activeView = "errors"; // "errors" | "poles"
+  let activeView = "errors"; // "errors" | "poles" | "open"
 
   function slicePayload(full, cp) {
     if (!full) return null;
@@ -244,6 +242,79 @@
     });
   }
 
+  // ---------- View 3: Top ticket mở lâu (bảng) ----------
+
+  function escapeHtml(s) {
+    if (s == null) return "";
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function statusBadge(status, isReopened) {
+    const s = (status || "").toLowerCase();
+    let cls = "badge-open";
+    let label = status || "—";
+    if (s.includes("spare")) { cls = "badge-spare"; }
+    else if (s.includes("appointment")) { cls = "badge-appt"; }
+    else if (s.includes("asp")) { cls = "badge-asp"; }
+    else if (s === "open" && isReopened) { cls = "badge-reopen"; label = "Open (mở lại)"; }
+    else if (s === "open") { cls = "badge-open"; }
+    return '<span class="status-badge ' + cls + '">' + escapeHtml(label) + "</span>";
+  }
+
+  function drawOpenLongTable() {
+    const payload = currentPayload;
+    const rows = (payload && payload.open_long) || [];
+
+    if (!rows.length) {
+      refs.loadingOpen.style.display = "block";
+      refs.loadingOpen.textContent = "Không có ticket đang mở trong dữ liệu 60 ngày (sau lọc region).";
+      refs.tableWrapOpen.style.display = "none";
+      return;
+    }
+    refs.loadingOpen.style.display = "none";
+    refs.tableWrapOpen.style.display = "block";
+
+    const thead = `
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Ticket ID</th>
+          <th>Mã trạm</th>
+          <th>Mã trụ</th>
+          <th>Trạng thái</th>
+          <th>Create Time</th>
+          <th>Thời gian mở</th>
+          <th>Mã / mô tả lỗi</th>
+          <th>Ghi chú xử lý</th>
+        </tr>
+      </thead>`;
+
+    const body = rows.map((r, i) => {
+      const note = r.detail_note || "—";
+      const noteShort = note.length > 80 ? note.slice(0, 78) + "…" : note;
+      const err = r["Error Code"] || "—";
+      const errShort = err.length > 36 ? err.slice(0, 34) + "…" : err;
+      return `
+        <tr>
+          <td>${i + 1}</td>
+          <td class="mono">${escapeHtml(r["Ticket ID"])}</td>
+          <td class="mono">${escapeHtml(r["Station Code"])}</td>
+          <td class="mono">${escapeHtml(r["Charge Point ID"])}</td>
+          <td>${statusBadge(r["Ticket Status"], r.is_reopened)}</td>
+          <td class="mono">${escapeHtml(r["Create Time"])}</td>
+          <td><strong>${escapeHtml(r.duration_human || "—")}</strong></td>
+          <td title="${escapeHtml(err)}">${escapeHtml(errShort)}</td>
+          <td title="${escapeHtml(note)}">${escapeHtml(noteShort)}</td>
+        </tr>`;
+    }).join("");
+
+    refs.tableOpen.innerHTML = thead + "<tbody>" + body + "</tbody>";
+  }
+
   // ---------- View toggle ----------
 
   function setActiveView(view) {
@@ -253,16 +324,17 @@
     });
     refs.sectionErrors.style.display = view === "errors" ? "" : "none";
     refs.sectionPoles.style.display = view === "poles" ? "" : "none";
-    // Chart.js cần canvas đang hiển thị mới tính đúng kích thước, nên chỉ
-    // (re)vẽ biểu đồ của view vừa được bật lên.
+    refs.sectionOpen.style.display = view === "open" ? "" : "none";
     if (!currentPayload) return;
     if (view === "errors") drawErrorsChart();
-    else drawPolesChart();
+    else if (view === "poles") drawPolesChart();
+    else drawOpenLongTable();
   }
 
   function drawActiveChart() {
     if (activeView === "errors") drawErrorsChart();
-    else drawPolesChart();
+    else if (activeView === "poles") drawPolesChart();
+    else drawOpenLongTable();
   }
 
   // ---------- KPI + source note (chung cho panel) ----------
@@ -271,11 +343,12 @@
     const t = payload.total_with_error_code || 0;
     const u = (payload.top10 || payload.top20 || {}).unique_codes || 0;
     const poleCount = (payload.top_poles || {}).unique_poles || 0;
+    const openN = (payload.open_long || []).length;
     setKPIs([
       { label: "Ticket có mã lỗi", value: t.toLocaleString("vi-VN"), sub: "30 ngày" },
       { label: "Số mã lỗi", value: u, sub: "unique codes" },
       { label: "Số trụ lên lỗi", value: poleCount, sub: "unique CP" },
-      { label: "Ticket (filter)", value: (payload.counts && payload.counts[Core.cpType]) || "—", sub: Core.cpType.toUpperCase() },
+      { label: "Ticket mở (top)", value: openN, sub: "đang mở lâu nhất" },
     ]);
   }
 
@@ -284,6 +357,9 @@
     Core.setGeneratedAt(payload.generated_at);
     refs.sourceNote.textContent = "Top 10 Error Code · 30 ngày · " + (payload.generated_at || "");
     refs.sourceNotePoles.textContent = "Top 20 trụ lên lỗi nhiều nhất · 30 ngày · " + (payload.generated_at || "");
+    if (refs.sourceNoteOpen) {
+      refs.sourceNoteOpen.textContent = "Top 20 ticket đang mở lâu nhất · dữ liệu 60 ngày · " + (payload.generated_at || "");
+    }
   }
 
   // ---------- Load / lifecycle ----------
@@ -293,6 +369,10 @@
     refs.loading.textContent = "⏳ Đang tải top lỗi…";
     refs.loadingPoles.style.display = "block";
     refs.loadingPoles.textContent = "⏳ Đang tải top trụ lỗi…";
+    if (refs.loadingOpen) {
+      refs.loadingOpen.style.display = "block";
+      refs.loadingOpen.textContent = "⏳ Đang tải ticket mở lâu…";
+    }
     try {
       const res = await fetch("/api/stats/error-codes");
       if (!res.ok) throw new Error("HTTP " + res.status);
@@ -306,6 +386,9 @@
     } catch (e) {
       refs.loading.textContent = "Chưa có Error Code trong cache — restart để cào lại.";
       refs.loadingPoles.textContent = "Chưa có dữ liệu trụ lỗi trong cache — restart để cào lại.";
+      if (refs.loadingOpen) {
+        refs.loadingOpen.textContent = "Chưa có dữ liệu ticket mở trong cache — restart để cào lại.";
+      }
       console.warn(e);
     }
   }
@@ -333,6 +416,7 @@
       <div class="view-toggle" style="margin-bottom:12px;">
         <button type="button" class="active" data-view="errors">Top 10 mã lỗi</button>
         <button type="button" data-view="poles">Top 20 trụ lỗi</button>
+        <button type="button" data-view="open">Top thời gian tồn</button>
       </div>
 
       <div class="section-errors">
@@ -358,11 +442,42 @@
         <div class="chart-wrap chart-wrap-poles" style="display:none; height:420px;"><canvas></canvas></div>
         <div class="source-note source-note-poles"></div>
       </div>
+
+      <div class="section-open" style="display:none;">
+        <div class="card-header">
+          <div>
+            <h2>Top 20 ticket đang mở lâu nhất</h2>
+            <div class="desc">
+              Trạng thái: <strong>Open / Appointment / Pending for ASP close / Pending for spare parts</strong>
+              · dữ liệu 60 ngày · sắp xếp theo thời gian mở giảm dần
+            </div>
+          </div>
+        </div>
+        <div class="loading chart-loading-open" style="display:none;">⏳ Đang tải ticket mở lâu…</div>
+        <div class="table-wrap-open" style="display:none; overflow-x:auto;">
+          <style>
+            .table-open { width:100%; border-collapse:collapse; font-size:12.5px; }
+            .table-open th { background:#f1f5f9; text-align:left; padding:8px 10px; border-bottom:2px solid #e2e8f0; white-space:nowrap; color:#334155; }
+            .table-open td { padding:7px 10px; border-bottom:1px solid #e2e8f0; vertical-align:top; color:#0f172a; }
+            .table-open tr:hover td { background:#f8fafc; }
+            .table-open .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size:12px; }
+            .status-badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:600; }
+            .badge-open { background:#dbeafe; color:#1e40af; }
+            .badge-reopen { background:#fef3c7; color:#92400e; }
+            .badge-spare { background:#ffedd5; color:#9a3412; }
+            .badge-appt { background:#e0e7ff; color:#3730a3; }
+            .badge-asp { background:#dcfce7; color:#166534; }
+          </style>
+          <table class="table-open"></table>
+        </div>
+        <div class="source-note source-note-open"></div>
+      </div>
     `;
     refs = {
       toggleBtns: Array.from(panel.querySelectorAll(".view-toggle button")),
       sectionErrors: panel.querySelector(".section-errors"),
       sectionPoles: panel.querySelector(".section-poles"),
+      sectionOpen: panel.querySelector(".section-open"),
       loading: panel.querySelector(".chart-loading"),
       chartWrap: panel.querySelector(".chart-wrap"),
       canvas: panel.querySelector(".section-errors canvas"),
@@ -371,6 +486,10 @@
       chartWrapPoles: panel.querySelector(".chart-wrap-poles"),
       canvasPoles: panel.querySelector(".section-poles canvas"),
       sourceNotePoles: panel.querySelector(".source-note-poles"),
+      loadingOpen: panel.querySelector(".chart-loading-open"),
+      tableWrapOpen: panel.querySelector(".table-wrap-open"),
+      tableOpen: panel.querySelector(".table-open"),
+      sourceNoteOpen: panel.querySelector(".source-note-open"),
     };
     refs.toggleBtns.forEach((btn) => {
       btn.addEventListener("click", () => setActiveView(btn.dataset.view));

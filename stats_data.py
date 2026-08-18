@@ -277,8 +277,8 @@ def process_ticket_information(
     cols_out = [
         "Ticket ID", "Station Code", "Charge Point ID", "Create Time", "Create Date",
         "Region", "Tech", "cp_type", "SLA Status", "Severity", "Problem Description", "Address",
-        "Error Code", "handling_type", "is_overdue", "has_spare_wait", "has_appointment",
-        "is_overdue_excuse",
+        "Error Code", "Ticket Status", "handling_type", "is_overdue", "has_spare_wait",
+        "has_appointment", "is_overdue_excuse",
     ]
     if df is None or df.empty:
         return pd.DataFrame(columns=cols_out)
@@ -288,7 +288,7 @@ def process_ticket_information(
 
     for col in (
         "Ticket ID", "Station Code", "Create Time", "SLA Status", "Severity",
-        "Charge Point ID", "Problem Description", "Address", "Error Code",
+        "Charge Point ID", "Problem Description", "Address", "Error Code", "Ticket Status",
     ):
         if col not in df.columns:
             df[col] = None
@@ -357,15 +357,229 @@ OPEN_STATUSES = {
     "open",
     "appointment",
     "pending for asp close",
-    "pending for spare parts close",
+    "pending for spare parts",
+    "pending for spare parts close",  # backward-compat
 }
 CLOSED_STATUS = "pending for local team close"
+REOPEN_HINT_STATUSES = {
+    "pending for local team close",
+    "pending for voms confirm",
+}
 
 
 def _norm_status(val) -> str:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return ""
     return str(val).strip().lower()
+
+
+def _is_empty_detail(val) -> bool:
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return True
+    s = str(val).strip()
+    return (not s) or s in {"----", "-", "nan", "None", "null"}
+
+
+def _format_duration(create_dt: datetime | None, now_dt: datetime | None = None) -> tuple[float | None, str]:
+    """Trả (hours_float, human string)."""
+    if create_dt is None:
+        return None, "—"
+    if now_dt is None:
+        now_dt = datetime.now(VN_TZ).replace(tzinfo=None)
+    if getattr(create_dt, "tzinfo", None) is not None:
+        create_dt = create_dt.replace(tzinfo=None)
+    if getattr(now_dt, "tzinfo", None) is not None:
+        now_dt = now_dt.replace(tzinfo=None)
+    if now_dt < create_dt:
+        return 0.0, "0h"
+    delta = now_dt - create_dt
+    hours = round(delta.total_seconds() / 3600.0, 1)
+    days = delta.days
+    rem_h = (delta.seconds // 3600)
+    if days > 0:
+        human = f"{days}d {rem_h}h"
+    else:
+        human = f"{rem_h}h" if rem_h else f"{delta.seconds // 60}m"
+    return hours, human
+
+
+def build_open_long_tickets(
+    ticket_info_df: pd.DataFrame,
+    events_df: pd.DataFrame | None,
+    appt_df: pd.DataFrame | None,
+    solutions_df: pd.DataFrame | None,
+    top_n: int = 20,
+    now_dt: datetime | None = None,
+) -> list[dict]:
+    """
+    Top N ticket đang mở lâu nhất (theo Create Time cũ nhất).
+
+    Trạng thái mở: Open / Appointment / Pending for ASP close / Pending for spare parts
+    (xem OPEN_STATUSES).
+
+    Quy tắc lấy ghi chú (detail_note):
+    - Open:
+        * Nếu Events từng có 'Pending for local team close' hoặc 'Pending for VOMS confirm'
+          → is_reopened=True, detail_note='Ticket mở lại'
+        * Ngược lại → is_reopened=False, detail_note='Chưa có thông tin xử lý'
+    - Pending for spare parts:
+        * Lấy Record Detail mới nhất của event status 'Pending for spare parts'
+        * Nếu rỗng/---- → fallback Solution Description
+    - Appointment:
+        * Lấy Detail từ sheet Appointment (mới nhất)
+        * Nếu rỗng → fallback Solution Description
+    - Pending for ASP close:
+        * Chỉ lấy Solution Description
+    """
+    if ticket_info_df is None or ticket_info_df.empty:
+        return []
+
+    ti = ticket_info_df.copy()
+    ti.columns = [str(c).strip() for c in ti.columns]
+    if "Ticket ID" not in ti.columns or "Ticket Status" not in ti.columns:
+        return []
+
+    ti["Ticket ID"] = ti["Ticket ID"].astype(str).str.strip()
+    ti["_status"] = ti["Ticket Status"].apply(_norm_status)
+    open_mask = ti["_status"].isin(OPEN_STATUSES)
+    open_mask = open_mask | ti["_status"].str.contains("spare parts", na=False)
+    open_df = ti[open_mask].copy()
+    if open_df.empty:
+        return []
+
+    open_df["_create_dt"] = open_df["Create Time"].apply(_parse_create_time)
+    open_df = open_df.dropna(subset=["_create_dt"])
+    # open_df = open_df.sort_values("_create_dt", ascending=True).head(top_n * 3)
+
+    events_by_tid: dict[str, pd.DataFrame] = {}
+    if events_df is not None and not events_df.empty:
+        ev = events_df.copy()
+        ev.columns = [str(c).strip() for c in ev.columns]
+        if "Ticket ID" in ev.columns:
+            ev["Ticket ID"] = ev["Ticket ID"].astype(str).str.strip()
+            for tid, g in ev.groupby("Ticket ID"):
+                events_by_tid[tid] = g
+
+    appt_by_tid: dict[str, list] = {}
+    if appt_df is not None and not appt_df.empty:
+        ap = appt_df.copy()
+        ap.columns = [str(c).strip() for c in ap.columns]
+        if "Ticket ID" in ap.columns:
+            ap["Ticket ID"] = ap["Ticket ID"].astype(str).str.strip()
+            for tid, g in ap.groupby("Ticket ID"):
+                if "Create Time" in g.columns:
+                    g = g.copy()
+                    g["_dt"] = g["Create Time"].apply(_parse_create_time)
+                    g = g.sort_values("_dt", ascending=False, na_position="last")
+                appt_by_tid[tid] = g.to_dict(orient="records")
+
+    sol_by_tid: dict[str, list] = {}
+    if solutions_df is not None and not solutions_df.empty:
+        sol = solutions_df.copy()
+        sol.columns = [str(c).strip() for c in sol.columns]
+        if "Ticket ID" in sol.columns:
+            sol["Ticket ID"] = sol["Ticket ID"].astype(str).str.strip()
+            for tid, g in sol.groupby("Ticket ID"):
+                if "Create Time" in g.columns:
+                    g = g.copy()
+                    g["_dt"] = g["Create Time"].apply(_parse_create_time)
+                    g = g.sort_values("_dt", ascending=False, na_position="last")
+                sol_by_tid[tid] = g.to_dict(orient="records")
+
+    def _latest_solution_desc(tid: str) -> str:
+        rows = sol_by_tid.get(tid) or []
+        for r in rows:
+            desc = r.get("Solution Description")
+            if not _is_empty_detail(desc):
+                return str(desc).strip()
+        return ""
+
+    def _detail_for_open(tid: str) -> tuple[bool, str]:
+        g = events_by_tid.get(tid)
+        if g is None or g.empty:
+            return False, "Chưa có thông tin xử lý"
+        statuses = g["Ticket Status"].apply(_norm_status) if "Ticket Status" in g.columns else pd.Series(dtype=str)
+        if statuses.isin(REOPEN_HINT_STATUSES).any():
+            return True, "Ticket mở lại"
+        return False, "Chưa có thông tin xử lý"
+
+    def _detail_for_spare(tid: str) -> str:
+        g = events_by_tid.get(tid)
+        if g is not None and not g.empty and "Ticket Status" in g.columns:
+            g2 = g.copy()
+            g2["_st"] = g2["Ticket Status"].apply(_norm_status)
+            spare_rows = g2[g2["_st"].str.contains("spare parts", na=False)]
+            if not spare_rows.empty:
+                if "Create Time" in spare_rows.columns:
+                    spare_rows = spare_rows.copy()
+                    spare_rows["_dt"] = spare_rows["Create Time"].apply(_parse_create_time)
+                    spare_rows = spare_rows.sort_values("_dt", ascending=False, na_position="last")
+                for _, row in spare_rows.iterrows():
+                    rd = row.get("Record Detail")
+                    if not _is_empty_detail(rd):
+                        return str(rd).strip()
+        return _latest_solution_desc(tid) or "—"
+
+    def _detail_for_appointment(tid: str) -> str:
+        rows = appt_by_tid.get(tid) or []
+        for r in rows:
+            d = r.get("Detail")
+            if not _is_empty_detail(d):
+                return str(d).strip()
+        return _latest_solution_desc(tid) or "—"
+
+    def _detail_for_asp(tid: str) -> str:
+        return _latest_solution_desc(tid) or "—"
+
+    if now_dt is None:
+        now_dt = datetime.now(VN_TZ).replace(tzinfo=None)
+
+    results = []
+    for _, row in open_df.iterrows():
+        tid = str(row["Ticket ID"])
+        status_raw = str(row.get("Ticket Status") or "").strip()
+        status_norm = _norm_status(status_raw)
+        create_dt = row["_create_dt"]
+        hours, human = _format_duration(create_dt, now_dt)
+
+        is_reopened = False
+        detail_note = ""
+
+        if status_norm == "open":
+            is_reopened, detail_note = _detail_for_open(tid)
+        elif "spare parts" in status_norm:
+            detail_note = _detail_for_spare(tid)
+        elif status_norm == "appointment":
+            detail_note = _detail_for_appointment(tid)
+        elif status_norm == "pending for asp close":
+            detail_note = _detail_for_asp(tid)
+        else:
+            detail_note = _latest_solution_desc(tid) or "—"
+
+        err = row.get("Error Code")
+        if _is_empty_detail(err):
+            err = row.get("Problem Description") or ""
+        err = str(err).strip() if not _is_empty_detail(err) else "—"
+
+        results.append({
+            "Ticket ID": tid,
+            "Station Code": str(row.get("Station Code") or "—").strip() or "—",
+            "Charge Point ID": str(row.get("Charge Point ID") or "—").strip() or "—",
+            "Ticket Status": status_raw or "—",
+            "Create Time": create_dt.strftime("%Y-%m-%d %H:%M:%S") if create_dt else str(row.get("Create Time") or "—"),
+            "duration_hours": hours,
+            "duration_human": human,
+            "Error Code": err,
+            "detail_note": detail_note,
+            "is_reopened": is_reopened,
+            "Region": row.get("Region"),
+            "Tech": row.get("Tech"),
+            "cp_type": row.get("cp_type"),
+            "SLA Status": row.get("SLA Status"),
+        })
+
+    results.sort(key=lambda x: (x.get("duration_hours") or 0), reverse=True)
+    return results
 
 
 def extract_closed_tickets_from_events(
@@ -567,8 +781,16 @@ async def _export_one_account(username, password, start_time, end_time) -> dict 
     return out if out else None
 
 
-def _finalize_from_raw(raw, events_raw, spare_raw, appt_raw, meta_extra: dict, additional_raw=None):
-    """Chuẩn hóa TI + closed 30 ngày. additional_raw → handling_type."""
+def _finalize_from_raw(
+    raw,
+    events_raw,
+    spare_raw,
+    appt_raw,
+    meta_extra: dict,
+    additional_raw=None,
+    solutions_raw=None,
+):
+    """Chuẩn hóa TI + closed 30 ngày + top open long. additional_raw → handling_type."""
     end_date_ex = meta_extra["end_date_exclusive"]
 
     spare_ids = set()
@@ -605,20 +827,30 @@ def _finalize_from_raw(raw, events_raw, spare_raw, appt_raw, meta_extra: dict, a
         f"appt={int(closed_enriched['has_appointment'].sum()) if len(closed_enriched) else 0})"
     )
 
+    open_long = build_open_long_tickets(
+        processed,
+        events_df=events_raw,
+        appt_df=appt_raw,
+        solutions_df=solutions_raw,
+        top_n=20,
+    )
+    print(f"[stats] Open long top20: {len(open_long)}")
+
     meta = {
         **meta_extra,
         "tech_by_region": tech_by_region,
         "row_count": int(len(processed)),
         "closed_count": int(len(closed_enriched)),
+        "open_long_count": int(len(open_long)),
     }
-    return processed, meta, closed_enriched
+    return processed, meta, closed_enriched, open_long
 
 
 def _load_sample_bundle():
     """Đọc file Excel mẫu làm phao cứu sinh CUỐI CÙNG — chỉ dùng khi cào
     thất bại hoàn toàn VÀ không hề có cache cũ nào (ví dụ lần deploy đầu
-    tiên). Trả (raw, events_raw, spare_raw, appt_raw) hoặc None nếu không có
-    file mẫu."""
+    tiên). Trả (raw, events_raw, spare_raw, appt_raw, additional_raw, solutions_raw)
+    hoặc None nếu không có file mẫu."""
     if not os.path.exists(SAMPLE_XLSX):
         return None
     print(f"[stats] Fallback file mẫu: {SAMPLE_XLSX}")
@@ -636,7 +868,11 @@ def _load_sample_bundle():
         additional_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Additional information")
     except Exception:
         additional_raw = pd.DataFrame()
-    return raw, events_raw, spare_raw, appt_raw, additional_raw
+    try:
+        solutions_raw = pd.read_excel(SAMPLE_XLSX, sheet_name="Solutions")
+    except Exception:
+        solutions_raw = pd.DataFrame()
+    return raw, events_raw, spare_raw, appt_raw, additional_raw, solutions_raw
 
 
 async def fetch_all_accounts_tickets(start_time=None, end_time=None):
@@ -725,6 +961,7 @@ async def fetch_all_accounts_tickets(start_time=None, end_time=None):
     sp_frames = [b["Spare Parts Record"] for b in bundles.values() if "Spare Parts Record" in b]
     ap_frames = [b["Appointment"] for b in bundles.values() if "Appointment" in b]
     ai_frames = [b["Additional information"] for b in bundles.values() if "Additional information" in b]
+    sol_frames = [b["Solutions"] for b in bundles.values() if "Solutions" in b]
 
     raw = pd.concat(ti_frames, ignore_index=True)
     if "Ticket ID" in raw.columns:
@@ -736,16 +973,18 @@ async def fetch_all_accounts_tickets(start_time=None, end_time=None):
     spare_raw = pd.concat(sp_frames, ignore_index=True) if sp_frames else pd.DataFrame()
     appt_raw = pd.concat(ap_frames, ignore_index=True) if ap_frames else pd.DataFrame()
     additional_raw = pd.concat(ai_frames, ignore_index=True) if ai_frames else pd.DataFrame()
+    solutions_raw = pd.concat(sol_frames, ignore_index=True) if sol_frames else pd.DataFrame()
     if not events_raw.empty and "Ticket ID" in events_raw.columns:
         events_raw["Ticket ID"] = events_raw["Ticket ID"].astype(str).str.strip()
 
     source = "live" if not fail_accounts else "live_partial"
-    processed, meta, closed_enriched = _finalize_from_raw(
-        raw, events_raw, spare_raw, appt_raw, meta_extra, additional_raw=additional_raw
+    processed, meta, closed_enriched, open_long = _finalize_from_raw(
+        raw, events_raw, spare_raw, appt_raw, meta_extra,
+        additional_raw=additional_raw, solutions_raw=solutions_raw,
     )
     meta["source"] = source
     print(f"[stats] Sau chuẩn hóa TI: {len(processed)} ticket (source={source})")
-    return processed, source, meta, closed_enriched
+    return processed, source, meta, closed_enriched, open_long
 
 
 def tickets_df_to_records(df: pd.DataFrame) -> list:
@@ -816,7 +1055,7 @@ def get_cached_meta() -> dict:
     return cache.get("meta") or {}
 
 
-def _build_payload(df, source, meta, closed_df) -> dict:
+def _build_payload(df, source, meta, closed_df, open_long=None) -> dict:
     tech_by_region = meta.pop("tech_by_region", {}) or {}
     if not tech_by_region:
         _, _, tech_by_region = _get_static_maps()
@@ -824,6 +1063,7 @@ def _build_payload(df, source, meta, closed_df) -> dict:
         "version": 2,
         "tickets": tickets_df_to_records(df),
         "closed_tickets": tickets_df_to_records(closed_df),
+        "open_long_tickets": open_long or [],
         "meta": {
             **meta,
             "source": source,
@@ -861,7 +1101,7 @@ async def _refresh_stats_cache_impl() -> dict:
                 "Không cào được ticket từ bất kỳ tài khoản nào, cũng không có "
                 "cache cũ hay file mẫu để hiển thị tạm."
             )
-        raw, events_raw, spare_raw, appt_raw, additional_raw = sample
+        raw, events_raw, spare_raw, appt_raw, additional_raw, solutions_raw = sample
         _, end_time, end_date_ex = scrape_time_range()
         meta_extra = {
             "start_time": None,
@@ -872,22 +1112,24 @@ async def _refresh_stats_cache_impl() -> dict:
             "rounds_used": MAX_SCRAPE_ROUNDS,
             "lookback_days": SCRAPE_LOOKBACK_DAYS,
         }
-        processed, meta, closed_df = _finalize_from_raw(
-            raw, events_raw, spare_raw, appt_raw, meta_extra, additional_raw=additional_raw
+        processed, meta, closed_df, open_long = _finalize_from_raw(
+            raw, events_raw, spare_raw, appt_raw, meta_extra,
+            additional_raw=additional_raw, solutions_raw=solutions_raw,
         )
-        payload = _build_payload(processed, "sample", meta, closed_df)
+        payload = _build_payload(processed, "sample", meta, closed_df, open_long=open_long)
         payload = _prebuild_chart_payloads(payload)
         save_stats_cache(payload)
         print(f"[stats] Cache v2 (sample fallback): TI={meta.get('row_count', 0)}")
         return payload
 
-    df, source, meta, closed_df = result
-    payload = _build_payload(df, source, meta, closed_df)
+    df, source, meta, closed_df, open_long = result
+    payload = _build_payload(df, source, meta, closed_df, open_long=open_long)
     payload = _prebuild_chart_payloads(payload)
     save_stats_cache(payload)
     print(
         f"[stats] Cache v2: TI={meta.get('row_count', 0)}, "
-        f"closed30d={meta.get('closed_count', 0)}, source={source}"
+        f"closed30d={meta.get('closed_count', 0)}, "
+        f"open_long={meta.get('open_long_count', 0)}, source={source}"
     )
 
     return payload

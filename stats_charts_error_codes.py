@@ -157,6 +157,15 @@ def _payload_for_df(df: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def _filter_open_long(items: list, cp_type: str, top_n: int = 20) -> list:
+    if not items:
+        return []
+    if cp_type != "all":
+        items = [x for x in items if (x.get("cp_type") or "") == cp_type]
+    # list đã sort duration_hours giảm dần từ build_open_long_tickets
+    return list(items)[:top_n]
+
+
 def build_error_codes_payload_from_cache(cache: dict[str, Any]) -> dict[str, Any]:
     meta = cache.get("meta") or {}
     df = records_to_tickets_df(cache.get("tickets") or [])
@@ -164,13 +173,25 @@ def build_error_codes_payload_from_cache(cache: dict[str, Any]) -> dict[str, Any
         df = df[df["Region"].apply(is_managed_region)].copy()
     df = _filter_last_n_days(df, CHART_LOOKBACK_DAYS)
 
+    open_long_all = cache.get("open_long_tickets") or []
+    open_long_all = [
+        x for x in open_long_all
+        if is_managed_region(x.get("Region"))
+    ]
+
     if df.empty:
         empty = _payload_for_df(df)
+        empty_open: list = []
         return {
             "chart": "error_codes",
             "cp_type": "all",
-            "by_cp_type": {"all": empty, "ev": empty, "bss": empty},
+            "by_cp_type": {
+                "all": {**empty, "open_long": empty_open},
+                "ev": {**empty, "open_long": empty_open},
+                "bss": {**empty, "open_long": empty_open},
+            },
             **empty,
+            "open_long": empty_open,
             "chart_days": CHART_LOOKBACK_DAYS,
             "scrape_days": meta.get("lookback_days"),
             "source": meta.get("source", "unknown"),
@@ -180,9 +201,9 @@ def build_error_codes_payload_from_cache(cache: dict[str, Any]) -> dict[str, Any
         }
 
     by_cp = {
-        "all": _payload_for_df(df),
-        "ev": _payload_for_df(_filter_cp(df, "ev")),
-        "bss": _payload_for_df(_filter_cp(df, "bss")),
+        "all": {**_payload_for_df(df), "open_long": _filter_open_long(open_long_all, "all")},
+        "ev": {**_payload_for_df(_filter_cp(df, "ev")), "open_long": _filter_open_long(open_long_all, "ev")},
+        "bss": {**_payload_for_df(_filter_cp(df, "bss")), "open_long": _filter_open_long(open_long_all, "bss")},
     }
     root = dict(by_cp["all"])
     root["chart"] = "error_codes"

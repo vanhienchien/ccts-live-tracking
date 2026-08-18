@@ -75,7 +75,61 @@
     .quad-legend .qitem.idle { border-left: 4px solid #2563eb; }
     .matrix-wrap { position: relative; height: 480px; width: 100%; }
   `);
-
+    Core.injectStyleOnce("stats-style-overdue-ticket-list", `
+    .od-tickets-panel { margin-top: 14px; }
+    .od-tickets-toggle {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 8px 16px; border-radius: 8px; font-size: 13px; font-weight: 600;
+      border: 1.5px solid #cbd5e1; background: #f8fafc; color: #334155;
+      cursor: pointer; user-select: none;
+      transition: background .15s, border-color .15s, box-shadow .15s;
+    }
+    .od-tickets-toggle:hover { background: #f1f5f9; border-color: #94a3b8; }
+    .od-tickets-toggle.open {
+      background: #fef2f2; border-color: #fca5a5; color: #b91c1c;
+    }
+    .od-tickets-toggle .chev { transition: transform .2s; font-size: 11px; }
+    .od-tickets-toggle.open .chev { transform: rotate(90deg); }
+    .od-tickets-body {
+      display: none; margin-top: 12px;
+      border: 1px solid #e2e8f0; border-radius: 10px; background: #fff;
+      overflow: hidden;
+    }
+    .od-tickets-body.open { display: block; }
+    .od-tech-block { border-bottom: 1px solid #e2e8f0; }
+    .od-tech-block:last-child { border-bottom: none; }
+    .od-tech-header {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+      padding: 10px 14px; background: #f8fafc; cursor: pointer; user-select: none;
+      font-size: 13px; font-weight: 600; color: #0f172a;
+    }
+    .od-tech-header:hover { background: #f1f5f9; }
+    .od-tech-header .od-tech-meta { font-weight: 500; color: #64748b; font-size: 12px; }
+    .od-tech-header .chev { font-size: 11px; color: #94a3b8; transition: transform .2s; }
+    .od-tech-header.open .chev { transform: rotate(90deg); }
+    .od-tech-table-wrap { display: none; overflow-x: auto; }
+    .od-tech-table-wrap.open { display: block; }
+    .od-ticket-table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+    .od-ticket-table th {
+      background: #f1f5f9; text-align: left; padding: 7px 10px;
+      border-bottom: 2px solid #e2e8f0; white-space: nowrap; color: #334155; font-weight: 600;
+    }
+    .od-ticket-table td {
+      padding: 6px 10px; border-bottom: 1px solid #e2e8f0; vertical-align: top; color: #0f172a;
+    }
+    .od-ticket-table tr:hover td { background: #f8fafc; }
+    .od-ticket-table .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px;
+    }
+    .od-badge {
+      display: inline-block; padding: 1px 7px; border-radius: 999px;
+      font-size: 10.5px; font-weight: 600; white-space: nowrap;
+    }
+    .od-badge-excuse { background: #ffedd5; color: #9a3412; }
+    .od-badge-real { background: #fee2e2; color: #991b1b; }
+    .od-badge-status { background: #e0e7ff; color: #3730a3; }
+    .od-empty { padding: 16px; color: #94a3b8; font-size: 13px; text-align: center; }
+  `);
 
   let chart = null;
   let fullPayload = null;
@@ -1265,7 +1319,112 @@
       { label: "Chậm nhất", value: slowest.median + " ngày", sub: slowest.tech },
     ]);
   }
+  function escapeHtml(s) {
+    if (s == null) return "";
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
 
+  function renderOverdueTicketLists() {
+    const pack = (currentPayload && currentPayload.top10_overdue) || {};
+    const byTech = pack.overdue_tickets || {};
+    const labels = pack.labels || [];
+    const body = refs.odTicketsBody;
+    if (!body) return;
+
+    if (!labels.length) {
+      body.innerHTML = '<div class="od-empty">Không có dữ liệu ticket Overdue.</div>';
+      body.dataset.built = "1";
+      return;
+    }
+
+    let html = "";
+    labels.forEach((tech, idx) => {
+      const tickets = byTech[tech] || [];
+      const n = tickets.length;
+      const region = (pack.regions && pack.regions[idx]) || "";
+      const rate = (pack.rates_pct && pack.rates_pct[idx] != null) ? pack.rates_pct[idx] + "%" : "—";
+      const closed = (pack.closed_counts && pack.closed_counts[idx] != null) ? pack.closed_counts[idx] : "—";
+
+      html +=
+        '<div class="od-tech-block" data-tech="' + escapeHtml(tech) + '">' +
+        '<div class="od-tech-header">' +
+        '<div><span class="chev">▶</span> ' + escapeHtml(tech) +
+        (region ? ' <span class="od-tech-meta">· ' + escapeHtml(region) + "</span>" : "") +
+        "</div>" +
+        '<div class="od-tech-meta">' + n + " ticket OD · tỷ lệ " + rate + " · tạo " + closed + "</div>" +
+        "</div>" +
+        '<div class="od-tech-table-wrap">';
+
+      if (!tickets.length) {
+        html += '<div class="od-empty">Không có ticket Overdue.</div>';
+      } else {
+        html +=
+          '<table class="od-ticket-table"><thead><tr>' +
+          "<th>#</th><th>Ticket ID</th><th>Mã trạm</th><th>Mã trụ</th>" +
+          "<th>Trạng thái</th><th>Create Time</th><th>Mã / mô tả lỗi</th>" +
+          "<th>SLA</th><th>Ghi chú</th>" +
+          "</tr></thead><tbody>";
+        tickets.forEach((t, i) => {
+          const note = t.excuse_note
+            ? '<span class="od-badge od-badge-excuse">' + escapeHtml(t.excuse_note) + "</span>"
+            : '<span class="od-badge od-badge-real">Chủ quan</span>';
+          const status = t["Ticket Status"] || "—";
+          const err = t["Error Code"] || "—";
+          const errShort = err.length > 40 ? err.slice(0, 38) + "…" : err;
+          html +=
+            "<tr>" +
+            "<td>" + (i + 1) + "</td>" +
+            '<td class="mono">' + escapeHtml(t["Ticket ID"]) + "</td>" +
+            '<td class="mono">' + escapeHtml(t["Station Code"]) + "</td>" +
+            '<td class="mono">' + escapeHtml(t["Charge Point ID"]) + "</td>" +
+            '<td><span class="od-badge od-badge-status">' + escapeHtml(status) + "</span></td>" +
+            '<td class="mono">' + escapeHtml(t["Create Time"]) + "</td>" +
+            '<td title="' + escapeHtml(err) + '">' + escapeHtml(errShort) + "</td>" +
+            "<td>" + escapeHtml(t["SLA Status"] || "Overdue") + "</td>" +
+            "<td>" + note + "</td>" +
+            "</tr>";
+        });
+        html += "</tbody></table>";
+      }
+      html += "</div></div>";
+    });
+
+    body.innerHTML = html;
+    body.dataset.built = "1";
+
+    body.querySelectorAll(".od-tech-header").forEach((hdr) => {
+      hdr.addEventListener("click", () => {
+        const wrap = hdr.nextElementSibling;
+        const open = wrap.classList.toggle("open");
+        hdr.classList.toggle("open", open);
+      });
+    });
+  }
+
+  function updateOdTicketsPanelVisibility(view) {
+    if (!refs.odTicketsPanel) return;
+    const show = view === "top_od";
+    refs.odTicketsPanel.style.display = show ? "block" : "none";
+    if (!show) {
+      refs.odTicketsBody.classList.remove("open");
+      refs.odTicketsToggle.classList.remove("open");
+      if (refs.odToggleLabel) {
+        refs.odToggleLabel.textContent = "Xem danh sách ticket Overdue (Top 10)";
+      }
+    } else {
+      delete refs.odTicketsBody.dataset.built;
+      refs.odTicketsBody.innerHTML = "";
+      refs.odTicketsBody.classList.remove("open");
+      refs.odTicketsToggle.classList.remove("open");
+      if (refs.odToggleLabel) {
+        refs.odToggleLabel.textContent = "Xem danh sách ticket Overdue (Top 10)";
+      }
+    }
+  }
   function applyView(view) {
     currentView = view;
     refs.viewToggle.querySelectorAll("button").forEach((b) => {
@@ -1273,13 +1432,13 @@
     });
     if (view === "region") {
       refs.title.textContent = "Tỷ lệ Overdue theo khu vực";
-      refs.desc.innerHTML = "Thanh = % OD · <strong>vạch + số</strong> = số ticket OD thực (đã trừ OD chủ quan VT/hẹn) · ticket <strong>tạo trong 30 ngày</strong> (mở lẫn đóng)";
+      refs.desc.innerHTML = "Thanh = % OD · <strong>vạch + số</strong> = số ticket overdue chủ quan (đã trừ OD khách quan VT/hẹn) · ticket <strong>tạo trong 30 ngày</strong> (mở lẫn đóng)";
     } else if (view === "tech") {
       refs.title.textContent = "% Overdue theo KT · " + selectedRegion;
       refs.desc.innerHTML = "Kỹ thuật viên khu vực <strong>" + selectedRegion + "</strong> · vạch + số = OD thực (trừ VT/hẹn) · ticket <strong>tạo trong 30 ngày</strong> (mở lẫn đóng)";
     } else if (view === "top_od") {
       refs.title.textContent = "Top 10 KT — tỷ lệ Overdue cao nhất";
-      refs.desc.innerHTML = "Toàn công ty · tối thiểu 3 ticket tạo trong 30 ngày · vạch + số = OD thực (trừ VT/hẹn) · mở lẫn đóng";
+      refs.desc.innerHTML = "Toàn công ty · tối thiểu 3 ticket tạo trong 30 ngày · vạch + số = OD chủ quan (trừ VT/hẹn) · mở lẫn đóng";
     } else if (view === "top_eff") {
       refs.title.textContent = "Top 10 KT — hiệu quả cao nhất";
       refs.desc.innerHTML = "Hiệu quả = % ticket đã đóng có SLA Ontime · tối thiểu 3 ticket đóng · 30 ngày (Close Time)";
@@ -1299,6 +1458,7 @@
         (mx.min_closed || 3) + " ticket đóng";
     }
     renderRegionTabs();
+    updateOdTicketsPanelVisibility(view);
     if (!currentPayload) return;
     renderKPIs(currentPayload);
     if (view === "matrix") {
@@ -1377,7 +1537,7 @@
           <h2 class="chart-title">Tỷ lệ Overdue</h2>
           <div class="desc chart-desc">
             Ticket <strong>tạo trong 30 ngày</strong> (mở lẫn đóng), đang ở SLA <strong>Overdue</strong> ·
-            màu theo % OD · <strong>vạch + số</strong> = số ticket OD thực (đã trừ OD chủ quan VT/hẹn)
+            màu theo % OD · <strong>vạch + số</strong> = số ticket chủ quan (đã trừ OD khách quan VT/hẹn)
           </div>
         </div>
         <div class="region-tabs header-region-filters" style="display:none;"></div>
@@ -1389,6 +1549,13 @@
       <div class="resolution-wrap" style="display:none;">
         <div style="position:relative;height:420px;width:100%;"><canvas class="resolution-canvas"></canvas></div>
         <div class="resolution-note" style="font-size:11.5px;color:var(--text-muted);margin-top:8px;"></div>
+      </div>
+            <div class="od-tickets-panel" style="display:none;">
+        <button type="button" class="od-tickets-toggle">
+          <span class="chev">▶</span>
+          <span class="od-toggle-label">Xem danh sách ticket Overdue (Top 10)</span>
+        </button>
+        <div class="od-tickets-body"></div>
       </div>
       <div class="source-note"></div>
     `;
@@ -1407,10 +1574,24 @@
       resolutionNote: panel.querySelector(".resolution-note"),
       quadLegend: panel.querySelector(".quad-legend"),
       sourceNote: panel.querySelector(".source-note"),
+      odTicketsPanel: panel.querySelector(".od-tickets-panel"),
+      odTicketsToggle: panel.querySelector(".od-tickets-toggle"),
+      odTicketsBody: panel.querySelector(".od-tickets-body"),
+      odToggleLabel: panel.querySelector(".od-toggle-label"),
     };
     refs.viewToggle.addEventListener("click", (e) => {
       const btn = e.target.closest("button[data-view]");
       if (btn) applyView(btn.dataset.view);
+    });
+    refs.odTicketsToggle.addEventListener("click", () => {
+      const open = refs.odTicketsBody.classList.toggle("open");
+      refs.odTicketsToggle.classList.toggle("open", open);
+      refs.odToggleLabel.textContent = open
+        ? "Thu gọn danh sách ticket Overdue"
+        : "Xem danh sách ticket Overdue (Top 10)";
+      if (open && !refs.odTicketsBody.dataset.built) {
+        renderOverdueTicketLists();
+      }
     });
   }
 
