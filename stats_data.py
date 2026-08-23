@@ -345,8 +345,23 @@ def process_ticket_information(
         else pd.Series([""] * len(df), index=df.index)
     )
     df["is_overdue"] = sla_l.eq("overdue")
-    df["has_spare_wait"] = df["Ticket ID"].isin(spare_ids) if spare_ids else False
-    df["has_appointment"] = df["Ticket ID"].isin(appointment_ids) if appointment_ids else False
+
+    # Cờ chờ VT / hẹn khách: ưu tiên sheet Spare Parts / Appointment,
+    # đồng thời nhận diện theo Ticket Status hiện tại (ticket đang mở ở
+    # trạng thái Appointment / Pending for spare parts vẫn được coi là có
+    # lý do khách quan dù sheet có thể thiếu record).
+    status_l = (
+        df["Ticket Status"].astype(str).str.strip().str.lower()
+        if "Ticket Status" in df.columns
+        else pd.Series([""] * len(df), index=df.index)
+    )
+    from_sheet_spare = df["Ticket ID"].isin(spare_ids) if spare_ids else False
+    from_sheet_appt = df["Ticket ID"].isin(appointment_ids) if appointment_ids else False
+    from_status_spare = status_l.str.contains("spare parts", na=False)
+    from_status_appt = status_l.eq("appointment")
+
+    df["has_spare_wait"] = from_sheet_spare | from_status_spare
+    df["has_appointment"] = from_sheet_appt | from_status_appt
     df["is_overdue_excuse"] = df["is_overdue"] & (df["has_spare_wait"] | df["has_appointment"])
 
     keep = [col for col in cols_out if col in df.columns]
@@ -697,8 +712,12 @@ def enrich_closed_with_ticket_info(
             continue
         tech = _tech_for(station)
         sla_s = str(sla or "").strip().lower()
-        has_spare = tid in spare_ids
-        has_appt = tid in appointment_ids
+        # Cờ chờ VT / hẹn khách: sheet + fallback theo Ticket Status hiện tại
+        # (để ticket đang/đã từng ở Appointment / Pending for spare parts
+        # vẫn được coi là có lý do khách quan).
+        status_norm = _norm_status(info_row.get("Ticket Status") if info_row is not None else None)
+        has_spare = (tid in spare_ids) or ("spare parts" in status_norm)
+        has_appt = (tid in appointment_ids) or (status_norm == "appointment")
         is_od = sla_s == "overdue"
         create_time = info_row.get("Create Time") if info_row is not None else None
         close_time = c.get("Close Time")

@@ -437,7 +437,9 @@ def _apply_enrichment(status, ticket_id, enrichment_map):
     has_no_info = bool(enrich.get("has_no_info"))
 
     status_display = f"{status}{REOPEN_LABEL_SUFFIX}" if is_reopened else status
-    severity_override = NO_INFO_SEVERITY_KEY if has_no_info else None
+    # Không ép severity tím: overdue chưa có thông tin vẫn đỏ theo giờ.
+    # Chỉ giữ is_no_info_critical để frontend hiện cờ cảnh báo.
+    severity_override = None
     return status_display, severity_override, is_reopened, has_no_info
 
 
@@ -526,12 +528,7 @@ def _build_station_payload(
                     "owners": ticket_owners,
                 })
 
-            # Trạm có ít nhất 1 ticket EV "Open, overdue, chưa có thông tin xử
-            # lý" -> ưu tiên tô màu cảnh báo tím đậm cho cả trạm, ghi đè lên
-            # màu theo thang giờ tồn đọng thông thường.
-            if station_has_no_info_critical:
-                color = NO_INFO_SEVERITY_KEY
-
+            # Không đổi màu trạm sang tím — giữ theo thang giờ (đỏ nếu >48h).
             stations.append({
                 "code": core_code,
                 "station_code": station_code,

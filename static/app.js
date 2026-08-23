@@ -50,18 +50,25 @@ let allStations = [];          // cache toàn bộ trạm nhận được gần 
 let selectedTechs = new Set(); // tên kỹ thuật viên đang được TICK CHỌN trong tag lọc (rỗng = hiện tất cả)
 let onlineUsernames = new Set(); // username (chữ thường) đang online
 
+// Cờ ưu tiên tím — không vòng tròn, chỉ lá cờ + cán để dễ nhận trên bản đồ
+const FLAG_SVG = `<svg width="14" height="16" viewBox="0 0 24 28" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+  <path d="M5 2v24" stroke="#4c1d95" stroke-width="2.4" stroke-linecap="round"/>
+  <path d="M6.2 3.2h11.5c.7 0 1.1.8.7 1.35L15.8 9.2l2.6 4.65c.4.55 0 1.35-.7 1.35H6.2V3.2z" fill="#7c3aed"/>
+  <path d="M6.2 3.2h11.5c.7 0 1.1.8.7 1.35L15.8 9.2l2.6 4.65c.4.55 0 1.35-.7 1.35H6.2V3.2z" fill="none" stroke="#5b21b6" stroke-width="0.8"/>
+</svg>`;
+
 // ---------- Icon trạm sạc: ghim giọt nước cổ điển ----------
 function stationIcon(color, hasNearOverdue, hasNoInfoCritical) {
-    const colorMap = { red: '#dc2626', orange: '#ea580c', green: '#16a34a', purple_critical: '#4c1d95' };
+    // purple_critical (cache cũ) map về đỏ như overdue thường
+    const colorMap = { red: '#dc2626', orange: '#ea580c', green: '#16a34a', purple_critical: '#dc2626' };
     const fill = colorMap[color] || '#3b82f6';
 
-    // Ticket Open-overdue mà CHƯA có bất kỳ thông tin xử lý nào (rất nguy hiểm,
-    // khó giải trình bên thứ 3) -> badge riêng, ưu tiên hơn badge "sắp quá hạn".
+    // Ticket Open-overdue CHƯA có thông tin — chỉ cờ tím, KHÔNG vòng tròn bao quanh
     const criticalBadge = hasNoInfoCritical ? `
-        <div style="position:absolute; top:-9px; right:-11px; width:20px; height:20px; border-radius:50%;
-                    background:#4c1d95; color:#fff; display:flex; align-items:center; justify-content:center;
-                    font-size:11px; border:2px solid #fff; box-shadow:0 2px 6px rgba(0,0,0,.45);
-                    animation:unassigned-pulse 1.4s infinite; z-index:11;">🚨</div>
+        <div style="position:absolute; top:-10px; right:-12px; width:14px; height:16px;
+                    display:flex; align-items:center; justify-content:center;
+                    filter: drop-shadow(0 1px 2px rgba(0,0,0,.4));
+                    animation:unassigned-pulse 1.4s infinite; z-index:11;">${FLAG_SVG}</div>
     ` : '';
 
     const warningBadge = (!hasNoInfoCritical && hasNearOverdue) ? `
@@ -215,16 +222,16 @@ const SEVERITY_STYLES = {
     red:    { bg: '#ff9f94', border: '#b32a1b', text: '#b32a1b' },
     orange: { bg: '#ffca9c', border: '#ce6b15', text: '#ce6b15' },
     green:  { bg: '#93ffab', border: '#26ac43', text: '#26ac43' },
-    // Tím đậm hơn soft mặc định để dễ nhận diện ticket Open-overdue chưa có thông tin
-    purple_critical: { bg: '#c4b5fd', border: '#4c1d95', text: '#4c1d95' },
+    // Cache cũ còn purple_critical → dùng palette đỏ (cờ tím chỉ là icon)
+    purple_critical: { bg: '#ff9f94', border: '#b32a1b', text: '#b32a1b' },
 };
 
-const STATION_HEADER_COLORS = { red: '#b32a1b', orange: '#ce6b15', green: '#26ac43', purple_critical: '#4c1d95' };
+const STATION_HEADER_COLORS = { red: '#b32a1b', orange: '#ce6b15', green: '#26ac43', purple_critical: '#b32a1b' };
 const STATION_ACCENT = {
     red:    { bar: '#ef4444', soft: '#fef2f2', text: '#b91c1c', chip: '#fee2e2' },
     orange: { bar: '#f97316', soft: '#fff7ed', text: '#c2410c', chip: '#ffedd5' },
     green:  { bar: '#22c55e', soft: '#f0fdf4', text: '#15803d', chip: '#dcfce7' },
-    purple_critical: { bar: '#6d28d9', soft: '#f5f3ff', text: '#4c1d95', chip: '#ede9fe' },
+    purple_critical: { bar: '#ef4444', soft: '#fef2f2', text: '#b91c1c', chip: '#fee2e2' },
 };
 
 /** Người tạo ticket cần loại bỏ khi hiển thị tài khoản phụ trách */
@@ -344,7 +351,9 @@ function pickStationAccounts(tickets) {
 
 function buildStationPopup(s) {
     const gmapUrl = `https://www.google.com/maps?q=${s.lat},${s.lng}`;
-    const accent = STATION_ACCENT[s.color] || STATION_ACCENT.green;
+    // Cache cũ có thể còn color=purple_critical → map về red
+    const stationColorKey = (s.color === 'purple_critical' ? 'red' : s.color);
+    const accent = STATION_ACCENT[stationColorKey] || STATION_ACCENT.green;
     const tickets = s.tickets || [];
     const ticketCount = tickets.length;
     const stationAddress = (s.address || '').trim() || pickStationAddress(tickets);
@@ -352,22 +361,24 @@ function buildStationPopup(s) {
 
     const rowsHtml = tickets.map((t) => {
         const sColor = statusColor(t.status);
-        const sevKey = t.severity || 'green';
-        const sev = STATION_ACCENT[sevKey] || STATION_ACCENT.green;
+        const rawSev = t.severity || 'green';
+        // Nền card đỏ theo giờ tồn — không tô tím; cờ tím chỉ dùng làm icon cảnh báo
+        const styleKey = (t.is_no_info_critical || rawSev === 'purple_critical')
+            ? 'red'
+            : rawSev;
+        const sevAccent = STATION_ACCENT[styleKey] || STATION_ACCENT.green;
+        const sevStyle = SEVERITY_STYLES[styleKey] || SEVERITY_STYLES.green;
         const hours = Number(t.hours) || 0;
         const statusLabel = t.status_display || t.status || '';
 
         let nearOverdueHtml = '';
         if (t.is_no_info_critical) {
-            // Open, overdue (>48h), trụ EV, CHƯA có bất kỳ thông tin xử lý nào —
-            // rất nguy hiểm vì khó giải trình cho bên thứ 3. Ưu tiên cảnh báo
-            // này hơn badge "Overdue" thường.
             nearOverdueHtml = `
-            <div style="margin-top:8px;display:inline-flex;align-items:center;gap:5px;
-                        padding:4px 10px;background:#4c1d95;color:#fff;
-                        border-radius:999px;font-size:11px;font-weight:600;
-                        animation:unassigned-pulse 1.5s infinite;">
-                🚨 Overdue · CHƯA có thông tin xử lý
+            <div style="margin-top:8px;display:inline-flex;align-items:center;gap:7px;
+                        padding:5px 11px;background:#fef2f2;color:#b91c1c;
+                        border:1px solid #fecaca;border-radius:999px;font-size:11px;font-weight:600;">
+                <span style="display:inline-flex;width:14px;height:16px;align-items:center;justify-content:center;flex-shrink:0;">${FLAG_SVG}</span>
+                Overdue · CHƯA có thông tin xử lý
             </div>`;
         } else if (t.is_near_overdue) {
             const remaining = Math.max(0, 48 - hours);
@@ -387,26 +398,15 @@ function buildStationPopup(s) {
             </div>`;
         }
 
-        // Nền ticket card theo severity key từ backend (khớp _severity_color / NO_INFO_SEVERITY_KEY)
-        const styleKey = (t.is_no_info_critical ? 'purple_critical' : (sevKey || 'green'));
-        const sevStyle = SEVERITY_STYLES[styleKey] || SEVERITY_STYLES.green;
-
         return `
         <div style="position:relative;background:${sevStyle.bg};border:1px solid ${sevStyle.border};
                     border-radius:12px;padding:12px 12px 12px 14px;margin-bottom:10px;
                     box-shadow:0 1px 2px rgba(15,23,42,.04);overflow:hidden;">
-            <div style="position:absolute;left:0;top:0;bottom:0;width:4px;background:${sev.bar};"></div>
+            <div style="position:absolute;left:0;top:0;bottom:0;width:4px;background:${sevAccent.bar};"></div>
             <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;">
-                <div style="min-width:0;flex:1;">
-                    <div style="font-weight:700;color:#0f172a;font-size:13px;letter-spacing:-0.01em;
-                                white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
-                        ${t.cp_id || '—'}
-                    </div>
-                    <div style="color:#94a3b8;font-size:11px;margin-top:3px;white-space:nowrap;
-                                overflow:hidden;text-overflow:ellipsis;">
-                        ${t.model_name || ''} · #${t.ticket_id || ''}
-                        ${t.creator ? ` · ${t.creator}` : ''}
-                    </div>
+                <div style="font-weight:700;color:#0f172a;font-size:13px;letter-spacing:-0.01em;
+                            min-width:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">
+                    ${t.cp_id || '—'}
                 </div>
                 <span style="flex-shrink:0;background:${sColor};color:#fff;font-size:10px;
                             padding:3px 9px;border-radius:999px;font-weight:600;white-space:nowrap;
@@ -414,21 +414,25 @@ function buildStationPopup(s) {
                     ${statusLabel}
                 </span>
             </div>
+            <div style="color:#334155;font-size:11px;margin-top:4px;line-height:1.4;word-break:break-word;">
+                ${t.model_name || ''} · #${t.ticket_id || ''}
+                ${t.creator ? ` · ${t.creator}` : ''}
+            </div>
             <div style="margin-top:10px;display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
                 <span style="display:inline-flex;align-items:center;gap:4px;
-                             background:${sev.chip};color:${sev.text};
+                             background:${sevAccent.chip};color:${sevAccent.text};
                              font-size:12px;font-weight:700;padding:4px 10px;border-radius:8px;">
                     <span style="opacity:.85;">⏱</span> ${t.duration || '—'}
                 </span>
             </div>
-            <div style="margin-top:8px;color:#475569;font-size:12.5px;line-height:1.5;
+            <div style="margin-top:8px;color:#334155;font-size:12.5px;line-height:1.5;
                         display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;">
                 ${t.description || ''}
             </div>
             ${t.owners ? `
             <div style="margin-top:8px;display:flex;gap:6px;align-items:flex-start;">
                 <span style="flex-shrink:0;font-size:12px;line-height:1.4;">👥</span>
-                <div style="color:#64748b;font-size:11px;line-height:1.4;word-break:break-word;">
+                <div style="color:#475569;font-size:11px;line-height:1.4;word-break:break-word;">
                     ${t.owners}
                 </div>
             </div>` : ''}
@@ -501,6 +505,7 @@ function buildStationPopup(s) {
 
 // Vẽ marker trạm dựa trên allStations + bộ lọc kỹ thuật viên hiện tại (selectedTechs)
 // + bộ lọc loại trạm (showChargers/showBss)
+// Mặc định CHỈ hiện trụ sạc EV — BSS tắt để giảm lag lúc vào map
 let showChargerStations = true;
 let showBssStations = true;
 
@@ -534,12 +539,14 @@ function applyStationFilter() {
 const chargerTypeCheckbox = document.getElementById('filter-charger');
 const bssTypeCheckbox = document.getElementById('filter-bss');
 if (chargerTypeCheckbox) {
+    chargerTypeCheckbox.checked = showChargerStations;
     chargerTypeCheckbox.addEventListener('change', () => {
         showChargerStations = chargerTypeCheckbox.checked;
         applyStationFilter();
     });
 }
 if (bssTypeCheckbox) {
+    bssTypeCheckbox.checked = showBssStations; // false mặc định
     bssTypeCheckbox.addEventListener('change', () => {
         showBssStations = bssTypeCheckbox.checked;
         applyStationFilter();
@@ -1063,14 +1070,10 @@ function durationCellHtml(t) {
     let color = '#16a34a';      // < 24h green
     let bg = '#f0fdf4';
     let label = '';
-    if (t.is_no_info_critical) {
-        color = '#4c1d95';
-        bg = '#ede9fe';
-        label = 'Overdue · Chưa có thông tin';
-    } else if (hours > 48) {
+    if (hours > 48 || t.is_no_info_critical) {
         color = '#dc2626';
         bg = '#fef2f2';
-        label = 'Overdue';
+        label = t.is_no_info_critical ? 'Overdue · Chưa có thông tin' : 'Overdue';
     } else if (hours >= 24) {
         color = '#ea580c';
         bg = '#fff7ed';
@@ -1079,7 +1082,7 @@ function durationCellHtml(t) {
     const warnBadge = t.is_near_overdue
         ? `<div style="margin-top:3px;color:#c2410c;font-weight:600;font-size:10.5px;">⏰ Sắp quá hạn (~${(48 - hours).toFixed(1)}h)</div>`
         : (label && (hours > 48 || t.is_no_info_critical)
-            ? `<div style="margin-top:3px;color:${color};font-weight:600;font-size:10.5px;">${t.is_no_info_critical ? '🚨 ' : ''}${label}</div>`
+            ? `<div style="margin-top:3px;color:${color};font-weight:600;font-size:10.5px;display:inline-flex;align-items:center;gap:4px;">${t.is_no_info_critical ? `<span style="display:inline-flex;width:12px;height:14px;">${FLAG_SVG}</span>` : ''}${label}</div>`
             : '');
     return `<td style="white-space:nowrap;background:${bg} !important;">
         <span style="color:${color};font-weight:700;">${t.duration ?? ''}</span>
@@ -1098,11 +1101,9 @@ function renderTicketTable(tickets, techName) {
     }
     const rowsHtml = tickets.map((t) => {
         const hours = Number(t.hours) || 0;
-        const rowBg = t.is_no_info_critical
-            ? 'background:#ede9fe !important;'
-            : (hours > 48
-                ? 'background:#fef2f2 !important;'
-                : (hours >= 24 ? 'background:#fffbeb !important;' : ''));
+        const rowBg = (hours > 48 || t.is_no_info_critical)
+            ? 'background:#fef2f2 !important;'
+            : (hours >= 24 ? 'background:#fffbeb !important;' : '');
         const statusLabel = t.status_display || t.status || '';
         return `
         <tr style="${rowBg}">
@@ -1110,7 +1111,7 @@ function renderTicketTable(tickets, techName) {
             ${durationCellHtml(t)}
             <td style="white-space:nowrap;">${t.station_code ?? ''}</td>
             <td style="white-space:nowrap;">${t.cp_id ?? ''}</td>
-            <td style="white-space:nowrap;${t.is_no_info_critical ? 'color:#4c1d95;font-weight:700;' : ''}">${statusLabel}</td>
+            <td style="white-space:nowrap;${t.is_no_info_critical ? 'color:#dc2626;font-weight:700;' : ''}">${statusLabel}</td>
             <td style="max-width:320px;white-space:normal;line-height:1.45;">${t.description ?? ''}</td>
             <td style="max-width:280px;white-space:normal;line-height:1.45;">${t.address ?? ''}</td>
         </tr>
