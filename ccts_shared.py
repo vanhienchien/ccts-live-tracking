@@ -114,7 +114,7 @@ STATS_REFRESH_LOCK = asyncio.Lock()
 # ------------------------------------------------------------------
 STATS_SCRAPE_ACCOUNTS = [
     {"username": "esmanager", "password": "Ccts123."},
-    {"username": "itsmanagermt", "password": "Duynam1234@"},
+    {"username": "its_frontdesk 04", "password": "Duynam123."},
 ]
 
 
