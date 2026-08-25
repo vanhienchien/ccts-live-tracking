@@ -133,6 +133,15 @@
 
   // ---------- Biểu đồ 2: Top 20 trụ lỗi ----------
 
+  function formatShortTime(isoOrStr) {
+    if (!isoOrStr || isoOrStr === "—") return "—";
+    const s = String(isoOrStr).trim();
+    // "2026-08-22 15:30:00" → "22/08 15:30"
+    const m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/);
+    if (m) return m[3] + "/" + m[2] + " " + m[4] + ":" + m[5];
+    return s.length > 16 ? s.slice(0, 16) : s;
+  }
+
   function drawPolesChart() {
     const payload = currentPayload;
     const top = (payload && payload.top_poles) || {};
@@ -142,8 +151,12 @@
     const stations = (top.station_codes || []).slice(0, 20);
     const techs = (top.techs || []).slice(0, 20);
     const breakdowns = (top.error_breakdowns || []).slice(0, 20);
+    const latestTimes = (top.latest_create_times || []).slice(0, 20);
+    const latestStatuses = (top.latest_ticket_statuses || []).slice(0, 20);
+    const latestIds = (top.latest_ticket_ids || []).slice(0, 20);
+    const latestOpen = (top.latest_is_open || []).slice(0, 20);
 
-    // === THÊM ĐOẠN NÀY: tạo map code → tên lỗi từ top10/top20 ===
+    // Map code → tên lỗi từ top10/top20
     const topErrors = payload.top10 || payload.top20 || {};
     const errorLabels = topErrors.labels || [];
     const errorNames = topErrors.display_names || topErrors.labels || [];
@@ -151,7 +164,6 @@
     errorLabels.forEach((code, idx) => {
       codeToName[code] = errorNames[idx] || code;
     });
-    // =========================================================
 
     if (!cpIds.length) {
       refs.loadingPoles.style.display = "block";
@@ -161,15 +173,25 @@
     }
     refs.loadingPoles.style.display = "none";
     refs.chartWrapPoles.style.display = "block";
-    refs.chartWrapPoles.style.height = Math.max(300, cpIds.length * 40 + 60) + "px";
+    // Tăng chiều cao một chút vì nhãn Y có thêm dòng trạng thái
+    refs.chartWrapPoles.style.height = Math.max(320, cpIds.length * 44 + 70) + "px";
 
     const yLabels = cpIds.map((cp, i) => {
       const station = stations[i] || "—";
-      const tech = techs[i] || "—";
-      return [cp + "-" + station];
+      const isOpen = !!latestOpen[i];
+      const statusTag = isOpen ? "● Mở" : "○ Đóng";
+      const timeShort = formatShortTime(latestTimes[i]);
+      return [
+        cp + " · " + station,
+        statusTag + " · " + timeShort,
+      ];
     });
 
-    const barColors = counts.map((_, i) => BAR_COLORS[i % BAR_COLORS.length]);
+    // Màu cột: đỏ nhạt nếu ticket mới nhất đang mở, giữ palette cũ nếu đã đóng
+    const barColors = counts.map((_, i) => {
+      if (latestOpen[i]) return "rgba(239, 68, 68, 0.85)"; // red-500
+      return BAR_COLORS[i % BAR_COLORS.length];
+    });
 
     if (chartPoles) chartPoles.destroy();
     chartPoles = new Chart(refs.canvasPoles.getContext("2d"), {
@@ -193,6 +215,11 @@
         plugins: {
           legend: { display: false },
           tooltip: {
+            backgroundColor: "#0f172a",
+            titleFont: { size: 13, weight: "600" },
+            bodyFont: { size: 12.5 },
+            padding: 12,
+            cornerRadius: 8,
             callbacks: {
               title: (items) => {
                 const i = items[0].dataIndex;
@@ -201,16 +228,23 @@
               label: (item) => " Tổng ticket lỗi: " + item.raw,
               afterBody: (items) => {
                 const i = items[0].dataIndex;
+                const isOpen = !!latestOpen[i];
+                const statusLine = latestStatuses[i] || (isOpen ? "Đang mở" : "Đã đóng");
                 const lines = [
                   "Trạm: " + (stations[i] || "—"),
                   "KT phụ trách: " + (techs[i] || "—"),
+                  "",
+                  "── Ticket mới nhất ──",
+                  "Ticket ID: " + (latestIds[i] || "—"),
+                  "Create Time: " + (latestTimes[i] || "—"),
+                  "Trạng thái: " + statusLine,
                   "",
                   "Tần suất mã lỗi:",
                 ];
                 const bd = breakdowns[i] || [];
                 bd.forEach((b) => {
                   const code = b.code || "";
-                  const name = codeToName[code] || code;   // ← lấy tên từ map
+                  const name = codeToName[code] || code;
                   lines.push("  " + name + ": " + b.count);
                 });
                 return lines;
@@ -234,7 +268,19 @@
             grid: { color: "rgba(148,163,184,.2)" },
           },
           y: {
-            ticks: { color: "#0f172a", font: { size: 11, weight: "600" }, autoSkip: false },
+            ticks: {
+              color: (ctx) => {
+                // Dòng 0 = mã trụ (đen), dòng 1 = trạng thái (đỏ nếu mở, xám nếu đóng)
+                const i = ctx.index;
+                if (ctx.tick && ctx.tick.label && Array.isArray(ctx.tick.label)) {
+                  // Chart.js v3/v4: không dễ đổi màu từng dòng trong multi-line label
+                  // → dùng màu mặc định, tooltip + màu cột đã đủ tín hiệu
+                }
+                return latestOpen[i] ? "#b91c1c" : "#0f172a";
+              },
+              font: { size: 11, weight: "600" },
+              autoSkip: false,
+            },
             grid: { display: false },
           },
         },
@@ -356,7 +402,8 @@
     Core.setSourceBadge(payload.source === "sample" ? "Dữ liệu mẫu" : "Cache");
     Core.setGeneratedAt(payload.generated_at);
     refs.sourceNote.textContent = "Top 10 Error Code · 30 ngày · " + (payload.generated_at || "");
-    refs.sourceNotePoles.textContent = "Top 20 trụ lên lỗi nhiều nhất · 30 ngày · " + (payload.generated_at || "");
+    refs.sourceNotePoles.textContent =
+      "Top 20 trụ lỗi · 30 ngày · cột đỏ = ticket mới nhất đang mở · " + (payload.generated_at || "");
     if (refs.sourceNoteOpen) {
       refs.sourceNoteOpen.textContent = "Top 20 ticket đang mở lâu nhất · dữ liệu 60 ngày · " + (payload.generated_at || "");
     }
@@ -435,7 +482,12 @@
         <div class="card-header">
           <div>
             <h2>Top 20 trụ lỗi</h2>
-            <div class="desc">Nhóm theo <strong>Mã trụ (Charge Point ID)</strong> · 30 ngày gần nhất · hover để xem Mã trạm, KT phụ trách và tần suất từng mã lỗi</div>
+            <div class="desc">
+              Nhóm theo <strong>Mã trụ (Charge Point ID)</strong> · 30 ngày ·
+              nhãn Y: <strong>● Mở / ○ Đóng</strong> + thời gian ticket mới nhất ·
+              <span style="color:#b91c1c;font-weight:600;">cột đỏ = ticket mới nhất đang mở</span> ·
+              hover để xem Ticket ID, Create Time, trạng thái đầy đủ và tần suất mã lỗi
+            </div>
           </div>
         </div>
         <div class="loading chart-loading-poles" style="display:none;">⏳ Đang tải top trụ lỗi…</div>

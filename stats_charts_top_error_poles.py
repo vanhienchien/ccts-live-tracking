@@ -4,6 +4,8 @@ stats_charts_top_error_poles.py — Top 20 trụ (Charge Point) lên Error Code 
 - Nhóm theo Charge Point ID ("Mã trụ").
 - Với mỗi trụ: Mã trạm, kỹ thuật phụ trách, tổng số ticket lỗi, và breakdown
   tần suất từng mã lỗi (top 5 mã, phần còn lại gộp vào "Khác").
+- Thêm thông tin ticket MỚI NHẤT của trụ: Create Time + trạng thái đóng/mở
+  (dựa trên Ticket Status hiện tại).
 - Đây KHÔNG phải chart độc lập: build_top_error_poles() được gọi trực tiếp
   từ stats_charts_error_codes.py để gộp chung vào payload "Top mã lỗi"
   (cùng /api/stats/error-codes, cùng bộ filter 30 ngày / cp_type đã áp dụng
@@ -18,7 +20,13 @@ from typing import Any
 
 import pandas as pd
 
-from stats_data import is_excluded_tech
+from stats_data import (
+    is_excluded_tech,
+    OPEN_STATUSES,
+    CLOSED_STATUS,
+    _norm_status,
+    _parse_create_time,
+)
 
 TOP_N = 20
 MAX_CODES_SHOWN = 5
@@ -41,6 +49,35 @@ def normalize_error_code(raw) -> str | None:
     return m.group(1).upper()
 
 
+def _is_open_status(status_raw) -> bool:
+    """True nếu ticket đang mở (Open / Appointment / Pending spare / ASP close…)."""
+    st = _norm_status(status_raw)
+    if not st:
+        return False
+    if st == CLOSED_STATUS:
+        return False
+    if st in {"closed", "resolved", "done", "pending for voms confirm"}:
+        return False
+    if st in OPEN_STATUSES:
+        return True
+    if "spare parts" in st:
+        return True
+    # Không rõ → coi là đang mở (an toàn hơn khi hiển thị cảnh báo)
+    return True
+
+
+def _status_label(status_raw) -> str:
+    """Nhãn ngắn: 'Đang mở (…) / 'Đã đóng (…)'."""
+    if status_raw is None or (isinstance(status_raw, float) and pd.isna(status_raw)):
+        return "—"
+    raw = str(status_raw).strip()
+    if not raw or raw.lower() in {"nan", "none", "null"}:
+        return "—"
+    if _is_open_status(raw):
+        return f"Đang mở ({raw})"
+    return f"Đã đóng ({raw})"
+
+
 def build_top_error_poles(df: pd.DataFrame) -> dict[str, Any]:
     empty = {
         "labels": [],
@@ -49,6 +86,10 @@ def build_top_error_poles(df: pd.DataFrame) -> dict[str, Any]:
         "techs": [],
         "counts": [],
         "error_breakdowns": [],
+        "latest_create_times": [],
+        "latest_ticket_statuses": [],
+        "latest_ticket_ids": [],
+        "latest_is_open": [],
         "unique_poles": 0,
         "total_tickets_with_error_code": 0,
     }
@@ -68,6 +109,12 @@ def build_top_error_poles(df: pd.DataFrame) -> dict[str, Any]:
     if work.empty:
         return empty
 
+    # Parse Create Time để chọn ticket mới nhất theo từng trụ
+    if "Create Time" in work.columns:
+        work["_dt"] = work["Create Time"].apply(_parse_create_time)
+    else:
+        work["_dt"] = pd.NaT
+
     cp_counts = work["_cp"].value_counts()
     top_cps = list(cp_counts.head(TOP_N).index)
 
@@ -76,6 +123,10 @@ def build_top_error_poles(df: pd.DataFrame) -> dict[str, Any]:
     techs: list[str] = []
     counts: list[int] = []
     error_breakdowns: list[list[dict[str, Any]]] = []
+    latest_create_times: list[str] = []
+    latest_ticket_statuses: list[str] = []
+    latest_ticket_ids: list[str] = []
+    latest_is_open: list[bool] = []
 
     for cp in top_cps:
         sub = work[work["_cp"] == cp]
@@ -105,11 +156,34 @@ def build_top_error_poles(df: pd.DataFrame) -> dict[str, Any]:
         if other_n > 0:
             top_breakdown.append({"code": "Khác", "count": int(other_n)})
 
+        # Ticket mới nhất của trụ (Create Time lớn nhất)
+        sub_sorted = sub.sort_values("_dt", ascending=False, na_position="last")
+        latest = sub_sorted.iloc[0]
+        latest_dt = latest.get("_dt")
+        if latest_dt is not None and not pd.isna(latest_dt):
+            latest_ct = (
+                latest_dt.strftime("%Y-%m-%d %H:%M:%S")
+                if hasattr(latest_dt, "strftime")
+                else str(latest_dt)
+            )
+        else:
+            raw_ct = latest.get("Create Time")
+            latest_ct = str(raw_ct).strip() if raw_ct is not None and str(raw_ct).strip() else "—"
+
+        status_raw = latest.get("Ticket Status") if "Ticket Status" in sub.columns else None
+        is_open = _is_open_status(status_raw)
+        status_label = _status_label(status_raw)
+        tid = str(latest.get("Ticket ID") or "").strip() or "—"
+
         labels.append(cp)
         station_codes.append(station)
         techs.append(tech)
         counts.append(cnt)
         error_breakdowns.append(top_breakdown)
+        latest_create_times.append(latest_ct)
+        latest_ticket_statuses.append(status_label)
+        latest_ticket_ids.append(tid)
+        latest_is_open.append(bool(is_open))
 
     return {
         "labels": labels,
@@ -118,6 +192,10 @@ def build_top_error_poles(df: pd.DataFrame) -> dict[str, Any]:
         "techs": techs,
         "counts": counts,
         "error_breakdowns": error_breakdowns,
+        "latest_create_times": latest_create_times,
+        "latest_ticket_statuses": latest_ticket_statuses,
+        "latest_ticket_ids": latest_ticket_ids,
+        "latest_is_open": latest_is_open,
         "unique_poles": int(work["_cp"].nunique()),
         "total_tickets_with_error_code": int(len(work)),
     }
