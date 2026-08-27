@@ -307,7 +307,7 @@ async def fetch_live_tickets():
     if "Ticket ID" in df.columns:
         df = df.drop_duplicates(subset=["Ticket ID"]).reset_index(drop=True)
     if "Problem Description" in df.columns:
-        df = df[~df["Problem Description"].astype(str).str.strip().str.startswith("BSS.No2")].copy()
+        df = df[~df["Problem Description"].astype(str).str.strip().str.startswith("BSS.No")].copy()
 
     print(f"[+] Tổng cộng: {len(df)} tickets sau khi gộp và lọc.")
     return df, any_success, success_accounts

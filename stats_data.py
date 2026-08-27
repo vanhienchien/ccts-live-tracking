@@ -346,10 +346,10 @@ def process_ticket_information(
 
     pd_col = df["Problem Description"].astype(str).str.strip()
     before = len(df)
-    df = df[~pd_col.str.startswith("BSS.No2")].copy()
+    df = df[~pd_col.str.startswith("BSS.No")].copy()
     dropped = before - len(df)
     if dropped:
-        print(f"[stats] Loại {dropped} ticket BSS.No2")
+        print(f"[stats] Loại {dropped} ticket BSS.No")
 
     if region_map is None or tech_map is None:
         rm, tm, _ = _get_static_maps()

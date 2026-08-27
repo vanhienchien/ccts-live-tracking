@@ -26,7 +26,7 @@ from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS
 import os
 
 # auto | 1 | 0 — local test: set STATS_REFRESH_ON_STARTUP=0 để chỉ dùng cache có sẵn
-_STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "1").strip().lower()
+_STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "auto").strip().lower()
 
 
 app = FastAPI(title="CCTS Live Map")
