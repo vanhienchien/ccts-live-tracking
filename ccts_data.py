@@ -207,32 +207,51 @@ async def _fetch_tickets_window_single_account(username, password, ticket_status
 async def _fetch_tickets_window_multi_account(ticket_statuses, start_str, stop_str):
     """Cào từ TẤT CẢ tài khoản trong CCTS_ACCOUNTS, gộp lại (chưa khử trùng).
 
+    Cào SONG SONG các tài khoản (mỗi tài khoản dùng session/token riêng nên
+    chạy đồng thời an toàn) thay vì tuần tự như trước — giữ CCTS_API_LOCK
+    (khoá DÙNG CHUNG với stats_data.py) trong thời gian ngắn hơn, giảm thời
+    gian chặn lượt cào thống kê 0h nếu 2 việc rơi trùng giờ.
+
     Trả về (list_dict_thô, all_success_bool, success_accounts).
     all_success = True chỉ khi *mọi* tài khoản đều lấy thành công.
     success_accounts = [(username, password), ...] các tài khoản cào thành
-    công, theo đúng thứ tự trong CCTS_ACCOUNTS — dùng lại cho các bước tra
-    cứu chi tiết ticket (đỡ phải login thêm tài khoản mới).
+    công, GIỮ ĐÚNG THỨ TỰ trong CCTS_ACCOUNTS (dù chạy song song) — thứ tự
+    này còn được dùng làm ưu tiên tra cứu chi tiết ticket (xem
+    _enrich_open_overdue_ev_tickets: tài khoản đầu tiên thử trước, tài
+    khoản sau chỉ là fallback).
     """
     all_raw = []
-    success_count = 0
-    total = len(CCTS_ACCOUNTS)
-    failed_accounts = []
     success_accounts = []
+    failed_accounts = []
+    total = len(CCTS_ACCOUNTS)
 
     async with CCTS_API_LOCK:
-        print("[ccts_data] Đã giữ CCTS_API_LOCK — cào live tickets...")
-        for account in CCTS_ACCOUNTS:
-            username = account["username"]
-            tickets, ok = await _fetch_tickets_window_single_account(
-                username, account["password"], ticket_statuses, start_str, stop_str
-            )
-            if ok:
-                success_count += 1
-                all_raw.extend(tickets)
-                success_accounts.append((username, account["password"]))
-            else:
-                failed_accounts.append(username)
+        print(f"[ccts_data] Đã giữ CCTS_API_LOCK — cào live tickets ({total} tài khoản song song)...")
+        results = await asyncio.gather(
+            *(
+                _fetch_tickets_window_single_account(
+                    account["username"], account["password"], ticket_statuses, start_str, stop_str
+                )
+                for account in CCTS_ACCOUNTS
+            ),
+            return_exceptions=True,
+        )
         print("[ccts_data] Nhả CCTS_API_LOCK.")
+
+    success_count = 0
+    for account, result in zip(CCTS_ACCOUNTS, results):
+        username = account["username"]
+        if isinstance(result, Exception):
+            print(f"[!] Lỗi cào tài khoản [{username}]: {result}")
+            failed_accounts.append(username)
+            continue
+        tickets, ok = result
+        if ok:
+            success_count += 1
+            all_raw.extend(tickets)
+            success_accounts.append((username, account["password"]))
+        else:
+            failed_accounts.append(username)
 
     all_success = (total > 0) and (success_count == total)
     if all_success:
@@ -244,6 +263,7 @@ async def _fetch_tickets_window_multi_account(ticket_statuses, start_str, stop_s
             f"→ không chấp nhận dữ liệu mới, giữ cache cũ."
         )
     return all_raw, all_success, success_accounts
+
 
 
 def _process_raw_tickets(raw_tickets):
@@ -350,18 +370,24 @@ def _classify_ticket_timeline(timeline):
     return {"is_reopened": is_reopened, "has_no_info": has_no_info}
 
 
-async def _lookup_ticket_enrichment(client, ticket_id):
-    """Gọi search_ticket() cho 1 ticket, trả về dict phân loại hoặc None nếu
-    tra cứu thất bại / không tìm thấy (lỗi từng ticket được nuốt lại, không
-    làm hỏng cả chu kỳ làm mới bản đồ)."""
-    try:
-        result = await client.search_ticket(ticket_id)
-    except Exception as e:
-        print(f"[!] Lỗi tra cứu chi tiết ticket {ticket_id}: {e}")
-        return None
-    if not result:
-        return None
-    return _classify_ticket_timeline(result.get("timeline"))
+async def _lookup_ticket_enrichment(clients, ticket_id):
+    """Tra cứu ticket lần lượt qua danh sách client (theo đúng thứ tự ưu
+    tiên — client đầu tiên trong success_accounts trước). Dừng ngay khi
+    tìm thấy ở tài khoản nào đó; chỉ thử tài khoản kế tiếp nếu tài khoản
+    trước KHÔNG tìm thấy ticket (result rỗng) hoặc lỗi.
+
+    Trước đây chỉ tra cứu bằng 1 tài khoản DUY NHẤT (success_accounts[0]),
+    nên ticket được TẠO/GẮN ở tài khoản kia sẽ luôn trả về None (không tìm
+    thấy) và không bao giờ được enrich (is_reopened / has_no_info)."""
+    for client in clients:
+        try:
+            result = await client.search_ticket(ticket_id)
+        except Exception as e:
+            print(f"[!] Lỗi tra cứu ticket {ticket_id} qua [{client.username}]: {e}")
+            continue
+        if result:
+            return _classify_ticket_timeline(result.get("timeline"))
+    return None
 
 
 async def _enrich_open_overdue_ev_tickets(df_tickets_filtered, success_accounts):
@@ -370,8 +396,12 @@ async def _enrich_open_overdue_ev_tickets(df_tickets_filtered, success_accounts)
     giới hạn ENRICH_MAX_CONCURRENCY) để phát hiện ticket "mở lại" và ticket
     Open-overdue chưa có bất kỳ thông tin xử lý nào.
 
-    Dùng lại tài khoản CCTS ĐẦU TIÊN đã cào live thành công trong chu kỳ
-    này (success_accounts) — không login thêm tài khoản mới.
+    Đăng nhập TẤT CẢ tài khoản đã cào live thành công trong chu kỳ này
+    (success_accounts) — không chỉ tài khoản đầu tiên. Với mỗi ticket, tra
+    cứu lần lượt theo đúng thứ tự success_accounts, dừng ngay khi tìm thấy;
+    chỉ tài khoản kế tiếp mới bị gọi nếu tài khoản trước không tìm thấy
+    ticket đó (ticket được tạo/gắn ở tài khoản khác, vd tài khoản không
+    phải esmanager).
 
     Trả về dict {ticket_id_str: {"is_reopened": bool, "has_no_info": bool}}
     — chỉ chứa các ticket đã tra cứu thành công. Không raise."""
@@ -394,25 +424,29 @@ async def _enrich_open_overdue_ev_tickets(df_tickets_filtered, success_accounts)
     if not ticket_ids:
         return {}
 
-    username, password = success_accounts[0]
-
     async with CCTS_API_LOCK:
         print(
             f"[ccts_data] Đã giữ CCTS_API_LOCK — tra cứu chi tiết {len(ticket_ids)} "
-            f"ticket Open-overdue (EV) bằng [{username}]..."
+            f"ticket Open-overdue (EV) bằng {len(success_accounts)} tài khoản "
+            f"({', '.join(u for u, _ in success_accounts)})..."
         )
-        try:
-            client, _ = await _pool.get_or_login(username, password)
-        except Exception as e:
-            print(f"[!] Không thể đăng nhập [{username}] để tra cứu ticket Open-overdue: {e}")
-            print("[ccts_data] Nhả CCTS_API_LOCK (tra cứu chi tiết - lỗi login).")
+        clients = []
+        for username, password in success_accounts:
+            try:
+                client, _ = await _pool.get_or_login(username, password)
+                clients.append(client)
+            except Exception as e:
+                print(f"[!] Không thể đăng nhập [{username}] để tra cứu ticket Open-overdue: {e}")
+
+        if not clients:
+            print("[ccts_data] Nhả CCTS_API_LOCK (tra cứu chi tiết - không có tài khoản nào đăng nhập được).")
             return {}
 
         semaphore = asyncio.Semaphore(ENRICH_MAX_CONCURRENCY)
 
         async def _bounded_lookup(ticket_id):
             async with semaphore:
-                return ticket_id, await _lookup_ticket_enrichment(client, ticket_id)
+                return ticket_id, await _lookup_ticket_enrichment(clients, ticket_id)
 
         results = await asyncio.gather(*(_bounded_lookup(tid) for tid in ticket_ids))
         print("[ccts_data] Nhả CCTS_API_LOCK (tra cứu chi tiết).")
@@ -767,9 +801,11 @@ def filter_stations_for_user(stations, user):
 
 
 def filter_tech_by_region_for_user(tech_by_region, user):
-    """Điều phối KV / KT chỉ thấy KT trong khu vực mình. Cấp cao hơn thấy hết."""
+    """KT chỉ thấy KT trong khu vực mình. Điều phối khu vực trở lên (Admin)
+    thấy TOÀN BỘ KT mọi khu vực — như Admin, không còn bị giới hạn theo
+    khu vực quản lý của mình."""
     role = (user.get("role") or "").strip().lower()
-    if role not in ("kỹ thuật", "điều phối khu vực"):
+    if role != "kỹ thuật":
         return tech_by_region
 
     user_region = (user.get("region") or "").strip()

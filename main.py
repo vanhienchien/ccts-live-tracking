@@ -1,673 +1,812 @@
 """
-CCTS Live Map - ứng dụng web độc lập (FastAPI + WebSocket).
+Module cào & xử lý dữ liệu ticket CCTS + toạ độ trạm.
+Hỗ trợ nhiều tài khoản CCTS (esmanager + itsmanager) - cào song song từng
+tài khoản, gộp + khử trùng theo Ticket ID.
 
-Chạy thử local:
-    uvicorn main:app --reload --host 0.0.0.0 --port 8000
-
-Xem README.md đi kèm để biết cách cấu hình biến môi trường & deploy.
+Lỗi đăng nhập của TỪNG tài khoản được bắt riêng (không crash cả chu kỳ), và
+hàm cào trả kèm cờ "có ít nhất 1 tài khoản thành công hay không" để main.py
+biết mà quyết định giữ lại dữ liệu cũ (cache) nếu TẤT CẢ tài khoản đều lỗi,
+thay vì xoá sạch bản đồ.
 """
 
-import asyncio
-import hashlib
-import json
-import uuid
-
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Form
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
-from fastapi.staticfiles import StaticFiles
-
-import users_store
-import ccts_data
-import stats_data
-from ccts_data import get_static_data, filter_stations_for_user, filter_tech_by_region_for_user
-from location_hub import hub
-from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS
 import os
+import json
+import re
+import asyncio
+from collections import defaultdict
+from datetime import datetime, timedelta
 
-# auto | 1 | 0 — local test: set STATS_REFRESH_ON_STARTUP=0 để chỉ dùng cache có sẵn
-_STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "1").strip().lower()
+import pandas as pd
 
+from utils import extract_core_station_code, parse_duration_to_hours
+from config import CCTS_ACCOUNTS
+import github_data_store
+from ccts_shared import VN_TZ, CCTS_API_LOCK, ClientPool, is_unmanaged_region, load_static_data_filtered
 
-app = FastAPI(title="CCTS Live Map")
-templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+CACHE_FILE = "last_known_data.json"
 
-SESSIONS = {}
-
-_latest_station_payload = {
-    "stations": [], "total_tickets": 0, "missing_count": 0, "updated_at": None, "fetch_success": True,
+STATUS_COLORS = {
+    "open": "#e74c3c",
+    "appointment": "#3498db",
+    "pending for asp close": "#9b59b6",
+    "pending for spare parts": "#e67e22",
+    "pending for local team close": "#16a085",
+    "pending for voms confirm": "#16a085",
 }
-_latest_tech_stats = {}
-_latest_ticket_rows = []
-_refresh_paused = False  # True = tạm dừng chu kỳ cào tự động (chỉ admin bật/tắt)
 
-# Chữ ký (hash) của lần broadcast_stations_update() gần nhất - dùng để BỎ QUA
-# việc gửi lại toàn bộ payload trạm qua WebSocket cho mọi client nếu dữ liệu
-# không hề đổi so với lần gửi trước (vd. chu kỳ cào này TẤT CẢ tài khoản đều
-# lỗi -> vẫn giữ dữ liệu cũ -> không có lý do gửi lại y hệt cho từng client).
-# Đây là nguồn tốn băng thông WebSocket lớn thứ 2 sau việc nhúng HTML vào
-# payload (đã bỏ ở ccts_data.py) - mỗi chu kỳ refresh_stations_loop() (mỗi
-# TICKET_REFRESH_SECONDS) trước đây LUÔN broadcast dù thất bại hay không.
-_last_broadcast_signature = None
+CLOSED_STATUSES = ["Pending for local team close", "Pending for VOMS confirm"]
+OPEN_STATUSES = ["Open", "Appointment", "Pending for ASP close", "Pending for spare parts"]
+ENDPOINT_FIND_TICKET = "/ccts/cctsTicket/findCCTSTicket"
 
+NORTH_LAT_THRESHOLD = 16.2  # Trạm có lat >= ngưỡng này bị coi là miền Bắc -> loại bỏ
 
-def _station_payload_signature(payload) -> str:
-    """Hash nội dung 'stations' (bỏ qua 'updated_at' vì trường này luôn đổi
-    mỗi chu kỳ dù dữ liệu ticket không đổi chút nào)."""
-    stations = payload.get("stations", [])
-    raw = json.dumps(stations, sort_keys=True, default=str, ensure_ascii=False)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def get_current_user(request: Request):
-    """Lấy user hiện tại từ cookie (web) HOẶC header 'Authorization: Bearer
-    <token>' (app di động). Cả 2 đều tra cùng 1 dict SESSIONS - token của
-    app tạo ra ở POST /api/mobile/login cũng nằm trong dict này, nên mọi
-    endpoint hiện có (/api/stations, /api/technicians...) dùng lại được
-    nguyên vẹn, không cần sửa gì thêm."""
-    token = request.cookies.get(SESSION_COOKIE_NAME)
-    if not token:
-        auth_header = request.headers.get("authorization") or ""
-        if auth_header.lower().startswith("bearer "):
-            token = auth_header[7:].strip()
-    if not token:
-        return None
-    return SESSIONS.get(token)
+# ==========================================
+# Làm giàu dữ liệu ticket "Open" đang overdue (>48h) — CHỈ áp dụng cho trụ
+# SẠC (EV), KHÔNG áp dụng cho trụ đổi pin (BSS).
+#
+# - Nếu timeline cho thấy ticket từng ở 1 trong các trạng thái "đã xử lý
+#   xong" (Pending for local team close / Pending for VOMS confirm /
+#   Pending for ASP close) trước khi quay lại Open -> ticket này ĐÃ MỞ LẠI,
+#   hiển thị trạng thái là "Open (mở lại)".
+# - Nếu ticket Open mà timeline KHÔNG có bất kỳ thông tin xử lý nào (chỉ có
+#   đúng bản ghi tạo ticket ban đầu) -> cực kỳ nguy hiểm (khó giải trình cho
+#   bên thứ 3), tô màu RIÊNG (tím đậm) để cảnh báo.
+# ==========================================
+REOPEN_TRIGGER_STATUSES = {
+    "pending for local team close",
+    "pending for voms confirm",
+    "pending for asp close",
+}
+REOPEN_LABEL_SUFFIX = " (mở lại)"
+NO_INFO_SEVERITY_KEY = "purple_critical"  # frontend cần map key này -> màu tím đậm
+ENRICH_MAX_CONCURRENCY = 4  # số request tra cứu chi tiết chạy song song tối đa (tránh bị đá session / rate-limit)
 
 
-def require_admin(user):
-    return bool(user) and (user.get("role") or "").strip().lower() == "admin"
+def _status_color(status):
+    return STATUS_COLORS.get(str(status).strip().lower(), "#7f8c8d")
 
 
-def can_view_stats(user) -> bool:
-    """Trang Thống kê: chỉ điều phối trở lên (không cho kỹ thuật viên)."""
-    if not user:
-        return False
-    role = (user.get("role") or "").strip().lower()
-    return role != "kỹ thuật"
-
-
-async def refresh_stations_once() -> bool:
-    """Cào lại toàn bộ dữ liệu (trạm + thống kê hiệu suất + ticket chi tiết).
-    Nếu TẤT CẢ tài khoản CCTS đều thất bại (fetch_success=False), GIỮ NGUYÊN
-    dữ liệu cũ trong bộ nhớ - không ghi đè bằng dữ liệu rỗng.
-    Trả về True nếu có dữ liệu MỚI được chấp nhận (đáng để broadcast), False
-    nếu lần này thất bại và dữ liệu trong bộ nhớ không đổi."""
-    global _latest_station_payload, _latest_tech_stats, _latest_ticket_rows
-
-    new_payload, new_stats, new_rows = await ccts_data.refresh_all_ccts_data()
-
-    if new_payload.get("fetch_success"):
-        _latest_station_payload = new_payload
-        _latest_tech_stats = new_stats
-        _latest_ticket_rows = new_rows
-        ccts_data.save_cache_to_file(new_payload, new_stats, new_rows)
-        return True
+def _severity_color(hours):
+    """Trả về (key, mã_màu_nền_nhạt, mã_màu_viền/đậm, màu_chữ) theo số giờ
+    tồn đọng của MỘT ticket cụ thể - thang màu vàng (mới) -> cam -> đỏ (tồn lâu)."""
+    if hours > 48:
+        return "red", "#ff9f94", "#b32a1b", "#b32a1b"
+    elif hours >= 24:
+        return "orange", "#ffca9c", "#ce6b15", "#ce6b15"
     else:
-        print("⚠️ Tất cả tài khoản CCTS đều thất bại lần cào này - "
-              "GIỮ NGUYÊN dữ liệu lần cào gần nhất thành công, không xoá bản đồ.")
-        return False
+        return "green", "#93ffab", "#26ac43", "#26ac43"
 
 
-async def broadcast_stations_update(force: bool = False):
-    """Gửi payload trạm mới nhất cho MỌI client đang mở WebSocket.
-    Mặc định (force=False): BỎ QUA việc gửi nếu nội dung 'stations' y hệt lần
-    gửi trước (vd. chu kỳ cào này thất bại toàn bộ, hoặc không ticket nào
-    thay đổi) - tránh phát lại payload giống hệt cho từng client, mỗi
-    TICKET_REFRESH_SECONDS, chiếm phần lớn băng thông WebSocket."""
-    global _last_broadcast_signature
-
-    signature = _station_payload_signature(_latest_station_payload)
-    if not force and signature == _last_broadcast_signature:
-        print("[ws] Dữ liệu trạm không đổi so với lần gửi trước - bỏ qua broadcast.")
-        return
-
-    async with hub.lock:
-        targets = list(hub.connections.items())
-
-    dead = []
-    for ws, viewer in targets:
-        filtered = filter_stations_for_user(_latest_station_payload["stations"], viewer)
-        payload = {**_latest_station_payload, "stations": filtered, "type": "stations_update"}
-        try:
-            await ws.send_json(payload)
-        except Exception:
-            dead.append(ws)
-
-    if dead:
-        async with hub.lock:
-            for ws in dead:
-                hub.connections.pop(ws, None)
-
-    _last_broadcast_signature = signature
+# Tài khoản tạo ticket (bỏ khỏi danh sách owner/assistant hiển thị)
+_CREATOR_ACCOUNTS = {"thailong", "quangle"}
 
 
-async def refresh_stations_loop():
-    while True:
-        await asyncio.sleep(TICKET_REFRESH_SECONDS)
-        if _refresh_paused:
-            print(f"⏸ Chu kỳ cào đang TẠM DỪNG — bỏ qua lần này (mỗi {TICKET_REFRESH_SECONDS}s kiểm tra lại).")
+def _compact_account_list(raw_str, keep_es_its_only=False):
+    """Thu gọn danh sách account dạng 'A_1; A_2; A_3' → 'A_1 (2, 3)'.
+    - Loại bỏ thailong / quangle (người tạo ticket).
+    - Nếu keep_es_its_only=True: chỉ giữ account bắt đầu bằng ES hoặc ITS.
+    """
+    if not raw_str:
+        return ""
+    names = [n.strip() for n in str(raw_str).split(";") if n.strip()]
+    names = [n for n in names if n.lower() not in _CREATOR_ACCOUNTS]
+    if keep_es_its_only:
+        def _keep(n):
+            u = n.upper()
+            return (
+                u.startswith(("ES", "ITS"))
+                or "ESMANAGER" in u
+                or "ITSMANAGER" in u
+            )
+        names = [n for n in names if _keep(n)]
+    if not names:
+        return ""
+
+    groups = defaultdict(list)
+    singles = []
+    for name in names:
+        m = re.match(r"^(.+?)_(\d+)$", name)
+        if m:
+            base, num = m.group(1), m.group(2)
+            groups[base].append(num)
+        else:
+            singles.append(name)
+
+    result = []
+    seen_bases = []
+    for name in names:
+        m = re.match(r"^(.+?)_(\d+)$", name)
+        if m:
+            base = m.group(1)
+            if base not in seen_bases:
+                seen_bases.append(base)
+
+    for base in seen_bases:
+        nums = groups[base]
+        nums_sorted = sorted(nums, key=lambda x: int(x) if x.isdigit() else x)
+        if len(nums_sorted) == 1:
+            result.append(f"{base}_{nums_sorted[0]}")
+        else:
+            first = nums_sorted[0]
+            rest = ", ".join(nums_sorted[1:])
+            result.append(f"{base}_{first} ({rest})")
+
+    for name in singles:
+        if name not in result:
+            result.append(name)
+
+    return "; ".join(result)
+
+
+def _build_owners_display(owner_raw, assistant_raw):
+    """Gộp owner (chỉ ES/ITS) + assistant, đã lọc creator và thu gọn.
+    Khử trùng theo từng segment sau khi compact."""
+    owner_part = _compact_account_list(owner_raw, keep_es_its_only=True)
+    assist_part = _compact_account_list(assistant_raw, keep_es_its_only=False)
+    seen = set()
+    result = []
+    for part in (owner_part, assist_part):
+        if not part:
             continue
-        try:
-            await refresh_stations_once()
-            await broadcast_stations_update()
-        except Exception as e:
-            print(f"⚠️ Lỗi làm mới dữ liệu ticket (giữ nguyên dữ liệu cũ): {e!r}")
+        for seg in part.split("; "):
+            seg = seg.strip()
+            if seg and seg not in seen:
+                seen.add(seg)
+                result.append(seg)
+    return "; ".join(result)
 
 
-async def _seconds_until_next_midnight_vn() -> float:
-    """Số giây đến 00:00:05 giờ Việt Nam kế tiếp."""
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
-    vn = ZoneInfo("Asia/Ho_Chi_Minh")
-    now = datetime.now(vn)
-    tomorrow = (now + timedelta(days=1)).replace(hour=0, minute=0, second=5, microsecond=0)
-    return max(1.0, (tomorrow - now).total_seconds())
+def get_static_data():
+    """Toạ độ trạm / phân công kỹ thuật viên / model trụ sạc - đọc trực tiếp
+    từ GitHub (github_data_store.py) tại runtime. Đã tự lọc/chuẩn hoá các
+    khu vực NGỪNG quản lý (vd HCM) thành "KV không quản lý"."""
+    return load_static_data_filtered()
 
 
-async def _run_stats_refresh(label: str):
-    """Chạy 1 lượt cào thống kê nền, log thống nhất theo `label` (vd "0h",
-    "khởi động"). stats_data.refresh_stats_cache() đã tự lo:
-    - Cào 2 tài khoản cố định, thử lại tối đa 10 vòng nếu chưa được ngay.
-    - Tự giữ nguyên cache cũ (KHÔNG ghi đè) nếu sau 10 vòng vẫn thất bại.
-    - Tự gộp (single-flight) nếu có 1 lượt cào khác đang chạy cùng lúc.
-    Vì vậy ở đây chỉ cần log, không cần tự xử lý giữ cache cũ nữa."""
-    try:
-        print(f"[stats] === Bắt đầu cào thống kê ({label}) ===")
-        await stats_data.refresh_stats_cache()
-        print(f"[stats] === Cào thống kê ({label}) hoàn tất ===")
-    except Exception as e:
-        print(f"[stats] Lỗi cào thống kê ({label}) (giữ cache cũ nếu có): {e!r}")
+def reload_static_data():
+    github_data_store.reload_static_data()
+    return load_static_data_filtered()
 
 
-async def stats_midnight_loop():
-    """Mỗi ngày lúc ~0h VN: cào lại thống kê 45 ngày và ghi cache."""
-    while True:
-        wait_s = await _seconds_until_next_midnight_vn()
-        hours = wait_s / 3600
-        print(f"[stats] Lịch cào 0h: còn ~{hours:.1f}h (đợi {int(wait_s)}s)...")
-        await asyncio.sleep(wait_s)
-        await _run_stats_refresh("định kỳ 0h")
+# ==========================================
+# Cào ticket - đa tài khoản
+# ==========================================
+_pool = ClientPool()
 
 
-@app.on_event("startup")
-async def on_startup():
-    global _latest_station_payload, _latest_tech_stats, _latest_ticket_rows
-
-    get_static_data()
-
-    cached_payload, cached_stats, cached_rows = ccts_data.load_cache_from_file()
-    if cached_payload:
-        _latest_station_payload = cached_payload
-        _latest_tech_stats = cached_stats
-        _latest_ticket_rows = cached_rows
-        print("✅ Đã nạp dữ liệu từ lần cào gần nhất (file cache).")
-
-    # Stats: nạp cache ngay (nếu có) để /stats không trống; cào mới chạy NỀN — không chặn startup
-    stats_cached = stats_data.load_stats_cache()
-    if stats_cached:
-        print(f"✅ Đã nạp stats cache ({stats_cached.get('total_tickets', 0)} ticket, "
-              f"cập nhật {stats_cached.get('generated_at', '?')}).")
-    else:
-        print("[stats] Chưa có cache — trang /stats tạm trống đến khi cào nền xong.")
-
-    # Cào stats lúc startup:
-    #   STATS_REFRESH_ON_STARTUP=1     → luôn cào (prod / cần data mới)
-    #   STATS_REFRESH_ON_STARTUP=0     → không cào (local test, dùng cache sẵn)
-    #   STATS_REFRESH_ON_STARTUP=auto  → chỉ cào khi CHƯA có cache (mặc định)
-    # Lịch 0h VN và POST /api/admin/refresh-stats vẫn cào bình thường.
-    do_stats_startup = False
-    if _STATS_STARTUP_MODE in ("1", "true", "yes", "on"):
-        do_stats_startup = True
-    elif _STATS_STARTUP_MODE in ("0", "false", "no", "off"):
-        do_stats_startup = False
-    else:
-        do_stats_startup = not bool(stats_cached)
-
-    if do_stats_startup:
-        print(f"[stats] Startup: sẽ cào nền (mode={_STATS_STARTUP_MODE!r}, có_cache={bool(stats_cached)}).")
-        asyncio.create_task(_run_stats_refresh("khởi động"))
-    else:
-        print(f"[stats] Startup: BỎ QUA cào — dùng cache có sẵn (mode={_STATS_STARTUP_MODE!r}). "
-              f"Muốn cào: STATS_REFRESH_ON_STARTUP=1 hoặc admin refresh-stats / đợi 0h.")
-        # Cache cũ có thể chưa có charts đã nướng → bổ sung nền, không cào CCTS
-        if stats_cached:
-            async def _ensure_charts_bg():
-                try:
-                    for key in ("daily_volume", "overdue_rate", "heatmap", "error_codes"):
-                        stats_data.ensure_chart_in_cache(key)
-                except Exception as e:
-                    print(f"[stats] ensure charts nền lỗi: {e!r}")
-            asyncio.create_task(_ensure_charts_bg())
-
-    try:
-        await refresh_stations_once()
-    except Exception as e:
-        print(f"⚠️ Lỗi lần cào đầu tiên khi khởi động ({e!r}) - tiếp tục chạy với dữ liệu cache (nếu có).")
-
-    asyncio.create_task(refresh_stations_loop())
-    asyncio.create_task(stats_midnight_loop())
+async def _post_find_tickets(client, username, ticket_statuses, start_str, stop_str):
+    """Gọi API find ticket, gắn _source_account, trả list thô."""
+    payload = {
+        "page": {"pageNum": 1, "pageSize": 2000},
+        "timezoneOffset": 420,
+        "createStartTime": start_str,
+        "createStopTime": stop_str,
+        "ticketStatus": ticket_statuses,
+    }
+    res_data = await client._post(ENDPOINT_FIND_TICKET, payload)
+    data = res_data.get("data", {})
+    tickets = data.get("list", []) if isinstance(data, dict) else data
+    if not isinstance(tickets, list):
+        tickets = data.get("records", [])
+    for t in tickets or []:
+        t["_source_account"] = username
+    return tickets or []
 
 
-@app.get("/login", response_class=HTMLResponse)
-async def login_page(request: Request):
-    if get_current_user(request):
-        return RedirectResponse("/", status_code=302)
-    return templates.TemplateResponse(request=request, name="login.html", context={"error": None})
+async def _fetch_tickets_window_single_account(username, password, ticket_statuses, start_str, stop_str):
+    """Cào ticket cho 1 tài khoản. Tái sử dụng session; lỗi thì relogin 1 lần.
+    Trả về (list_dict_thô, thành_công_bool)."""
+
+    async def _action(client):
+        return await _post_find_tickets(client, username, ticket_statuses, start_str, stop_str)
+
+    tickets, ok = await _pool.call_with_retry(username, password, _action)
+    return (tickets or []), ok
 
 
-@app.post("/login", response_class=HTMLResponse)
-async def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
-    user = users_store.verify_login(username, password)
-    if not user:
-        return templates.TemplateResponse(
-            request=request, name="login.html", context={"error": "Sai tên đăng nhập hoặc mật khẩu."}
-        )
+async def _fetch_tickets_window_multi_account(ticket_statuses, start_str, stop_str):
+    """Cào từ TẤT CẢ tài khoản trong CCTS_ACCOUNTS, gộp lại (chưa khử trùng).
 
-    token = uuid.uuid4().hex
-    SESSIONS[token] = user
+    Cào SONG SONG các tài khoản (mỗi tài khoản dùng session/token riêng nên
+    chạy đồng thời an toàn) thay vì tuần tự như trước — giữ CCTS_API_LOCK
+    (khoá DÙNG CHUNG với stats_data.py) trong thời gian ngắn hơn, giảm thời
+    gian chặn lượt cào thống kê 0h nếu 2 việc rơi trùng giờ.
 
-    response = RedirectResponse("/", status_code=302)
-    response.set_cookie(SESSION_COOKIE_NAME, token, httponly=True, samesite="lax", max_age=60 * 60 * 12)
-    return response
-
-
-@app.post("/api/mobile/login")
-async def api_mobile_login(request: Request):
-    """Đăng nhập dành cho APP DI ĐỘNG - nhận/trả JSON, KHÔNG redirect và
-    KHÔNG set cookie như /login (dành cho web). Dùng lại đúng
-    users_store.verify_login() nên không cần sửa gì bên users_store.
-
-    Token trả về được lưu vào CHUNG dict SESSIONS với web - nhờ vậy
-    get_current_user() ở trên tự nhận diện được, không cần route/logic
-    riêng cho từng endpoint dữ liệu (/api/stations, /api/technicians...).
-
-    LƯU Ý: token này KHÔNG tự hết hạn (giống hệt cách SESSIONS đang hoạt
-    động cho web hiện tại - chỉ mất khi server restart). Nếu sau này cần
-    "đăng xuất từ xa" 1 thiết bị, thêm hàm xoá theo token hoặc theo
-    username tại đây.
+    Trả về (list_dict_thô, all_success_bool, success_accounts).
+    all_success = True chỉ khi *mọi* tài khoản đều lấy thành công.
+    success_accounts = [(username, password), ...] các tài khoản cào thành
+    công, GIỮ ĐÚNG THỨ TỰ trong CCTS_ACCOUNTS (dù chạy song song) — thứ tự
+    này còn được dùng làm ưu tiên tra cứu chi tiết ticket (xem
+    _enrich_open_overdue_ev_tickets: tài khoản đầu tiên thử trước, tài
+    khoản sau chỉ là fallback).
     """
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Dữ liệu gửi lên không hợp lệ."}, status_code=400)
+    all_raw = []
+    success_accounts = []
+    failed_accounts = []
+    total = len(CCTS_ACCOUNTS)
 
-    username = (body.get("username") or "").strip()
-    password = (body.get("password") or "").strip()
-    if not username or not password:
-        return JSONResponse({"error": "Vui lòng nhập tên đăng nhập và mật khẩu."}, status_code=400)
+    async with CCTS_API_LOCK:
+        print(f"[ccts_data] Đã giữ CCTS_API_LOCK — cào live tickets ({total} tài khoản song song)...")
+        results = await asyncio.gather(
+            *(
+                _fetch_tickets_window_single_account(
+                    account["username"], account["password"], ticket_statuses, start_str, stop_str
+                )
+                for account in CCTS_ACCOUNTS
+            ),
+            return_exceptions=True,
+        )
+        print("[ccts_data] Nhả CCTS_API_LOCK.")
 
-    user = users_store.verify_login(username, password)
-    if not user:
-        return JSONResponse({"error": "Sai tên đăng nhập hoặc mật khẩu."}, status_code=401)
+    success_count = 0
+    for account, result in zip(CCTS_ACCOUNTS, results):
+        username = account["username"]
+        if isinstance(result, Exception):
+            print(f"[!] Lỗi cào tài khoản [{username}]: {result}")
+            failed_accounts.append(username)
+            continue
+        tickets, ok = result
+        if ok:
+            success_count += 1
+            all_raw.extend(tickets)
+            success_accounts.append((username, account["password"]))
+        else:
+            failed_accounts.append(username)
 
-    token = uuid.uuid4().hex
-    SESSIONS[token] = user
-
-    return {"status": "ok", "token": token, "user": user}
-
-
-@app.get("/logout")
-async def logout(request: Request):
-    token = request.cookies.get(SESSION_COOKIE_NAME)
-    if token:
-        SESSIONS.pop(token, None)
-    response = RedirectResponse("/login", status_code=302)
-    response.delete_cookie(SESSION_COOKIE_NAME)
-    return response
+    all_success = (total > 0) and (success_count == total)
+    if all_success:
+        print(f"[+] Cào thành công toàn bộ {total}/{total} tài khoản.")
+    else:
+        print(
+            f"[-] Chỉ {success_count}/{total} tài khoản thành công "
+            f"(lỗi: {', '.join(failed_accounts) or 'n/a'}) "
+            f"→ không chấp nhận dữ liệu mới, giữ cache cũ."
+        )
+    return all_raw, all_success, success_accounts
 
 
-@app.get("/", response_class=HTMLResponse)
-async def map_page(request: Request):
-    user = get_current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
-    return templates.TemplateResponse(request=request, name="map.html", context={"user": user})
+
+def _process_raw_tickets(raw_tickets):
+    processed = []
+    for item in raw_tickets:
+        processed.append({
+            "Ticket ID": item.get("cctsTicketId"),
+            "Charge Point ID": item.get("chargeBoxId"),
+            "Charge Box Model": item.get("chargeBoxModel"),
+            "Station Code": item.get("stationCode"),
+            "Problem Description": item.get("errorDesc"),
+            "Ticket Status": item.get("cctsTicketStatus"),
+            "Ticket Duration": item.get("duration"),
+            "Creator": item.get("ticketCreator"),
+            "Source_Account": item.get("_source_account"),
+            "Address": item.get("address") or item.get("stationAddress") or "",
+            "OwnerUserName": item.get("cctsTicketOwnerUserName") or "",
+            "AssistantName": item.get("assistantName") or "",
+        })
+    return processed
 
 
-@app.get("/stats", response_class=HTMLResponse)
-async def stats_page(request: Request):
-    """Trang thống kê / trực quan dữ liệu ticket.
-    Chỉ điều phối trở lên được xem; kỹ thuật viên bị chặn."""
-    user = get_current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
-    if not can_view_stats(user):
-        return RedirectResponse("/", status_code=302)
-    return templates.TemplateResponse(
-        request=request, name="stats.html", context={"user": user}
+async def fetch_live_tickets():
+    """Cào ticket ĐANG MỞ từ TẤT CẢ tài khoản, gộp + khử trùng theo Ticket ID.
+    Trả về (DataFrame, fetch_success_bool, success_accounts).
+    fetch_success=True chỉ khi mọi tài khoản CCTS đều cào thành công.
+    success_accounts = [(username, password), ...] các tài khoản đã cào
+    thành công trong chu kỳ này."""
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    raw, any_success, success_accounts = await _fetch_tickets_window_multi_account(
+        OPEN_STATUSES, "2026-04-30 17:00:00", now_str
     )
 
+    processed = _process_raw_tickets(raw)
+    if not processed:
+        return pd.DataFrame(), any_success, success_accounts
 
-@app.get("/api/stats/daily-volume")
-async def api_stats_daily_volume(request: Request):
-    """
-    Trả payload Chart.js từ cache (đã cào lúc 0h).
-    Không gọi API CCTS khi user mở trang thống kê.
-    """
-    user = get_current_user(request)
-    if not user:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    if not can_view_stats(user):
-        return JSONResponse({"error": "forbidden", "detail": "Kỹ thuật viên không được xem thống kê."}, status_code=403)
+    df = pd.DataFrame(processed)
+    df = df.fillna("")
 
-    payload = stats_data.get_cached_daily_volume()
-    if payload is None:
-        return JSONResponse(
-            {
-                "error": "Chưa có dữ liệu thống kê",
-                "detail": "Hệ thống sẽ tự cào lúc 0h mỗi ngày. Admin có thể bấm làm mới thủ công.",
-                "labels": [],
-                "regions": [],
-                "datasets": {},
-                "total_tickets": 0,
-            },
-            status_code=503,
-        )
-    return payload
+    if "Ticket ID" in df.columns:
+        df = df.drop_duplicates(subset=["Ticket ID"]).reset_index(drop=True)
+    if "Problem Description" in df.columns:
+        df = df[~df["Problem Description"].astype(str).str.strip().str.startswith("BSS.No2")].copy()
+
+    print(f"[+] Tổng cộng: {len(df)} tickets sau khi gộp và lọc.")
+    return df, any_success, success_accounts
 
 
+def _apply_south_filter_and_coords(df_tickets, coords_map):
+    def get_coords(station_code):
+        core_code = extract_core_station_code(station_code)
+        return coords_map.get(core_code)
 
-@app.get("/api/stats/overdue-rate")
-async def api_stats_overdue_rate(request: Request):
-    """Tỷ lệ ticket đóng bị Overdue theo KV / KT (30 ngày Close Time)."""
-    user = get_current_user(request)
-    if not user:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    if not can_view_stats(user):
-        return JSONResponse({"error": "forbidden", "detail": "Kỹ thuật viên không được xem thống kê."}, status_code=403)
+    df = df_tickets.copy()
+    df["coords"] = df["Station Code"].apply(get_coords)
 
-    payload = stats_data.ensure_chart_in_cache("overdue_rate")
-    if payload is None:
-        return JSONResponse(
-            {"error": "Chưa có dữ liệu thống kê", "detail": "Đợi cào 0h hoặc admin refresh-stats."},
-            status_code=503,
-        )
-    return payload
+    missing_mask = df["coords"].isna()
+    missing_df = df[missing_mask]
 
-
-
-@app.get("/api/stats/error-codes")
-async def api_stats_error_codes(request: Request):
-    """Top 20 Error Code trong 30 ngày + KT gặp nhiều nhất."""
-    user = get_current_user(request)
-    if not user:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    if not can_view_stats(user):
-        return JSONResponse({"error": "forbidden", "detail": "Kỹ thuật viên không được xem thống kê."}, status_code=403)
-    payload = stats_data.ensure_chart_in_cache("error_codes")
-    if payload is None:
-        return JSONResponse({"error": "Chưa có dữ liệu thống kê"}, status_code=503)
-    return payload
-
-
-@app.get("/api/stats/heatmap")
-async def api_stats_heatmap(request: Request):
-    """Bản đồ nhiệt số ticket & ticket Overdue theo vị trí trạm, tách theo 5 khu vực."""
-    user = get_current_user(request)
-    if not user:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    if not can_view_stats(user):
-        return JSONResponse({"error": "forbidden", "detail": "Kỹ thuật viên không được xem thống kê."}, status_code=403)
-    payload = stats_data.ensure_chart_in_cache("heatmap")
-    if payload is None:
-        return JSONResponse(
-            {"error": "Chưa có dữ liệu thống kê", "detail": "Đợi cào 0h hoặc admin refresh-stats."},
-            status_code=503,
-        )
-    return payload
-
-
-@app.post("/api/admin/refresh-stats")
-async def api_admin_refresh_stats(request: Request):
-    """Admin: ép cào lại thống kê ngay (không đợi 0h)."""
-    user = get_current_user(request)
-    if not require_admin(user):
-        return JSONResponse({"error": "Bạn không có quyền thực hiện thao tác này."}, status_code=403)
-    try:
-        payload = await stats_data.refresh_stats_cache()
-        return {
-            "status": "ok",
-            "message": f"Đã cập nhật thống kê ({payload.get('total_tickets', 0)} ticket).",
-            "generated_at": payload.get("generated_at"),
-            "total_tickets": payload.get("total_tickets", 0),
+    missing_coord_tickets = [
+        {
+            "ticket_id": str(row.get("Ticket ID") or ""),
+            "station_code": str(row.get("Station Code") or ""),
+            "cp_id": str(row.get("Charge Point ID") or ""),
         }
-    except Exception as e:
-        print(f"[stats] Lỗi admin refresh-stats: {e!r}")
-        return JSONResponse({"error": str(e)}, status_code=500)
+        for _, row in missing_df.iterrows()
+    ]
+    if missing_coord_tickets:
+        print(f"[+] Có {len(missing_coord_tickets)} ticket thuộc trạm CHƯA CÓ toạ độ trong StationData.")
+
+    with_coords_df = df[~missing_mask].copy()
+    before = len(with_coords_df)
+    south_df = with_coords_df[
+        with_coords_df["coords"].apply(lambda x: x["lat"]) < NORTH_LAT_THRESHOLD
+    ].copy()
+    filtered_north_count = before - len(south_df)
+    if filtered_north_count:
+        print(f"[+] Đã lọc bỏ {filtered_north_count} ticket thuộc miền Bắc (lat >= {NORTH_LAT_THRESHOLD})")
+
+    return south_df, filtered_north_count, missing_coord_tickets
 
 
-@app.post("/api/admin/refresh-stations")
-async def api_refresh_stations(request: Request):
-    user = get_current_user(request)
-    if not require_admin(user):
-        return JSONResponse({"error": "Bạn không có quyền thực hiện thao tác này."}, status_code=403)
-
-    await refresh_stations_once()
-    await broadcast_stations_update()
-    return {"status": "ok", "message": "Đã cập nhật dữ liệu trạm mới nhất!"}
+def _is_ev_charge_point(cp_id) -> bool:
+    """True nếu là trụ SẠC (EV) — mã CP KHÔNG bắt đầu bằng 'BSS' (trụ đổi pin).
+    Chỉ trụ EV mới cần tra cứu chi tiết / đổi màu cảnh báo theo yêu cầu."""
+    return not str(cp_id or "").strip().upper().startswith("BSS")
 
 
-@app.get("/api/admin/refresh-status")
-async def api_refresh_status(request: Request):
-    """Trạng thái chu kỳ cào tự động (paused hay đang chạy)."""
-    user = get_current_user(request)
-    if not require_admin(user):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    return {
-        "paused": _refresh_paused,
-        "interval_seconds": TICKET_REFRESH_SECONDS,
-    }
-
-
-@app.post("/api/admin/toggle-refresh")
-async def api_toggle_refresh(request: Request):
-    """Bật/tắt chu kỳ cào tự động. Chỉ admin. Không ảnh hưởng nút refresh thủ công."""
-    global _refresh_paused
-    user = get_current_user(request)
-    if not require_admin(user):
-        return JSONResponse({"error": "Bạn không có quyền thực hiện thao tác này."}, status_code=403)
-
-    _refresh_paused = not _refresh_paused
-    if _refresh_paused:
-        msg = "Đã TẠM DỪNG chu kỳ cào tự động."
-        print(f"⏸ Admin [{user.get('username')}] tạm dừng cào dữ liệu.")
-    else:
-        msg = "Đã BẬT LẠI chu kỳ cào tự động."
-        print(f"▶ Admin [{user.get('username')}] bật lại cào dữ liệu.")
-    return {
-        "status": "ok",
-        "paused": _refresh_paused,
-        "message": msg,
-        "interval_seconds": TICKET_REFRESH_SECONDS,
-    }
-
-
-@app.get("/api/stations")
-async def api_stations(request: Request):
-    user = get_current_user(request)
-    if not user:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-    filtered = filter_stations_for_user(_latest_station_payload["stations"], user)
-    return {**_latest_station_payload, "stations": filtered}
-
-
-@app.get("/api/technicians")
-async def api_technicians(request: Request):
-    user = get_current_user(request)
-    if not user:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    _, _, _, _, tech_by_region = get_static_data()
-    tech_by_region = filter_tech_by_region_for_user(tech_by_region, user)
-    all_users = users_store.list_users_public()
-
-    name_to_username = {}
-    for u in all_users:
-        if (u.get("role") or "").strip().lower() == "kỹ thuật":
-            key = (u.get("full_name") or "").strip().lower()
-            if key:
-                name_to_username[key] = u["username"]
-
-    online_set = set(hub.online_usernames())
-
-    def stat_for(tech_name):
-        return _latest_tech_stats.get(tech_name, {"closed_yesterday": 0, "closed_today": 0, "open_count": 0})
-
-    regions_out = {}
-    for region, names in tech_by_region.items():
-        items = []
-        for name in names:
-            username = name_to_username.get(name.strip().lower())
-            online = (username.strip().lower() in online_set) if username else None
-            items.append({"tech_name": name, "username": username, "online": online, **stat_for(name)})
-        regions_out[region] = items
-
-    return {
-        "regions": regions_out,
-        "unassigned": {"tech_name": "Unassigned", "username": None, "online": None, **stat_for("Unassigned")},
-    }
-
-
-@app.get("/api/tech-tickets/{tech_name}")
-async def api_tech_tickets(tech_name: str, request: Request):
-    user = get_current_user(request)
-    if not user:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    rows = [r for r in _latest_ticket_rows if (r.get("tech_name") or "Unassigned") == tech_name]
-
-    role = (user.get("role") or "").strip().lower()
-    if role == "kỹ thuật" and tech_name != "Unassigned":
-        user_region = (user.get("region") or "").strip().lower()
-        rows = [r for r in rows if (r.get("region") or "").strip().lower() == user_region]
-
-    return {"tech_name": tech_name, "tickets": rows, "count": len(rows)}
-
-
-def _tech_stats_for_user(user_info):
-    """Tra thống kê hiệu suất (đóng hôm qua/hôm nay, đang tồn) của CHÍNH
-    người này, theo họ tên đầy đủ - dùng để hiển thị ngay trong popup vị trí
-    của họ trên bản đồ (không phải trong tag lọc kỹ thuật)."""
-    full_name = (user_info.get("full_name") or "").strip()
-    return _latest_tech_stats.get(full_name, {"closed_yesterday": 0, "closed_today": 0, "open_count": 0})
-
-
-@app.post("/api/location")
-async def api_mobile_location(request: Request):
-    """Nhận vị trí GPS gửi lên TỪ APP DI ĐỘNG CCTS (Flutter) - đây là NGUỒN
-    VỊ TRÍ DUY NHẤT của kỹ thuật viên. Đã bỏ hẳn app Traccar Client và
-    endpoint GET /api/traccar cũ (dùng 1 token tĩnh dùng chung + tham số
-    'id' tự khai, ai biết token cũng gọi được) - endpoint này xác thực theo
-    ĐÚNG người dùng đang đăng nhập trên app (Bearer token từ
-    POST /api/mobile/login, tra qua get_current_user() y hệt mọi endpoint
-    dữ liệu khác), an toàn hơn và không cần quản lý thêm 1 token riêng.
-
-    Gọi hub.update_location() - dữ liệu đi thẳng vào LocationHub (chỉ lưu
-    RAM, KHÔNG ghi Google Sheets) và được broadcast qua WebSocket cho các
-    client (web/app) khác đang được phép xem.
-    """
-    user = get_current_user(request)
-    if not user:
-        return JSONResponse({"error": "unauthorized"}, status_code=401)
-
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse({"error": "Dữ liệu gửi lên không hợp lệ."}, status_code=400)
-
-    try:
-        lat = float(body.get("lat"))
-        lng = float(body.get("lng"))
-    except (TypeError, ValueError):
-        return JSONResponse({"error": "Thiếu hoặc sai định dạng lat/lng."}, status_code=400)
-
-    accuracy = body.get("accuracy")
-    try:
-        accuracy = float(accuracy) if accuracy is not None else None
-    except (TypeError, ValueError):
-        accuracy = None
-
-    await hub.update_location(
-        user["username"], user, lat, lng, accuracy,
-        stations=_latest_station_payload["stations"],
-        tech_stats=_tech_stats_for_user(user),
+def _classify_ticket_timeline(timeline):
+    """Từ timeline (list dict followRecordStatus/createTime) của 1 ticket
+    Open-overdue, xác định:
+    - is_reopened: từng ở 1 trong các trạng thái "đã xử lý xong" trước đó
+      (Pending for local team close / VOMS confirm / ASP close) rồi quay
+      lại Open.
+    - has_no_info: timeline KHÔNG có bất kỳ bản ghi xử lý nào ngoài bản ghi
+      tạo ticket ban đầu (rất nguy hiểm, khó giải trình bên thứ 3)."""
+    timeline = timeline or []
+    is_reopened = any(
+        str(entry.get("followRecordStatus", "")).strip().lower() in REOPEN_TRIGGER_STATUSES
+        for entry in timeline
     )
-    return {"status": "ok"}
+    has_no_info = len(timeline) <= 1
+    return {"is_reopened": is_reopened, "has_no_info": has_no_info}
 
 
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_page(request: Request):
-    user = get_current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
-    if not require_admin(user):
-        return RedirectResponse("/", status_code=302)
-    return templates.TemplateResponse(request=request, name="admin.html", context={"user": user})
+async def _lookup_ticket_enrichment(clients, ticket_id):
+    """Tra cứu ticket lần lượt qua danh sách client (theo đúng thứ tự ưu
+    tiên — client đầu tiên trong success_accounts trước). Dừng ngay khi
+    tìm thấy ở tài khoản nào đó; chỉ thử tài khoản kế tiếp nếu tài khoản
+    trước KHÔNG tìm thấy ticket (result rỗng) hoặc lỗi.
+
+    Trước đây chỉ tra cứu bằng 1 tài khoản DUY NHẤT (success_accounts[0]),
+    nên ticket được TẠO/GẮN ở tài khoản kia sẽ luôn trả về None (không tìm
+    thấy) và không bao giờ được enrich (is_reopened / has_no_info)."""
+    for client in clients:
+        try:
+            result = await client.search_ticket(ticket_id)
+        except Exception as e:
+            print(f"[!] Lỗi tra cứu ticket {ticket_id} qua [{client.username}]: {e}")
+            continue
+        if result:
+            return _classify_ticket_timeline(result.get("timeline"))
+    return None
 
 
-@app.get("/api/admin/users")
-async def api_admin_list_users(request: Request):
-    user = get_current_user(request)
-    if not require_admin(user):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    return {"users": users_store.list_users_public(), "role_labels": users_store.ROLE_LABELS}
+async def _enrich_open_overdue_ev_tickets(df_tickets_filtered, success_accounts):
+    """Với các ticket đang Open + overdue (>48h) + là trụ EV (không phải
+    BSS): tra cứu chi tiết qua CCTSClient.search_ticket() (song song có
+    giới hạn ENRICH_MAX_CONCURRENCY) để phát hiện ticket "mở lại" và ticket
+    Open-overdue chưa có bất kỳ thông tin xử lý nào.
 
+    Đăng nhập TẤT CẢ tài khoản đã cào live thành công trong chu kỳ này
+    (success_accounts) — không chỉ tài khoản đầu tiên. Với mỗi ticket, tra
+    cứu lần lượt theo đúng thứ tự success_accounts, dừng ngay khi tìm thấy;
+    chỉ tài khoản kế tiếp mới bị gọi nếu tài khoản trước không tìm thấy
+    ticket đó (ticket được tạo/gắn ở tài khoản khác, vd tài khoản không
+    phải esmanager).
 
-@app.post("/api/admin/users/{username}/role")
-async def api_admin_update_role(username: str, request: Request):
-    user = get_current_user(request)
-    if not require_admin(user):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
+    Trả về dict {ticket_id_str: {"is_reopened": bool, "has_no_info": bool}}
+    — chỉ chứa các ticket đã tra cứu thành công. Không raise."""
+    if df_tickets_filtered.empty or not success_accounts:
+        return {}
 
-    body = await request.json()
-    new_role = body.get("role", "")
-    try:
-        canonical_role = users_store.update_user_role(username, new_role)
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
+    df = df_tickets_filtered.copy()
+    df["Hours"] = df["Ticket Duration"].apply(parse_duration_to_hours)
 
-    return {"status": "ok", "username": username, "role": canonical_role}
+    mask = (
+        (df["Ticket Status"].astype(str).str.strip().str.lower() == "open")
+        & (df["Hours"] > 48)
+        & (df["Charge Point ID"].apply(_is_ev_charge_point))
+    )
+    targets = df[mask]
+    if targets.empty:
+        return {}
 
+    ticket_ids = sorted({str(t) for t in targets["Ticket ID"].tolist() if t})
+    if not ticket_ids:
+        return {}
 
-@app.websocket("/ws/location")
-async def ws_location(websocket: WebSocket):
-    token = websocket.cookies.get(SESSION_COOKIE_NAME)
-    user = SESSIONS.get(token) if token else None
-    if not user:
-        await websocket.close(code=4401)
-        return
-
-    await websocket.accept()
-    await hub.register(websocket, user)
-
-    try:
-        await websocket.send_json(hub.snapshot_for(user))
-        filtered = filter_stations_for_user(_latest_station_payload["stations"], user)
-        await websocket.send_json({**_latest_station_payload, "stations": filtered, "type": "stations_update"})
-        await websocket.send_json({"type": "presence_update", "online_usernames": hub.online_usernames()})
-
-        # LƯU Ý: đã bỏ nhận vị trí từ trình duyệt (web) qua WebSocket để tránh
-        # tốn dung lượng/pin của người dùng khi mở web. Vị trí giờ CHỈ đến từ
-        # 1 nguồn HTTP duy nhất (không qua WebSocket này): app di động CCTS
-        # (Flutter) qua POST /api/location - đã bỏ hẳn app Traccar Client và
-        # endpoint /api/traccar cũ. Kết nối WebSocket ở đây chỉ còn dùng để:
-        # nhận snapshot ban đầu, nhận cập nhật trạm (stations_update) và
-        # presence - không còn nhận/gửi vị trí từ phía client nữa. Nếu client
-        # cũ vẫn gửi message "location" lên, server sẽ bỏ qua (không xử lý,
-        # không lưu, không broadcast).
-        while True:
+    async with CCTS_API_LOCK:
+        print(
+            f"[ccts_data] Đã giữ CCTS_API_LOCK — tra cứu chi tiết {len(ticket_ids)} "
+            f"ticket Open-overdue (EV) bằng {len(success_accounts)} tài khoản "
+            f"({', '.join(u for u, _ in success_accounts)})..."
+        )
+        clients = []
+        for username, password in success_accounts:
             try:
-                await websocket.receive_json()
-            except WebSocketDisconnect:
-                break
-            except Exception:
+                client, _ = await _pool.get_or_login(username, password)
+                clients.append(client)
+            except Exception as e:
+                print(f"[!] Không thể đăng nhập [{username}] để tra cứu ticket Open-overdue: {e}")
+
+        if not clients:
+            print("[ccts_data] Nhả CCTS_API_LOCK (tra cứu chi tiết - không có tài khoản nào đăng nhập được).")
+            return {}
+
+        semaphore = asyncio.Semaphore(ENRICH_MAX_CONCURRENCY)
+
+        async def _bounded_lookup(ticket_id):
+            async with semaphore:
+                return ticket_id, await _lookup_ticket_enrichment(clients, ticket_id)
+
+        results = await asyncio.gather(*(_bounded_lookup(tid) for tid in ticket_ids))
+        print("[ccts_data] Nhả CCTS_API_LOCK (tra cứu chi tiết).")
+
+    enrichment_map = {tid: data for tid, data in results if data is not None}
+    print(
+        f"[+] Tra cứu chi tiết thành công {len(enrichment_map)}/{len(ticket_ids)} "
+        f"ticket Open-overdue (EV)."
+    )
+    return enrichment_map
+
+
+def _apply_enrichment(status, ticket_id, enrichment_map):
+    """Trả về (status_display, severity_override, is_reopened, is_no_info_critical)
+    cho 1 ticket, dựa trên enrichment_map (có thể rỗng / không chứa ticket này
+    — khi đó trả về mặc định, không đổi gì)."""
+    enrich = enrichment_map.get(str(ticket_id)) if enrichment_map else None
+    if not enrich:
+        return status, None, False, False
+
+    is_reopened = bool(enrich.get("is_reopened"))
+    has_no_info = bool(enrich.get("has_no_info"))
+
+    status_display = f"{status}{REOPEN_LABEL_SUFFIX}" if is_reopened else status
+    # Không ép severity tím: overdue chưa có thông tin vẫn đỏ theo giờ.
+    # Chỉ giữ is_no_info_critical để frontend hiện cờ cảnh báo.
+    severity_override = None
+    return status_display, severity_override, is_reopened, has_no_info
+
+
+def _build_station_payload(
+    df_tickets_filtered,
+    cp_model_map,
+    tech_map,
+    region_map,
+    total_tickets_raw,
+    missing_count,
+    filtered_north_count,
+    fetch_success,
+    missing_coord_tickets=None,
+    enrichment_map=None,
+):
+    """Gộp ticket đang mở (đã lọc miền Nam) với toạ độ trạm.
+    Chỉ gửi DỮ LIỆU THÔ — frontend tự dựng popup HTML.
+
+    enrichment_map: dict {ticket_id: {"is_reopened":.., "has_no_info":..}} —
+    kết quả tra cứu chi tiết cho ticket Open-overdue (EV), dùng để đổi tên
+    trạng thái hiển thị ("Open (mở lại)") và ép severity "purple_critical"
+    (frontend cần tự map key này sang màu tím đậm)."""
+    enrichment_map = enrichment_map or {}
+    stations = []
+
+    if not df_tickets_filtered.empty:
+        df = df_tickets_filtered.copy()
+        df["Model Name"] = df["Charge Box Model"].map(cp_model_map).fillna("N/A")
+        df["Hours"] = df["Ticket Duration"].apply(parse_duration_to_hours)
+
+        grouped = df.groupby("Station Code")
+        for station_code, group in grouped:
+            core_code = extract_core_station_code(station_code)
+
+            region = region_map.get(core_code, "Unknown")
+            if is_unmanaged_region(region):
                 continue
-    finally:
-        await hub.unregister(websocket)
+
+            coords = group.iloc[0]["coords"]
+            lat, lng = coords["lat"], coords["lng"]
+
+            tech_name = tech_map.get(core_code, "Unassigned")
+            max_duration = group["Hours"].max()
+            station_severity, _, _, _ = _severity_color(max_duration)
+            color = station_severity
+
+            group_sorted = group.sort_values("Hours", ascending=False)
+
+            # Address trạm lấy từ ticket tồn lâu nhất
+            top_row = group_sorted.iloc[0]
+            station_address = str(top_row.get("Address") or "").strip()
+
+            tickets_out = []
+            station_has_no_info_critical = False
+            for _, row in group_sorted.iterrows():
+                hours = float(row["Hours"])
+                severity_key, _, _, _ = _severity_color(hours)
+
+                status_display, severity_override, is_reopened, is_no_info_critical = _apply_enrichment(
+                    row["Ticket Status"], row["Ticket ID"], enrichment_map
+                )
+                if severity_override:
+                    severity_key = severity_override
+                if is_no_info_critical:
+                    station_has_no_info_critical = True
+
+                ticket_owners = _build_owners_display(
+                    row.get("OwnerUserName") or "",
+                    row.get("AssistantName") or "",
+                )
+                tickets_out.append({
+                    "ticket_id": row["Ticket ID"],
+                    "cp_id": str(row["Charge Point ID"]),
+                    "status": row["Ticket Status"],
+                    "status_display": status_display,
+                    "model_name": row["Model Name"],
+                    "creator": row.get("Creator") or "",
+                    "duration": row["Ticket Duration"],
+                    "hours": hours,
+                    "severity": severity_key,
+                    "description": row["Problem Description"],
+                    "is_near_overdue": 45 <= hours < 48,
+                    "is_reopened": is_reopened,
+                    "is_no_info_critical": is_no_info_critical,
+                    "address": str(row.get("Address") or "").strip(),
+                    "owners": ticket_owners,
+                })
+
+            # Không đổi màu trạm sang tím — giữ theo thang giờ (đỏ nếu >48h).
+            stations.append({
+                "code": core_code,
+                "station_code": station_code,
+                "lat": lat,
+                "lng": lng,
+                "color": color,
+                "tickets": tickets_out,
+                "cp_count": int(len(group)),
+                "region": region,
+                "tech_name": tech_name,
+                "is_unassigned": (not tech_name) or tech_name.strip().lower() == "unassigned",
+                "is_bss_station": str(station_code).strip().upper().startswith("B."),
+                "has_near_overdue": bool(
+                    ((group_sorted["Hours"] >= 45) & (group_sorted["Hours"] < 48)).any()
+                ),
+                "has_no_info_critical": station_has_no_info_critical,
+                "address": station_address,
+            })
+
+    return {
+        "stations": stations,
+        "total_tickets": total_tickets_raw,
+        "with_coords_count": total_tickets_raw - missing_count,
+        "missing_count": missing_count,
+        "missing_coord_tickets": missing_coord_tickets or [],
+        "filtered_north": filtered_north_count,
+        "updated_at": datetime.now(VN_TZ).isoformat(timespec="seconds"),
+        "fetch_success": fetch_success,
+    }
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map, enrichment_map=None):
+    """Danh sách ticket phẳng cho panel theo KT — sắp xếp CAO → THẤP theo giờ tồn."""
+    if df_tickets_filtered.empty:
+        return []
+
+    enrichment_map = enrichment_map or {}
+
+    df = df_tickets_filtered.copy()
+    df["Model Name"] = df["Charge Box Model"].map(cp_model_map).fillna("N/A")
+    df["Hours"] = df["Ticket Duration"].apply(parse_duration_to_hours)
+    df = df.sort_values("Hours", ascending=False)
+
+    rows = []
+    for _, row in df.iterrows():
+        station_code = row.get("Station Code")
+        core_code = extract_core_station_code(station_code) if station_code else None
+        tech_name = tech_map.get(core_code, "Unassigned") if core_code else "Unassigned"
+        region = region_map.get(core_code, "Unknown") if core_code else "Unknown"
+        if is_unmanaged_region(region):
+            continue
+        cp_id = str(row.get("Charge Point ID") or "")
+        hours = float(row.get("Hours") or 0)
+
+        status_display, severity_override, is_reopened, is_no_info_critical = _apply_enrichment(
+            row.get("Ticket Status"), row.get("Ticket ID"), enrichment_map
+        )
+
+        rows.append({
+            "ticket_id": row.get("Ticket ID"),
+            "duration": row.get("Ticket Duration"),
+            "hours": hours,
+            "station_code": station_code,
+            "is_bss_station": str(station_code or "").strip().upper().startswith("B."),
+            "cp_id": cp_id,
+            "is_bss": cp_id.strip().upper().startswith("BSS"),
+            "model_name": row.get("Model Name"),
+            "status": row.get("Ticket Status"),
+            "status_display": status_display,
+            "description": row.get("Problem Description"),
+            "creator": row.get("Creator"),
+            "tech_name": tech_name,
+            "region": region,
+            "is_near_overdue": 45 <= hours < 48,
+            "address": row.get("Address") or "",
+            "owners": _build_owners_display(
+                row.get("OwnerUserName") or "",
+                row.get("AssistantName") or "",
+            ),
+            "severity_override": severity_override,
+            "is_reopened": is_reopened,
+            "is_no_info_critical": is_no_info_critical,
+        })
+    return rows
+
+
+async def build_station_markers():
+    """Cào ticket mới nhất + gộp toạ độ, lọc miền Nam — tương thích ngược."""
+    coords_map, tech_map, region_map, cp_model_map, _ = get_static_data()
+    df_tickets, any_success, success_accounts = await fetch_live_tickets()
+
+    total_tickets = 0 if df_tickets.empty else len(df_tickets)
+    filtered_north_count = 0
+    missing_coord_tickets = []
+
+    if not df_tickets.empty:
+        df_tickets, filtered_north_count, missing_coord_tickets = _apply_south_filter_and_coords(
+            df_tickets, coords_map
+        )
+
+    enrichment_map = await _enrich_open_overdue_ev_tickets(df_tickets, success_accounts)
+
+    payload = _build_station_payload(
+        df_tickets, cp_model_map, tech_map, region_map,
+        total_tickets, len(missing_coord_tickets), filtered_north_count, any_success,
+        missing_coord_tickets=missing_coord_tickets,
+        enrichment_map=enrichment_map,
+    )
+    print(f"[+] Hoàn tất build markers: {len(payload['stations'])} trạm, {total_tickets} tickets ban đầu.")
+    return payload
+
+
+async def build_tech_performance_stats(open_stations):
+    """Chỉ đếm ticket ĐANG MỞ theo KT — KHÔNG gọi API ticket đã đóng.
+
+    closed_yesterday / closed_today tạm = 0.
+    Sau này thay bằng Engineer_info.csv (hoặc nguồn tĩnh khác).
+    """
+    open_counts: dict[str, int] = {}
+    for s in open_stations:
+        tech = s.get("tech_name") or "Unassigned"
+        open_counts[tech] = open_counts.get(tech, 0) + int(s.get("cp_count") or 0)
+
+    return {
+        tech: {
+            "closed_yesterday": 0,
+            "closed_today": 0,
+            "open_count": count,
+        }
+        for tech, count in open_counts.items()
+    }
+
+
+async def refresh_all_ccts_data():
+    """1 chu kỳ làm mới đầy đủ: trạm + stats KT (chỉ open) + ticket rows."""
+    coords_map, tech_map, region_map, cp_model_map, _ = get_static_data()
+    df_tickets, any_success, success_accounts = await fetch_live_tickets()
+
+    total_tickets = 0 if df_tickets.empty else len(df_tickets)
+    filtered_north_count = 0
+    missing_coord_tickets = []
+    df_filtered = df_tickets
+
+    if not df_tickets.empty:
+        df_filtered, filtered_north_count, missing_coord_tickets = _apply_south_filter_and_coords(
+            df_tickets, coords_map
+        )
+
+    enrichment_map = await _enrich_open_overdue_ev_tickets(df_filtered, success_accounts)
+
+    station_payload = _build_station_payload(
+        df_filtered, cp_model_map, tech_map, region_map,
+        total_tickets, len(missing_coord_tickets), filtered_north_count, any_success,
+        missing_coord_tickets=missing_coord_tickets,
+        enrichment_map=enrichment_map,
+    )
+    ticket_rows = _build_ticket_rows(df_filtered, cp_model_map, tech_map, region_map, enrichment_map=enrichment_map)
+    tech_stats = await build_tech_performance_stats(station_payload["stations"])
+
+    print(
+        f"[+] Hoàn tất chu kỳ làm mới: {len(station_payload['stations'])} trạm, "
+        f"{total_tickets} ticket mở, {len(ticket_rows)} dòng ticket chi tiết, "
+        f"{len(missing_coord_tickets)} ticket thiếu toạ độ."
+    )
+
+    return station_payload, tech_stats, ticket_rows
+
+
+# ==========================================
+# Cache ra file
+# ==========================================
+def save_cache_to_file(station_payload, tech_stats, ticket_rows):
+    payload = {
+        "station_payload": station_payload,
+        "tech_stats": tech_stats,
+        "ticket_rows": ticket_rows,
+    }
+    try:
+        from cache_store import save_map_cache
+        save_map_cache(payload, CACHE_FILE)
+    except Exception as e:
+        try:
+            with open(CACHE_FILE, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False)
+        except Exception as e2:
+            print(f"⚠️ Không thể lưu cache dữ liệu ra file: {e2}")
+        print(f"⚠️ cache_store save_map: {e}")
+
+
+def load_cache_from_file():
+    try:
+        from cache_store import load_map_cache
+        data = load_map_cache(CACHE_FILE)
+        if isinstance(data, dict):
+            return (
+                data.get("station_payload"),
+                data.get("tech_stats", {}),
+                data.get("ticket_rows", []),
+            )
+    except Exception as e:
+        print(f"⚠️ cache_store load_map: {e}")
+        try:
+            if os.path.exists(CACHE_FILE):
+                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    return (
+                        data.get("station_payload"),
+                        data.get("tech_stats", {}),
+                        data.get("ticket_rows", []),
+                    )
+        except Exception as e2:
+            print(f"⚠️ Không thể đọc cache dữ liệu từ file: {e2}")
+    return None, {}, []
+
+
+# ==========================================
+# Giới hạn xem theo khu vực (Kỹ thuật viên)
+# ==========================================
+def filter_stations_for_user(stations, user):
+    """KT chỉ xem trạm trong khu vực của họ. Unassigned công khai cho tất cả."""
+    role = (user.get("role") or "").strip().lower()
+    if role != "kỹ thuật":
+        return stations
+
+    user_region = (user.get("region") or "").strip().lower()
+
+    result = []
+    for s in stations:
+        tech_name = (s.get("tech_name") or "").strip()
+        if not tech_name or tech_name.lower() == "unassigned":
+            result.append(s)
+            continue
+        if user_region and (s.get("region") or "").strip().lower() == user_region:
+            result.append(s)
+    return result
+
+
+def filter_tech_by_region_for_user(tech_by_region, user):
+    """KT chỉ thấy KT trong khu vực mình. Điều phối khu vực trở lên (Admin)
+    thấy TOÀN BỘ KT mọi khu vực — như Admin, không còn bị giới hạn theo
+    khu vực quản lý của mình."""
+    role = (user.get("role") or "").strip().lower()
+    if role != "kỹ thuật":
+        return tech_by_region
+
+    user_region = (user.get("region") or "").strip()
+    return {r: v for r, v in tech_by_region.items() if r == user_region}
