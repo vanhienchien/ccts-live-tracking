@@ -241,11 +241,19 @@ async def on_startup():
                     print(f"[stats] ensure charts nền lỗi: {e!r}")
             asyncio.create_task(_ensure_charts_bg())
 
-    try:
-        await refresh_stations_once()
-    except Exception as e:
-        print(f"⚠️ Lỗi lần cào đầu tiên khi khởi động ({e!r}) - tiếp tục chạy với dữ liệu cache (nếu có).")
+    async def _run_stations_refresh_once_bg():
+        # QUAN TRỌNG: không await trực tiếp trong on_startup — CCTS có thể
+        # mất vài chục giây đến vài phút để xử lý export (đã thấy trong log
+        # thực tế), và ASGI lifespan "startup" phải trả về nhanh để Uvicorn
+        # bind + accept connection kịp trước khi nền tảng cloud (Render...)
+        # timeout port-scan và kill tiến trình (exit 137). Cache cũ (nếu có)
+        # vẫn phục vụ bình thường trong lúc lượt cào đầu tiên này chạy nền.
+        try:
+            await refresh_stations_once()
+        except Exception as e:
+            print(f"⚠️ Lỗi lần cào đầu tiên khi khởi động ({e!r}) - tiếp tục chạy với dữ liệu cache (nếu có).")
 
+    asyncio.create_task(_run_stations_refresh_once_bg())
     asyncio.create_task(refresh_stations_loop())
     asyncio.create_task(stats_midnight_loop())
 
