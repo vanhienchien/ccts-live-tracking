@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import gc
 import hashlib
 import io
 import json
@@ -309,6 +310,7 @@ class CCTSClient:
         offset=420,
         check_interval=5,
         timeout=180,
+        usecols_map: dict[str, list[str]] | None = None,
     ):
         """
         Quy trình đầy đủ: tạo task xuất → poll đến khi sẵn sàng → tải Excel
@@ -317,6 +319,15 @@ class CCTSClient:
         Sheets trả về (luôn có đủ key, sheet thiếu sẽ là DataFrame rỗng):
             Ticket Information, Appointment, Events Record,
             Solutions, Spare Parts Record, Additional information
+
+        `usecols_map`: dict tùy chọn {tên_sheet: [tên_cột,...]} — nếu có,
+        MỖI SHEET sẽ được parse riêng lẻ (không dùng sheet_name=None) và chỉ
+        giữ lại các cột khớp whitelist NGAY KHI PARSE, thay vì parse full-
+        width rồi mới cắt sau. Đây là chỗ tốn RAM nhất khi file Excel lớn
+        (60 ngày dữ liệu): trước đây `pd.read_excel(sheet_name=None)` parse
+        CẢ 6 sheet cùng lúc và giữ full-width đồng thời trong RAM. Parse
+        tuần tự + trim ngay từng sheet giúp không bao giờ có quá 1 sheet
+        full-width sống cùng lúc.
         """
         res_export = await self.create_export_task(
             start_time, end_time,
@@ -370,24 +381,51 @@ class CCTSClient:
         def _download():
             return self.session.get(download_url, timeout=120)
 
+        required = [
+            "Ticket Information",
+            "Appointment",
+            "Events Record",
+            "Solutions",
+            "Spare Parts Record",
+            "Additional information",
+        ]
+
         try:
             res_file = await asyncio.to_thread(_download)
             if res_file.status_code != 200:
                 print(f"[-] Lỗi tải file HTTP {res_file.status_code}")
                 return None
 
-            dfs = pd.read_excel(io.BytesIO(res_file.content), sheet_name=None)
-            required = [
-                "Ticket Information",
-                "Appointment",
-                "Events Record",
-                "Solutions",
-                "Spare Parts Record",
-                "Additional information",
-            ]
+            file_bytes = res_file.content
+            # Giải phóng response object ngay (nó còn giữ 1 bản cache nội bộ
+            # của cùng bytes) — chỉ giữ lại `file_bytes` cần dùng.
+            del res_file
+            bio = io.BytesIO(file_bytes)
+            del file_bytes
+
+            excel_file = pd.ExcelFile(bio, engine="openpyxl")
+
+            dfs: dict[str, pd.DataFrame] = {}
             for sheet in required:
-                if sheet not in dfs:
+                if sheet not in excel_file.sheet_names:
                     dfs[sheet] = pd.DataFrame()
+                    continue
+
+                sheet_df = excel_file.parse(sheet_name=sheet)
+
+                keep = usecols_map.get(sheet) if usecols_map else None
+                if keep:
+                    cols_present = [c for c in sheet_df.columns if str(c).strip() in keep]
+                    if cols_present:
+                        trimmed = sheet_df.loc[:, cols_present].copy()
+                        del sheet_df
+                        sheet_df = trimmed
+
+                dfs[sheet] = sheet_df
+
+            excel_file.close()
+            del excel_file, bio
+            gc.collect()
 
             print("[✓] Đọc Excel từ RAM thành công!")
             return dfs

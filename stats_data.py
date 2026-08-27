@@ -30,6 +30,7 @@ Không vẽ chart ở đây.
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import os
 from datetime import datetime, timedelta
@@ -38,6 +39,56 @@ from typing import Any
 import pandas as pd
 
 from ccts_shared import VN_TZ, CCTS_API_LOCK, STATS_REFRESH_LOCK, STATS_SCRAPE_ACCOUNTS, ClientPool
+
+# ------------------------------------------------------------------
+# Danh sách cột THỰC SỰ được dùng ở downstream, theo từng sheet CCTS trả về.
+# CCTS export thường có 30-50+ cột/sheet (địa chỉ, lịch sử, ghi chú dài...),
+# nhưng code chỉ cần một phần nhỏ. Trim ngay khi vừa tải xong (TRƯỚC khi gộp
+# 2 tài khoản) để không phải giữ toàn bộ chiều rộng gốc trong RAM suốt cả
+# pipeline — đây là chỗ tốn RAM nhiều nhất khi dữ liệu 60 ngày lớn dần.
+# Cột không tồn tại trong sheet sẽ tự bị bỏ qua (không lỗi).
+SHEET_KEEP_COLUMNS: dict[str, list[str]] = {
+    "Ticket Information": [
+        "Ticket ID", "Station Code", "Charge Point ID", "Create Time",
+        "SLA Status", "Severity", "Problem Description",
+        "Address", "Error Code", "Ticket Status",
+    ],
+    "Events Record": [
+        "Ticket ID", "Ticket Status", "Create Time", "Record Detail",
+    ],
+    "Spare Parts Record": [
+        "Ticket ID",
+    ],
+    "Appointment": [
+        "Ticket ID", "Create Time", "Detail",
+    ],
+    "Additional information": [
+        # tên cột thực tế không cố định (vd "Handling type" / "Handle Type"),
+        # nên whitelist thêm biến thể; cột không khớp tự bị bỏ qua.
+        "Ticket ID", "TicketID", "Ticket",
+        "Handling type", "Handling Type", "Handle type", "Handle Type",
+    ],
+    "Solutions": [
+        "Ticket ID", "Solution Description", "Create Time",
+    ],
+}
+
+
+def _trim_sheet_columns(name: str, df: pd.DataFrame) -> pd.DataFrame:
+    """Chỉ giữ lại các cột thực sự dùng tới cho sheet `name` (nếu có khai
+    báo whitelist); sheet lạ không có trong SHEET_KEEP_COLUMNS thì giữ
+    nguyên (an toàn, tránh vô tình làm mất dữ liệu của sheet mới thêm sau
+    này)."""
+    keep = SHEET_KEEP_COLUMNS.get(name)
+    if not keep:
+        return df
+    cols_present = [c for c in df.columns if str(c).strip() in keep]
+    if not cols_present:
+        # Không khớp cột nào (vd tên cột đổi khác) — giữ nguyên để không
+        # âm thầm làm mất dữ liệu; sẽ tốn RAM hơn nhưng an toàn hơn.
+        return df
+    return df.loc[:, cols_present].copy()
+
 
 SCRAPE_LOOKBACK_DAYS = 60
 STATS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_daily_cache.json")
@@ -774,6 +825,7 @@ async def _export_one_account(username, password, start_time, end_time) -> dict 
                     start_time=start_time,
                     end_time=end_time,
                     ticket_status=None,
+                    usecols_map=SHEET_KEEP_COLUMNS,
                 ),
                 timeout=EXPORT_TIMEOUT_SECONDS,
             )
@@ -794,9 +846,16 @@ async def _export_one_account(username, password, start_time, end_time) -> dict 
     for name, df in dfs.items():
         if df is None or (hasattr(df, "empty") and df.empty):
             continue
-        part = df.copy()
+        # Trim cột TRƯỚC (sheet gốc CCTS có thể 30-50+ cột, chỉ cần vài cột)
+        # rồi mới gắn _source_account — tránh giữ bản full-width trong RAM.
+        part = _trim_sheet_columns(name, df)
+        if part is df:
+            # không trim được (sheet lạ) → vẫn cần bản sao riêng để gán cột
+            part = df.copy()
         part["_source_account"] = username
         out[name] = part
+        del df
+    del dfs
     return out if out else None
 
 
@@ -996,11 +1055,23 @@ async def fetch_all_accounts_tickets(start_time=None, end_time=None):
     if not events_raw.empty and "Ticket ID" in events_raw.columns:
         events_raw["Ticket ID"] = events_raw["Ticket ID"].astype(str).str.strip()
 
+    # `bundles`/`ti_frames`/... chỉ là dữ liệu THEO TỪNG TÀI KHOẢN, đã được
+    # gộp xong vào raw/events_raw/... ở trên — không cần giữ nữa. Nếu không
+    # xoá, chúng vẫn sống tới hết hàm (kể cả trong lúc _finalize_from_raw
+    # chạy), khiến RAM đỉnh gần như gấp đôi so với mức cần thiết.
+    del bundles, ti_frames, ev_frames, sp_frames, ap_frames, ai_frames, sol_frames
+    gc.collect()
+
     source = "live" if not fail_accounts else "live_partial"
     processed, meta, closed_enriched, open_long = _finalize_from_raw(
         raw, events_raw, spare_raw, appt_raw, meta_extra,
         additional_raw=additional_raw, solutions_raw=solutions_raw,
     )
+    # raw/events_raw/... (đã trim cột, nhưng vẫn là dữ liệu THÔ đầy đủ dòng)
+    # không còn cần sau bước này — chỉ còn cần processed/closed_enriched/
+    # open_long (đã trim cả CỘT lẫn hàng, nhỏ hơn nhiều).
+    del raw, events_raw, spare_raw, appt_raw, additional_raw, solutions_raw
+    gc.collect()
     meta["source"] = source
     print(f"[stats] Sau chuẩn hóa TI: {len(processed)} ticket (source={source})")
     return processed, source, meta, closed_enriched, open_long
