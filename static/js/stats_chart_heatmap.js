@@ -269,8 +269,13 @@
     }
     map = L.map(refs.mapEl, { center: [16.0, 106.0], zoom: 5, zoomControl: true, attributionControl: true });
 
-    // Đã chuyển sang sử dụng CartoDB Positron (Nền đơn sắc) để màu nhiệt nổi lên tuyệt đối
-    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    // Gọi tile QUA PROXY của chính server mình (/api/tiles/...) thay vì gọi thẳng
+    // *.tile.openstreetmap.org. Lý do: một số máy có hosts file / firewall /
+    // phần mềm bảo mật chặn domain OSM (ERR_CONNECTION_REFUSED) khiến nền bản
+    // đồ trắng xoá dù heatmap/ranh giới vẫn vẽ được (vì 2 thứ đó không cần
+    // domain ngoài). Proxy qua cùng domain app -> không còn phụ thuộc
+    // DNS/hosts của từng máy khách nữa.
+    L.tileLayer("/api/tiles/{z}/{x}/{y}.png", {
       maxZoom: 18,
       attribution: "&copy; OpenStreetMap",
     }).addTo(map);

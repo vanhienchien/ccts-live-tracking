@@ -20,6 +20,7 @@ from fastapi.staticfiles import StaticFiles
 import users_store
 import ccts_data
 import stats_data
+import tile_proxy
 from ccts_data import get_static_data, filter_stations_for_user, filter_tech_by_region_for_user
 from location_hub import hub
 from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS
@@ -32,6 +33,7 @@ _STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "1").strip().lo
 app = FastAPI(title="CCTS Live Map")
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
+app.include_router(tile_proxy.router)
 
 SESSIONS = {}
 
