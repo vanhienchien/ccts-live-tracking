@@ -31,16 +31,27 @@ LƯU Ý (OSM Tile Usage Policy — https://operations.osmfoundation.org/policies
   trực tiếp OSM ở quy mô lớn.
 
 VỀ THỨ TỰ PROVIDER (_PROVIDERS bên dưới):
-1. Esri "World Light Gray Canvas" — ĐẶT ĐẦU TIÊN vì KHÔNG cần đăng ký/API
-   key, miễn phí, và không phụ thuộc domain OSM (đang bị chặn ở 1 số mạng).
-   Phong cách nền xám nhạt, hợp với việc làm nổi màu heatmap.
-2. OpenStreetMap chuẩn (tile.openstreetmap.org) — dự phòng, có địa danh/
-   đường sá chi tiết hơn, nhưng domain này đang bị chặn trên 1 số mạng.
-3. CARTO (basemaps.cartocdn.com) — CHỈ dùng khi có biến môi trường
-   CARTO_API_KEY (CARTO đã bắt buộc key từ ~cuối tháng 8/2026, gọi không
-   key sẽ bị dán watermark "API KEY REQUIRED" đè khắp bản đồ). Lấy key
-   miễn phí (5 triệu request/tháng) tại: https://carto.com/basemaps/apikey
-   rồi set biến môi trường CARTO_API_KEY=xxxx trước khi chạy uvicorn.
+1. Esri "World Light Gray Canvas" — provider CHÍNH. Không cần đăng ký/API
+   key, miễn phí, KHÔNG cấm việc proxy/cache qua server riêng.
+2. CARTO (basemaps.cartocdn.com) — CHỈ dùng khi có biến môi trường
+   CARTO_API_KEY (CARTO bắt buộc key từ ~cuối tháng 8/2026, gọi không key
+   sẽ bị dán watermark "API KEY REQUIRED"). Lấy key miễn phí (5 triệu
+   request/tháng) tại: https://carto.com/basemaps/apikey rồi set biến môi
+   trường CARTO_API_KEY=xxxx.
+
+QUAN TRỌNG — ĐÃ BỎ HẲN OpenStreetMap (tile.openstreetmap.org) khỏi danh
+sách provider. Lý do: chính sách tile usage của OSM
+(operations.osmfoundation.org/policies/tiles) CẤM việc app dựng server
+riêng để PROXY/CACHE lại tile OSM cho nhiều người dùng qua 1 địa chỉ IP -
+họ chỉ cho phép trình duyệt của từng người dùng gọi trực tiếp. Vì
+tile_proxy.py này đúng là 1 kiểu proxy như vậy, OSM đã trả về ảnh cảnh báo
+"Access blocked" (osm.wiki/Blocked) thay vì tile thật - lỗi này KHÔNG liên
+quan gì đến mạng máy local hay Render, mà do OSM chủ động chặn theo IP
+server một khi phát hiện vi phạm. Nếu sau này thật sự cần tile OSM gốc
+(đường sá/địa danh chi tiết), phải hoặc (a) để browser gọi trực tiếp OSM
+(không qua proxy này, chấp nhận rủi ro 1 số máy/mạng bị chặn), hoặc
+(b) dùng provider trả phí có license cho việc proxy (MapTiler, Mapbox,
+Stadia Maps...).
 """
 
 from __future__ import annotations
@@ -60,15 +71,15 @@ router = APIRouter()
 
 _CARTO_API_KEY = os.environ.get("CARTO_API_KEY", "").strip()
 
+# Tile trả về nhỏ bất thường (vd ảnh cảnh báo "Access blocked" / watermark
+# "API KEY REQUIRED") thường có kích thước rất khác tile bản đồ thật -
+# dùng ngưỡng này để KHÔNG cache nhầm ảnh lỗi là tile hợp lệ.
+_MIN_VALID_TILE_BYTES = 300
+
 
 def _esri_url(z: int, x: int, y: int) -> str:
     # LƯU Ý: Esri dùng thứ tự {z}/{y}/{x} (khác OSM/CARTO là {z}/{x}/{y})
     return f"https://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}"
-
-
-def _osm_url(z: int, x: int, y: int) -> str:
-    sub = random.choice(["a", "b", "c"])
-    return f"https://{sub}.tile.openstreetmap.org/{z}/{x}/{y}.png"
 
 
 def _carto_url(z: int, x: int, y: int) -> str | None:
@@ -79,10 +90,10 @@ def _carto_url(z: int, x: int, y: int) -> str | None:
 
 
 # Thứ tự thử lần lượt — hàm trả None nghĩa là "bỏ qua provider này"
-# (vd CARTO khi chưa cấu hình key).
+# (vd CARTO khi chưa cấu hình key). KHÔNG có OSM trong danh sách (xem lý
+# do ở docstring đầu file).
 _PROVIDERS = [
     ("esri", _esri_url),
-    ("osm", _osm_url),
     ("carto", _carto_url),
 ]
 
@@ -142,8 +153,16 @@ async def get_tile(z: int, x: int, y: int, request: Request):
         if url is None:
             continue  # provider chưa cấu hình (vd CARTO thiếu API key) -> bỏ qua
         try:
-            resp = await client.get(url)
-            resp.raise_for_status()
+            candidate = await client.get(url)
+            candidate.raise_for_status()
+            ctype = candidate.headers.get("content-type", "")
+            if "image" not in ctype or len(candidate.content) < _MIN_VALID_TILE_BYTES:
+                # Trả về 200 nhưng không phải ảnh hợp lệ (vd trang lỗi HTML,
+                # hoặc ảnh cảnh báo "Access blocked"/"API KEY REQUIRED" quá
+                # nhỏ bất thường) -> coi như thất bại, không cache, thử tiếp.
+                print(f"[tile_proxy] Provider '{name}' trả về nội dung đáng ngờ cho {z}/{x}/{y} (type={ctype}, {len(candidate.content)} bytes), thử provider kế tiếp...")
+                continue
+            resp = candidate
             break
         except httpx.HTTPError as e:
             print(f"[tile_proxy] Provider '{name}' lỗi ({e.__class__.__name__}) cho {z}/{x}/{y}, thử provider kế tiếp...")
