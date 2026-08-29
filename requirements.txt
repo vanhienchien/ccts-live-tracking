@@ -11,3 +11,4 @@ google-auth
 requests
 cryptography
 boto3
+httpx

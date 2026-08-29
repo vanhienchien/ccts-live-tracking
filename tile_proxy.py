@@ -48,6 +48,11 @@ router = APIRouter()
 _OSM_SUBDOMAINS = ["a", "b", "c"]
 _OSM_URL_TMPL = "https://{sub}.tile.openstreetmap.org/{z}/{x}/{y}.png"
 
+# Fallback nếu OSM không gọi được từ SERVER (vd mạng/hosts nơi server chạy
+# cũng chặn domain OSM) — domain khác hẳn, hiếm khi cùng bị chặn chung.
+_FALLBACK_SUBDOMAINS = ["a", "b", "c", "d"]
+_FALLBACK_URL_TMPL = "https://{sub}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png"
+
 _CACHE_DIR = Path(__file__).parent / "_tile_cache"
 _CACHE_DIR.mkdir(exist_ok=True)
 _CACHE_TTL_SECONDS = 7 * 24 * 3600  # 7 ngày, tile nền hầu như không đổi
@@ -96,14 +101,32 @@ async def get_tile(z: int, x: int, y: int, request: Request):
             headers={"Cache-Control": "public, max-age=86400"},
         )
 
-    sub = random.choice(_OSM_SUBDOMAINS)
-    url = _OSM_URL_TMPL.format(sub=sub, z=z, x=x, y=y)
     client = _get_client()
+    resp = None
+
+    osm_sub = random.choice(_OSM_SUBDOMAINS)
+    osm_url = _OSM_URL_TMPL.format(sub=osm_sub, z=z, x=x, y=y)
     try:
-        resp = await client.get(url)
+        resp = await client.get(osm_url)
         resp.raise_for_status()
-    except httpx.HTTPError:
-        # OSM lỗi/timeout: có cache cũ (dù hết hạn) thì trả tạm, đỡ hơn trắng xoá
+    except httpx.HTTPError as e:
+        print(f"[tile_proxy] OSM lỗi ({e.__class__.__name__}) cho {z}/{x}/{y}, thử fallback CartoDB...")
+        resp = None
+
+    if resp is None:
+        # OSM không gọi được TỪ SERVER (vd hosts/firewall nơi server chạy
+        # cũng chặn domain OSM) -> thử domain khác hẳn trước khi bỏ cuộc.
+        fb_sub = random.choice(_FALLBACK_SUBDOMAINS)
+        fb_url = _FALLBACK_URL_TMPL.format(sub=fb_sub, z=z, x=x, y=y)
+        try:
+            resp = await client.get(fb_url)
+            resp.raise_for_status()
+        except httpx.HTTPError:
+            resp = None
+
+    if resp is None:
+        # Cả 2 provider đều thất bại: có cache cũ (dù hết hạn) thì trả tạm,
+        # đỡ hơn trắng xoá hoàn toàn.
         if cache_file.exists():
             return Response(content=cache_file.read_bytes(), media_type="image/png")
         return JSONResponse({"error": "upstream tile fetch failed"}, status_code=502)
