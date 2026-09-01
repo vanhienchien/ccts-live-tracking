@@ -26,7 +26,12 @@ from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS
 import os
 
 # auto | 1 | 0 — local test: set STATS_REFRESH_ON_STARTUP=0 để chỉ dùng cache có sẵn
-_STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "auto").strip().lower()
+_STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "1").strip().lower()
+
+# 1 = cho phép server tự gọi CCTS cào stats (startup / 0h / admin nút refresh)
+# 0 = KHÔNG BAO GIỜ tự cào trên server này — chỉ đọc cache có sẵn (dùng cho
+#     Render, khi bạn chủ động cào ở local rồi git push cache lên).
+_STATS_SCRAPE_ENABLED = os.environ.get("STATS_SCRAPE_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
 
 
 app = FastAPI(title="CCTS Live Map")
@@ -218,7 +223,9 @@ async def on_startup():
     #   STATS_REFRESH_ON_STARTUP=auto  → chỉ cào khi CHƯA có cache (mặc định)
     # Lịch 0h VN và POST /api/admin/refresh-stats vẫn cào bình thường.
     do_stats_startup = False
-    if _STATS_STARTUP_MODE in ("1", "true", "yes", "on"):
+    if not _STATS_SCRAPE_ENABLED:
+        do_stats_startup = False          # Render: luôn bỏ qua, chỉ đọc cache
+    elif _STATS_STARTUP_MODE in ("1", "true", "yes", "on"):
         do_stats_startup = True
     elif _STATS_STARTUP_MODE in ("0", "false", "no", "off"):
         do_stats_startup = False
@@ -255,7 +262,10 @@ async def on_startup():
 
     asyncio.create_task(_run_stations_refresh_once_bg())
     asyncio.create_task(refresh_stations_loop())
-    asyncio.create_task(stats_midnight_loop())
+    if _STATS_SCRAPE_ENABLED:
+        asyncio.create_task(stats_midnight_loop())
+    else:
+        print("[stats] STATS_SCRAPE_ENABLED=0 — bỏ qua lịch cào 0h, chỉ dùng cache.")
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -433,6 +443,11 @@ async def api_admin_refresh_stats(request: Request):
     user = get_current_user(request)
     if not require_admin(user):
         return JSONResponse({"error": "Bạn không có quyền thực hiện thao tác này."}, status_code=403)
+    if not _STATS_SCRAPE_ENABLED:
+        return JSONResponse(
+            {"error": "Server này không tự cào CCTS (STATS_SCRAPE_ENABLED=0). Hãy cào ở local rồi push cache lên."},
+            status_code=503,
+        )
     try:
         payload = await stats_data.refresh_stats_cache()
         return {

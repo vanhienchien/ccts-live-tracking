@@ -1,30 +1,29 @@
 """
-stats_data.py — chỉ chịu trách nhiệm đăng nhập + cào + chuẩn hóa ticket.
+stats_data.py — chỉ chịu trách nhiệm CHUẨN HÓA ticket + GIỮ CACHE cho các
+module nhỏ khác dùng (stats_charts_*.py). KHÔNG tự lo việc lấy dữ liệu thô
+(đăng nhập/cào CCTS hay đọc file Excel) — việc đó nằm ở stats_source.py;
+stats_data.py chỉ gọi stats_source.get_raw_bundle(...) và nhận về raw
+sheets theo 1 hình dạng cố định, không cần biết dữ liệu đến từ đâu.
 
-- Cào CỐ ĐỊNH 2 tài khoản esmanager + itsmanagermt (ccts_shared.STATS_SCRAPE_
-  ACCOUNTS) — KHÔNG phụ thuộc config.CCTS_ACCOUNTS, vì lịch cào (0h / khởi
-  động) rơi vào giờ không ai dùng tài khoản tổng, nên cố định luôn cho an
-  toàn & dễ kiểm soát. Gộp + khử trùng theo Ticket ID.
-- Nếu 1 tài khoản chưa cào được ngay, tự động THỬ LẠI theo vòng lặp (tối đa
-  MAX_SCRAPE_ROUNDS lần, cách nhau SCRAPE_RETRY_DELAY_SECONDS giây) cho đến
-  khi có dữ liệu hoặc hết số vòng cho phép. Nếu sau cùng vẫn KHÔNG cào được
-  ticket nào (từ cả 2 tài khoản), GIỮ NGUYÊN cache thống kê cũ (ngày hôm
-  qua) thay vì ghi đè bằng dữ liệu rỗng.
-- Cửa sổ: 60 ngày kết thúc tại 0h hôm nay (KHÔNG gồm ngày hiện tại).
-- Lọc BSS.No2, map Region/Tech, phân loại EV/BSS.
-- Mỗi ticket (kể cả đang MỞ) đều được gắn is_overdue (từ SLA Status hiện
-  tại) + has_spare_wait/has_appointment/is_overdue_excuse, để
-  stats_charts_overdue_rate.py tính tỷ lệ Overdue theo cửa sổ NGÀY TẠO
-  (30 ngày gần nhất, mọi trạng thái) — tách biệt với closed_tickets (ticket
-  ĐÃ ĐÓNG trong 30 ngày qua Events) vẫn dùng riêng để tính hiệu suất công
-  việc (top hiệu quả/khối lượng, boxplot thời gian xử lý).
-- Ghi cache thô (danh sách ticket đã chuẩn hóa) cho các module biểu đồ dùng.
-- Dùng CCTS_API_LOCK dùng chung với ccts_data.py (qua ccts_shared) để 2
-  module không bao giờ gọi API CCTS cùng lúc; và STATS_REFRESH_LOCK (single-
-  flight) để gộp nhiều lượt cào thống kê gọi gần nhau (khởi động / 0h /
-  admin bấm tay) thành 1 lượt duy nhất.
+- Chuẩn hoá: lọc BSS.No2, map Region/Tech, phân loại EV/BSS, gắn
+  is_overdue/has_spare_wait/has_appointment/is_overdue_excuse cho MỌI
+  ticket (kể cả đang mở), để stats_charts_overdue_rate.py tính tỷ lệ
+  Overdue theo cửa sổ NGÀY TẠO (30 ngày gần nhất, mọi trạng thái) — tách
+  biệt với closed_tickets (ticket ĐÃ ĐÓNG trong 30 ngày qua Events) dùng
+  riêng để tính hiệu suất công việc (top hiệu quả/khối lượng, boxplot thời
+  gian xử lý).
+- Nếu nguồn dữ liệu (CCTS live hoặc thư mục Excel local) không trả được
+  ticket nào, GIỮ NGUYÊN cache thống kê cũ thay vì ghi đè bằng dữ liệu
+  rỗng; nếu chưa từng có cache nào, dùng file mẫu (SAMPLE_XLSX) làm phao
+  cứu sinh cuối cùng.
+- Ghi cache thô (danh sách ticket đã chuẩn hóa) + charts đã "nướng" sẵn
+  (_prebuild_chart_payloads, gọi các module stats_charts_*.py) cho route
+  /api/stats/* dùng.
+- STATS_REFRESH_LOCK (single-flight, qua ccts_shared) để gộp nhiều lượt
+  làm mới gọi gần nhau (khởi động / 0h / admin bấm tay) thành 1 lượt.
 
-Không vẽ chart ở đây.
+Không vẽ chart ở đây (xem stats_charts_*.py). Không tự cào CCTS ở đây (xem
+stats_source.py).
 """
 
 from __future__ import annotations
@@ -38,75 +37,11 @@ from typing import Any
 
 import pandas as pd
 
-from ccts_shared import VN_TZ, CCTS_API_LOCK, STATS_REFRESH_LOCK, STATS_SCRAPE_ACCOUNTS, ClientPool
+from ccts_shared import VN_TZ, STATS_REFRESH_LOCK
+import stats_source
 
-# ------------------------------------------------------------------
-# Danh sách cột THỰC SỰ được dùng ở downstream, theo từng sheet CCTS trả về.
-# CCTS export thường có 30-50+ cột/sheet (địa chỉ, lịch sử, ghi chú dài...),
-# nhưng code chỉ cần một phần nhỏ. Trim ngay khi vừa tải xong (TRƯỚC khi gộp
-# 2 tài khoản) để không phải giữ toàn bộ chiều rộng gốc trong RAM suốt cả
-# pipeline — đây là chỗ tốn RAM nhiều nhất khi dữ liệu 60 ngày lớn dần.
-# Cột không tồn tại trong sheet sẽ tự bị bỏ qua (không lỗi).
-SHEET_KEEP_COLUMNS: dict[str, list[str]] = {
-    "Ticket Information": [
-        "Ticket ID", "Station Code", "Charge Point ID", "Create Time",
-        "SLA Status", "Severity", "Problem Description",
-        "Address", "Error Code", "Ticket Status",
-    ],
-    "Events Record": [
-        "Ticket ID", "Ticket Status", "Create Time", "Record Detail",
-    ],
-    "Spare Parts Record": [
-        "Ticket ID",
-    ],
-    "Appointment": [
-        "Ticket ID", "Create Time", "Detail",
-    ],
-    "Additional information": [
-        # tên cột thực tế không cố định (vd "Handling type" / "Handle Type"),
-        # nên whitelist thêm biến thể; cột không khớp tự bị bỏ qua.
-        "Ticket ID", "TicketID", "Ticket",
-        "Handling type", "Handling Type", "Handle type", "Handle Type",
-    ],
-    "Solutions": [
-        "Ticket ID", "Solution Description", "Create Time",
-    ],
-}
-
-
-def _trim_sheet_columns(name: str, df: pd.DataFrame) -> pd.DataFrame:
-    """Chỉ giữ lại các cột thực sự dùng tới cho sheet `name` (nếu có khai
-    báo whitelist); sheet lạ không có trong SHEET_KEEP_COLUMNS thì giữ
-    nguyên (an toàn, tránh vô tình làm mất dữ liệu của sheet mới thêm sau
-    này)."""
-    keep = SHEET_KEEP_COLUMNS.get(name)
-    if not keep:
-        return df
-    cols_present = [c for c in df.columns if str(c).strip() in keep]
-    if not cols_present:
-        # Không khớp cột nào (vd tên cột đổi khác) — giữ nguyên để không
-        # âm thầm làm mất dữ liệu; sẽ tốn RAM hơn nhưng an toàn hơn.
-        return df
-    return df.loc[:, cols_present].copy()
-
-
-SCRAPE_LOOKBACK_DAYS = 60
 STATS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_daily_cache.json")
 SAMPLE_XLSX = os.path.join(os.path.dirname(__file__), "Tickets_esmanager_20260728_201743.xlsx")
-
-# Cào tối đa 10 vòng, chờ 20s giữa các vòng cho tài khoản còn thất bại.
-MAX_SCRAPE_ROUNDS = 10
-SCRAPE_RETRY_DELAY_SECONDS = 20
-
-# Giới hạn thời gian chờ CCTS xử lý xong 1 lượt export/tài khoản. Nếu CCTS
-# không bao giờ trả status "sẵn sàng" (dữ liệu quá lớn / lỗi phía CCTS),
-# vòng chờ bên trong client.export_and_download_tickets() có thể chạy vô
-# hạn — mà lệnh gọi đó nằm TRONG CCTS_API_LOCK, nên nếu treo sẽ chặn luôn
-# ccts_data.py cào bản đồ realtime mỗi 15'. Bọc bằng asyncio.wait_for để tự
-# bỏ cuộc sau EXPORT_TIMEOUT_SECONDS, nhả khoá, rồi để cơ chế vòng lặp
-# round-based (MAX_SCRAPE_ROUNDS) thử lại bình thường thay vì treo cả hệ
-# thống.
-EXPORT_TIMEOUT_SECONDS = int(os.environ.get("EXPORT_TIMEOUT_SECONDS", "180"))
 
 # Công ty đã RÚT KHỎI khu vực HCM (08/2026) -> HCM không còn nằm trong danh
 # sách khu vực được quản lý; xem thêm ccts_shared.DEPRECATED_REGIONS (nơi
@@ -292,22 +227,6 @@ def _parse_create_time(val) -> datetime | None:
         except ValueError:
             continue
     return None
-
-
-def scrape_time_range() -> tuple[str, str, str]:
-    """
-    [start, end) giờ VN:
-    - end = 0h hôm nay (KHÔNG gồm ngày hiện tại)
-    - start = end - 60 ngày
-    """
-    now = datetime.now(VN_TZ)
-    end = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    start = end - timedelta(days=SCRAPE_LOOKBACK_DAYS)
-    return (
-        start.strftime("%Y-%m-%d %H:%M:%S"),
-        end.strftime("%Y-%m-%d %H:%M:%S"),
-        end.strftime("%Y-%m-%d"),
-    )
 
 
 def process_ticket_information(
@@ -810,55 +729,6 @@ def enrich_closed_with_ticket_info(
     return pd.DataFrame(rows)
 
 
-_stats_pool = ClientPool()  # pool phiên đăng nhập RIÊNG của stats_data.py
-
-
-async def _export_one_account(username, password, start_time, end_time) -> dict | None:
-    """Export Excel cho 1 tài khoản (tự relogin 1 lần nếu bị đá session, qua
-    ClientPool dùng chung). Trả dict các sheet DataFrame (đã gắn
-    _source_account), hoặc None nếu thất bại."""
-
-    async def _action(client):
-        try:
-            dfs = await asyncio.wait_for(
-                client.export_and_download_tickets(
-                    start_time=start_time,
-                    end_time=end_time,
-                    ticket_status=None,
-                    usecols_map=SHEET_KEEP_COLUMNS,
-                ),
-                timeout=EXPORT_TIMEOUT_SECONDS,
-            )
-        except asyncio.TimeoutError:
-            raise RuntimeError(
-                f"export_and_download_tickets quá {EXPORT_TIMEOUT_SECONDS}s "
-                "(CCTS không trả về file sẵn sàng) — bỏ cuộc để nhả khoá."
-            )
-        if not dfs:
-            raise RuntimeError("export_and_download_tickets trả về rỗng")
-        return dfs
-
-    dfs, ok = await _stats_pool.call_with_retry(username, password, _action)
-    if not ok or not dfs:
-        return None
-
-    out = {}
-    for name, df in dfs.items():
-        if df is None or (hasattr(df, "empty") and df.empty):
-            continue
-        # Trim cột TRƯỚC (sheet gốc CCTS có thể 30-50+ cột, chỉ cần vài cột)
-        # rồi mới gắn _source_account — tránh giữ bản full-width trong RAM.
-        part = _trim_sheet_columns(name, df)
-        if part is df:
-            # không trim được (sheet lạ) → vẫn cần bản sao riêng để gán cột
-            part = df.copy()
-        part["_source_account"] = username
-        out[name] = part
-        del df
-    del dfs
-    return out if out else None
-
-
 def _finalize_from_raw(
     raw,
     events_raw,
@@ -953,130 +823,6 @@ def _load_sample_bundle():
     return raw, events_raw, spare_raw, appt_raw, additional_raw, solutions_raw
 
 
-async def fetch_all_accounts_tickets(start_time=None, end_time=None):
-    """
-    Cào 2 tài khoản cố định (ccts_shared.STATS_SCRAPE_ACCOUNTS), gộp + khử
-    trùng Ticket Information / Events Record / Spare Parts / Appointment.
-
-    Cào theo VÒNG LẶP: mỗi vòng thử các tài khoản CHƯA thành công; tài khoản
-    nào đã có dữ liệu ở vòng trước thì không cào lại. Lặp tối đa
-    MAX_SCRAPE_ROUNDS vòng, nghỉ SCRAPE_RETRY_DELAY_SECONDS giây giữa các
-    vòng (KHÔNG giữ CCTS_API_LOCK trong lúc nghỉ, để không chặn ccts_data.py
-    cào bản đồ realtime mỗi 15').
-
-    Trả (processed_df, source, meta, closed_enriched_df) nếu có ít
-    nhất 1 tài khoản cào được; trả None nếu SAU TỐI ĐA số vòng vẫn không lấy
-    được ticket nào từ bất kỳ tài khoản nào (để refresh_stats_cache() giữ
-    nguyên cache cũ thay vì ghi đè dữ liệu rỗng).
-    """
-    start_time, end_time, end_date_ex = scrape_time_range()
-    print(f"[stats] Khoảng cào [start, end): {start_time} → {end_time} (không gồm {end_date_ex})")
-
-    pending = {
-        acc["username"]: acc
-        for acc in STATS_SCRAPE_ACCOUNTS
-        if acc.get("username")
-    }
-    bundles: dict[str, dict] = {}
-
-    round_no = 0
-    while pending and round_no < MAX_SCRAPE_ROUNDS:
-        round_no += 1
-        print(
-            f"[stats] Vòng cào {round_no}/{MAX_SCRAPE_ROUNDS} — "
-            f"còn {len(pending)} tài khoản chưa xong: {list(pending)}"
-        )
-        async with CCTS_API_LOCK:
-            for username, acc in list(pending.items()):
-                password = acc.get("password") or ""
-                print(f"[stats] Đang cào account: {username} ...")
-                try:
-                    bundle = await _export_one_account(username, password, start_time, end_time)
-                except Exception as e:
-                    bundle = None
-                    print(f"[stats]   → lỗi {username}: {e}")
-
-                if bundle and "Ticket Information" in bundle:
-                    bundles[username] = bundle
-                    pending.pop(username, None)
-                    print(
-                        f"[stats]   → OK {username}: TI={len(bundle['Ticket Information'])}, "
-                        f"EV={len(bundle.get('Events Record', []))}, "
-                        f"SP={len(bundle.get('Spare Parts Record', []))}, "
-                        f"AP={len(bundle.get('Appointment', []))}"
-                    )
-                else:
-                    print(f"[stats]   → chưa được: {username} (sẽ thử lại ở vòng sau)")
-
-        if pending and round_no < MAX_SCRAPE_ROUNDS:
-            print(f"[stats] Đợi {SCRAPE_RETRY_DELAY_SECONDS}s trước vòng kế tiếp...")
-            await asyncio.sleep(SCRAPE_RETRY_DELAY_SECONDS)
-
-    ok_accounts = list(bundles.keys())
-    fail_accounts = list(pending.keys())
-    if fail_accounts:
-        print(f"[stats] Sau {round_no} vòng vẫn chưa cào được: {fail_accounts}")
-
-    meta_extra = {
-        "start_time": start_time,
-        "end_time": end_time,
-        "end_date_exclusive": end_date_ex,
-        "accounts_ok": ok_accounts,
-        "accounts_fail": fail_accounts,
-        "rounds_used": round_no,
-        "lookback_days": SCRAPE_LOOKBACK_DAYS,
-    }
-
-    if not bundles:
-        # Không có tài khoản nào cào được sau tối đa số vòng cho phép.
-        # KHÔNG dùng sample fallback ở đây - để refresh_stats_cache() tự
-        # quyết định giữ cache cũ (ưu tiên) hoặc mới dùng sample (chót).
-        print(f"[stats] Cào thất bại toàn bộ sau {round_no} vòng — không có ticket nào.")
-        return None
-
-    ti_frames = [b["Ticket Information"] for b in bundles.values()]
-    ev_frames = [b["Events Record"] for b in bundles.values() if "Events Record" in b]
-    sp_frames = [b["Spare Parts Record"] for b in bundles.values() if "Spare Parts Record" in b]
-    ap_frames = [b["Appointment"] for b in bundles.values() if "Appointment" in b]
-    ai_frames = [b["Additional information"] for b in bundles.values() if "Additional information" in b]
-    sol_frames = [b["Solutions"] for b in bundles.values() if "Solutions" in b]
-
-    raw = pd.concat(ti_frames, ignore_index=True)
-    if "Ticket ID" in raw.columns:
-        raw["Ticket ID"] = raw["Ticket ID"].astype(str).str.strip()
-        before = len(raw)
-        raw = raw.drop_duplicates(subset=["Ticket ID"])
-        print(f"[stats] TI gộp {before} → {len(raw)}")
-    events_raw = pd.concat(ev_frames, ignore_index=True) if ev_frames else pd.DataFrame()
-    spare_raw = pd.concat(sp_frames, ignore_index=True) if sp_frames else pd.DataFrame()
-    appt_raw = pd.concat(ap_frames, ignore_index=True) if ap_frames else pd.DataFrame()
-    additional_raw = pd.concat(ai_frames, ignore_index=True) if ai_frames else pd.DataFrame()
-    solutions_raw = pd.concat(sol_frames, ignore_index=True) if sol_frames else pd.DataFrame()
-    if not events_raw.empty and "Ticket ID" in events_raw.columns:
-        events_raw["Ticket ID"] = events_raw["Ticket ID"].astype(str).str.strip()
-
-    # `bundles`/`ti_frames`/... chỉ là dữ liệu THEO TỪNG TÀI KHOẢN, đã được
-    # gộp xong vào raw/events_raw/... ở trên — không cần giữ nữa. Nếu không
-    # xoá, chúng vẫn sống tới hết hàm (kể cả trong lúc _finalize_from_raw
-    # chạy), khiến RAM đỉnh gần như gấp đôi so với mức cần thiết.
-    del bundles, ti_frames, ev_frames, sp_frames, ap_frames, ai_frames, sol_frames
-    gc.collect()
-
-    source = "live" if not fail_accounts else "live_partial"
-    processed, meta, closed_enriched, open_long = _finalize_from_raw(
-        raw, events_raw, spare_raw, appt_raw, meta_extra,
-        additional_raw=additional_raw, solutions_raw=solutions_raw,
-    )
-    # raw/events_raw/... (đã trim cột, nhưng vẫn là dữ liệu THÔ đầy đủ dòng)
-    # không còn cần sau bước này — chỉ còn cần processed/closed_enriched/
-    # open_long (đã trim cả CỘT lẫn hàng, nhỏ hơn nhiều).
-    del raw, events_raw, spare_raw, appt_raw, additional_raw, solutions_raw
-    gc.collect()
-    meta["source"] = source
-    print(f"[stats] Sau chuẩn hóa TI: {len(processed)} ticket (source={source})")
-    return processed, source, meta, closed_enriched, open_long
-
-
 def tickets_df_to_records(df: pd.DataFrame) -> list:
     if df is None or df.empty:
         return []
@@ -1164,21 +910,25 @@ def _build_payload(df, source, meta, closed_df, open_long=None) -> dict:
     }
 
 
-async def _refresh_stats_cache_impl() -> dict:
+async def _refresh_stats_cache_impl(source_mode: str | None = None, local_folder: str | None = None) -> dict:
     """Phần thực thi thật sự (chạy dưới STATS_REFRESH_LOCK).
 
     Luồng thành công:
-      1) Cào 2 account (60 ngày) → bundles thô
-      2) Chuẩn hoá → cache JSON + charts (trang /stats)
-    """
-    result = await fetch_all_accounts_tickets()
+      1) stats_source.get_raw_bundle(...) → bundles thô (từ CCTS live HOẶC
+         từ thư mục Excel local, tuỳ `source_mode` / STATS_DATA_SOURCE)
+      2) Chuẩn hoá (stats_data) → cache JSON + charts (trang /stats)
 
-    if result is None:
-        # Cào thất bại HOÀN TOÀN sau tối đa MAX_SCRAPE_ROUNDS vòng.
+    stats_data.py KHÔNG quan tâm dữ liệu đến từ đâu — chỉ nhận raw sheets
+    theo đúng hình dạng cố định từ stats_source rồi xử lý như nhau.
+    """
+    bundle = await stats_source.get_raw_bundle(mode=source_mode, local_folder=local_folder)
+
+    if bundle is None:
+        # Nguồn được chọn (CCTS live hoặc thư mục local) không có dữ liệu.
         old = load_stats_cache()
         if old:
             print(
-                "[stats] Cào thất bại toàn bộ — GIỮ NGUYÊN cache thống kê cũ "
+                "[stats] Không lấy được dữ liệu nguồn mới — GIỮ NGUYÊN cache thống kê cũ "
                 f"(generated_at={old.get('meta', {}).get('generated_at', '?')})."
             )
             return old
@@ -1188,19 +938,19 @@ async def _refresh_stats_cache_impl() -> dict:
         sample = _load_sample_bundle()
         if sample is None:
             raise RuntimeError(
-                "Không cào được ticket từ bất kỳ tài khoản nào, cũng không có "
+                "Không lấy được ticket từ nguồn nào (CCTS/local), cũng không có "
                 "cache cũ hay file mẫu để hiển thị tạm."
             )
         raw, events_raw, spare_raw, appt_raw, additional_raw, solutions_raw = sample
-        _, end_time, end_date_ex = scrape_time_range()
+        _, end_time, end_date_ex = stats_source.scrape_time_range()
         meta_extra = {
             "start_time": None,
             "end_time": end_time,
             "end_date_exclusive": end_date_ex,
             "accounts_ok": [],
-            "accounts_fail": [a["username"] for a in STATS_SCRAPE_ACCOUNTS],
-            "rounds_used": MAX_SCRAPE_ROUNDS,
-            "lookback_days": SCRAPE_LOOKBACK_DAYS,
+            "accounts_fail": [],
+            "rounds_used": 0,
+            "lookback_days": stats_source.SCRAPE_LOOKBACK_DAYS,
         }
         processed, meta, closed_df, open_long = _finalize_from_raw(
             raw, events_raw, spare_raw, appt_raw, meta_extra,
@@ -1212,8 +962,16 @@ async def _refresh_stats_cache_impl() -> dict:
         print(f"[stats] Cache v2 (sample fallback): TI={meta.get('row_count', 0)}")
         return payload
 
-    df, source, meta, closed_df, open_long = result
-    payload = _build_payload(df, source, meta, closed_df, open_long=open_long)
+    raw, events_raw, spare_raw, appt_raw, additional_raw, solutions_raw, meta_extra = bundle
+    source = meta_extra.get("source", "unknown")
+    processed, meta, closed_df, open_long = _finalize_from_raw(
+        raw, events_raw, spare_raw, appt_raw, meta_extra,
+        additional_raw=additional_raw, solutions_raw=solutions_raw,
+    )
+    del raw, events_raw, spare_raw, appt_raw, additional_raw, solutions_raw
+    gc.collect()
+
+    payload = _build_payload(processed, source, meta, closed_df, open_long=open_long)
     payload = _prebuild_chart_payloads(payload)
     save_stats_cache(payload)
     print(
@@ -1225,22 +983,28 @@ async def _refresh_stats_cache_impl() -> dict:
     return payload
 
 
-async def refresh_stats_cache(**_kwargs) -> dict:
-    """Cào 2 tài khoản cố định, 60 ngày (không gồm hôm nay) → cache v2
-    (tickets + closed).
+async def refresh_stats_cache(source_mode: str | None = None, local_folder: str | None = None, **_kwargs) -> dict:
+    """Làm mới cache thống kê (tickets + closed) từ nguồn dữ liệu hiện tại.
 
-    Dùng STATS_REFRESH_LOCK kiểu "single-flight": nếu đã có 1 lượt cào khác
-    đang chạy (khởi động / lịch 0h / admin bấm tay xảy ra gần nhau), lượt
-    gọi này sẽ ĐỢI lượt kia xong rồi dùng luôn kết quả đó, thay vì cào 2
-    lần chồng nhau."""
+    `source_mode`: None → dùng stats_source.STATS_DATA_SOURCE (env
+    STATS_DATA_SOURCE, mặc định "ccts"). Truyền "ccts" hoặc "local" để ép
+    dùng đúng 1 nguồn bất kể env — ví dụ chạy tay ở local:
+        await refresh_stats_cache(source_mode="local")
+    `local_folder`: thư mục Excel khi source_mode="local" (mặc định
+    stats_source.STATS_LOCAL_DATA_DIR, tức thư mục "data/").
+
+    Dùng STATS_REFRESH_LOCK kiểu "single-flight": nếu đã có 1 lượt refresh
+    khác đang chạy (khởi động / lịch 0h / admin bấm tay xảy ra gần nhau),
+    lượt gọi này sẽ ĐỢI lượt kia xong rồi dùng luôn kết quả đó, thay vì
+    chạy 2 lần chồng nhau."""
     if STATS_REFRESH_LOCK.locked():
-        print("[stats] Đã có 1 lượt cào thống kê khác đang chạy — đợi kết quả đó, không cào lặp lại.")
+        print("[stats] Đã có 1 lượt làm mới thống kê khác đang chạy — đợi kết quả đó, không chạy lặp lại.")
         async with STATS_REFRESH_LOCK:
             pass
         return load_stats_cache() or {}
 
     async with STATS_REFRESH_LOCK:
-        return await _refresh_stats_cache_impl()
+        return await _refresh_stats_cache_impl(source_mode=source_mode, local_folder=local_folder)
 
 
 
@@ -1325,8 +1089,21 @@ async def get_daily_volume_stats(force_refresh: bool = False, **kwargs):
 
 
 if __name__ == "__main__":
+    # Chạy tay ở local:
+    #   python stats_data.py                 → dùng STATS_DATA_SOURCE (env, mặc định "ccts")
+    #   python stats_data.py --source local   → ép đọc file Excel trong thư mục "data/"
+    #   python stats_data.py --source local --folder duong/dan/khac
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Làm mới cache thống kê CCTS.")
+    parser.add_argument("--source", choices=["ccts", "local"], default=None,
+                         help="Nguồn dữ liệu: ccts (cào live) hoặc local (đọc Excel có sẵn).")
+    parser.add_argument("--folder", default=None,
+                         help="Thư mục chứa file Excel khi --source local (mặc định: thư mục 'data/').")
+    args = parser.parse_args()
+
     async def _main():
-        p = await refresh_stats_cache()
+        p = await refresh_stats_cache(source_mode=args.source, local_folder=args.folder)
         print("tickets:", len(p.get("tickets") or []))
         print("meta:", p.get("meta"))
 
