@@ -38,6 +38,7 @@
     color: var(--text);
     background: var(--bg);
     -webkit-font-smoothing: antialiased;
+    overflow-x: hidden;
   }
 
   /* ========== HEADER ========== */
@@ -1007,18 +1008,18 @@
   }
 
   @media (max-width: 700px) {
-    :root { --header-h: auto; }
     .header {
       flex-wrap: wrap;
       height: auto;
       padding: 10px 12px;
-      gap: 8px;
+      gap: 6px 8px;
     }
-    .header-logo { height: 28px; }
+    .header-logo { height: 26px; }
     .header .info {
       flex-wrap: wrap;
-      gap: 8px;
+      gap: 6px 8px;
       width: 100%;
+      row-gap: 8px;
     }
     .search-wrap {
       flex: 1 1 100%;
@@ -1028,8 +1029,24 @@
     #search-input { font-size: 16px; padding: 10px 12px 10px 36px; }
     #search-results { width: 100%; max-width: calc(100vw - 24px); }
     .conn-text-label { display: none; }
-    .hdr-btn, .filter-chip, .logout { font-size: 12.5px; padding: 6px 10px; }
-    #map { height: calc(100vh - 110px); }
+    .filter-chip { padding: 5px 9px; font-size: 12px; }
+    .status-group { font-size: 12px; }
+    .badge { padding: 3px 9px; font-size: 12px; }
+    .logout, #btn-manual-refresh, #btn-toggle-refresh {
+      font-size: 12.5px;
+      padding: 7px 10px;
+      min-height: 34px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    /* Hàng thao tác (Thống kê / refresh / pause / Đăng xuất) luôn xuống hàng
+       riêng, dồn về bên phải để không bị vỡ layout khi header wrap. */
+    .header-right {
+      flex: 1 1 100%;
+      justify-content: flex-end;
+      margin-left: 0;
+    }
     #tech-filter-panel {
       top: 8px;
       right: 8px;
@@ -1057,6 +1074,21 @@
     .ticket-panel-close-btn {
       margin-left: auto;
     }
+  }
+
+  /* Màn hình rất nhỏ (điện thoại phổ thông, ~<=480px): thu gọn nhãn chữ,
+     chỉ giữ icon để hàng nút thao tác không bị tràn / xuống quá nhiều dòng. */
+  @media (max-width: 480px) {
+    .header-right .lbl { display: none; }
+    .header-right a.logout, .header-right button {
+      padding: 7px 9px;
+      min-width: 34px;
+      justify-content: center;
+    }
+    .status-label { display: none; }
+    .badge { padding: 4px 10px; }
+    #header-updated-at { font-size: 10px; padding: 2px 7px; right: 8px; }
+    .ccts-station-popup, .leaflet-popup-content:has(.ccts-station-popup) { width: 88vw !important; }
   }
 /* =========================================================
    CCTS STATION POPUP - MODERN HEADER
@@ -1300,7 +1332,7 @@
       <span class="user-detail">{{ user.full_name }}:{{ user.role }}{% if user.region %} · {{ user.region }}{% endif %}</span>
 
       <span class="status-group" style="position:relative;">
-        Sự cố:
+        <span class="status-label">Sự cố:</span>
         <span class="badge" id="ticket-count" title="Bấm để xem danh sách trạm thiếu toạ độ">–</span>
         <div id="missing-coord-panel"></div>
       </span>
@@ -1311,12 +1343,12 @@
       </span>
 
       <div class="header-right">
-        <a class="logout" href="/stats" title="Thống kê sự cố theo ngày / khu vực">📊 Thống kê</a>
+        <a class="logout" href="/stats" title="Thống kê sự cố theo ngày / khu vực">📊 <span class="lbl">Thống kê</span></a>
         {% if user.role and user.role.strip().lower() == 'admin' %}
           <button id="btn-manual-refresh" onclick="triggerManualRefresh()" title="Làm mới dữ liệu trạm ngay">🔄</button>
           <button id="btn-toggle-refresh" onclick="toggleAutoRefresh()" title="Tạm dừng / Bật lại chu kỳ cào tự động" data-paused="0">⏸</button>
         {% endif %}
-        <a class="logout" href="/logout">Đăng xuất</a>
+        <a class="logout" href="/logout" title="Đăng xuất">🚪 <span class="lbl">Đăng xuất</span></a>
       </div>
     </div>
   </div>
@@ -1370,6 +1402,27 @@
       }
       syncChip('chip-charger', 'filter-charger');
       syncChip('chip-bss', 'filter-bss');
+    })();
+
+    // Đo chiều cao THẬT của header (trên mobile header có thể wrap 2-3 hàng
+    // tuỳ độ dài tên/khu vực) và ghi vào biến --header-h. #map và khung giờ
+    // cập nhật (#header-updated-at) đều dựa vào biến này để không bị hở/đè,
+    // thay vì trước đây dùng số cố định (110px) dễ lệch giữa các máy.
+    (function () {
+      const headerEl = document.querySelector('.header');
+      if (!headerEl) return;
+      function syncHeaderHeight() {
+        const h = headerEl.offsetHeight;
+        if (h > 0) document.documentElement.style.setProperty('--header-h', h + 'px');
+      }
+      syncHeaderHeight();
+      if (window.ResizeObserver) {
+        new ResizeObserver(syncHeaderHeight).observe(headerEl);
+      } else {
+        window.addEventListener('resize', syncHeaderHeight);
+        window.addEventListener('orientationchange', syncHeaderHeight);
+      }
+      window.addEventListener('load', syncHeaderHeight);
     })();
   </script>
 </body>
