@@ -26,7 +26,7 @@ from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS
 import os
 
 # auto | 1 | 0 — local test: set STATS_REFRESH_ON_STARTUP=0 để chỉ dùng cache có sẵn
-_STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "1").strip().lower()
+_STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "auto").strip().lower()
 
 # 1 = cho phép server tự gọi CCTS cào stats (startup / 0h / admin nút refresh)
 # 0 = KHÔNG BAO GIỜ tự cào trên server này — chỉ đọc cache có sẵn (dùng cho
@@ -618,40 +618,6 @@ async def api_mobile_location(request: Request):
         tech_stats=_tech_stats_for_user(user),
     )
     return {"status": "ok"}
-
-
-@app.get("/admin", response_class=HTMLResponse)
-async def admin_page(request: Request):
-    user = get_current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
-    if not require_admin(user):
-        return RedirectResponse("/", status_code=302)
-    return templates.TemplateResponse(request=request, name="admin.html", context={"user": user})
-
-
-@app.get("/api/admin/users")
-async def api_admin_list_users(request: Request):
-    user = get_current_user(request)
-    if not require_admin(user):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-    return {"users": users_store.list_users_public(), "role_labels": users_store.ROLE_LABELS}
-
-
-@app.post("/api/admin/users/{username}/role")
-async def api_admin_update_role(username: str, request: Request):
-    user = get_current_user(request)
-    if not require_admin(user):
-        return JSONResponse({"error": "forbidden"}, status_code=403)
-
-    body = await request.json()
-    new_role = body.get("role", "")
-    try:
-        canonical_role = users_store.update_user_role(username, new_role)
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=400)
-
-    return {"status": "ok", "username": username, "role": canonical_role}
 
 
 @app.websocket("/ws/location")

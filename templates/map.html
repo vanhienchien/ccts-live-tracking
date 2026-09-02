@@ -1315,7 +1315,6 @@
         {% if user.role and user.role.strip().lower() == 'admin' %}
           <button id="btn-manual-refresh" onclick="triggerManualRefresh()" title="Làm mới dữ liệu trạm ngay">🔄</button>
           <button id="btn-toggle-refresh" onclick="toggleAutoRefresh()" title="Tạm dừng / Bật lại chu kỳ cào tự động" data-paused="0">⏸</button>
-          <a class="logout" href="/admin">⚙️ Admin</a>
         {% endif %}
         <a class="logout" href="/logout">Đăng xuất</a>
       </div>
