@@ -23,10 +23,17 @@ Phân quyền xem vị trí:
 
 import time
 
+import gspread
 import pandas as pd
 from gspread_dataframe import get_as_dataframe
 
 from config import get_spreadsheet
+
+# Mã lỗi HTTP coi là TẠM THỜI phía Google Sheets API (đơ/quá tải vài giây,
+# không phải do app sai) - đáng để thử lại thay vì trả lỗi 500 ngay cho
+# người dùng đang đăng nhập. Lỗi khác (401/403 sai quyền, 404 sheet không
+# tồn tại...) thì raise ngay, retry không giải quyết được gì.
+_TRANSIENT_API_STATUS = {429, 500, 502, 503, 504}
 
 USERS_SHEET = "Users"
 USERS_COLUMNS = ["full_name", "username", "password", "role", "region"]
@@ -54,9 +61,30 @@ def _role_level(role):
     return ROLE_LEVELS.get(str(role or "").strip().lower(), 0)
 
 
-def _get_worksheet():
-    sh = get_spreadsheet()
+def _get_worksheet(force_reopen=False):
+    sh = get_spreadsheet(force_reopen=force_reopen)
     return sh.worksheet(USERS_SHEET)
+
+
+def _fetch_users_df_with_retry(retries=2, base_delay=0.6):
+    """Đọc sheet Users, tự thử lại vài lần nếu Google Sheets API báo lỗi
+    TẠM THỜI (503 Service Unavailable, quá tải, timeout...). Đây chính là
+    nguyên nhân từng gặp: /login lỗi 500 dù app vẫn chạy bình thường - do
+    Google API đơ đúng lúc gọi, không retry nên bung lỗi thẳng lên người
+    dùng ngay lần đầu."""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            ws = _get_worksheet(force_reopen=(attempt > 0))
+            return get_as_dataframe(ws, evaluate_formulas=True)
+        except gspread.exceptions.APIError as e:
+            status = getattr(getattr(e, "response", None), "status_code", None)
+            last_err = e
+            if status not in _TRANSIENT_API_STATUS or attempt == retries:
+                raise
+            print(f"[users_store] Google Sheets API lỗi tạm thời ({status}), thử lại lần {attempt + 1}/{retries}...")
+            time.sleep(base_delay * (attempt + 1))
+    raise last_err
 
 
 def _read_users_df(force=False):
@@ -64,8 +92,7 @@ def _read_users_df(force=False):
     if not force and _cache["df"] is not None and (now - _cache["ts"]) < CACHE_TTL_SECONDS:
         return _cache["df"]
 
-    ws = _get_worksheet()
-    df = get_as_dataframe(ws, evaluate_formulas=True)
+    df = _fetch_users_df_with_retry()
 
     if df is None or df.empty:
         df = pd.DataFrame(columns=USERS_COLUMNS)

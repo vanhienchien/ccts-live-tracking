@@ -71,6 +71,8 @@ TRACCAR_TOKEN = os.environ.get("TRACCAR_TOKEN", "").strip()
 TICKET_REFRESH_SECONDS = int(os.environ.get("TICKET_REFRESH_SECONDS", 600))
 
 _gc = None
+_spreadsheet = None  # cache Spreadsheet object - open_by_url() gọi fetch_sheet_metadata()
+                      # (1 API call riêng) mỗi lần, nên KHÔNG mở lại mỗi request.
 
 
 def get_gspread_client():
@@ -97,8 +99,17 @@ def get_gspread_client():
     return _gc
 
 
-def get_spreadsheet():
+def get_spreadsheet(force_reopen: bool = False):
+    """Mở Spreadsheet (cache lại sau lần đầu).
+
+    force_reopen=True: bỏ qua cache, mở lại từ đầu - dùng khi lần gọi trước
+    lỗi vì token/cache phía gspread có thể đã hỏng, không chỉ do mạng/API
+    Google tạm gián đoạn."""
+    global _spreadsheet
     if not SPREADSHEET_URL:
         raise RuntimeError("Chưa cấu hình biến môi trường SPREADSHEET_URL.")
+    if _spreadsheet is not None and not force_reopen:
+        return _spreadsheet
     gc = get_gspread_client()
-    return gc.open_by_url(SPREADSHEET_URL)
+    _spreadsheet = gc.open_by_url(SPREADSHEET_URL)
+    return _spreadsheet

@@ -277,7 +277,18 @@ async def login_page(request: Request):
 
 @app.post("/login", response_class=HTMLResponse)
 async def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
-    user = users_store.verify_login(username, password)
+    try:
+        user = users_store.verify_login(username, password)
+    except Exception as e:
+        # Google Sheets API đôi khi đơ/quá tải tạm thời (đã tự retry trong
+        # users_store) - nếu vẫn lỗi thì báo người dùng thử lại thay vì để
+        # FastAPI bung traceback 500 thẳng ra (deploy vẫn chạy bình thường,
+        # chỉ riêng lượt đăng nhập này thất bại).
+        print(f"[login] Lỗi khi xác thực (Google Sheets API?): {e!r}")
+        return templates.TemplateResponse(
+            request=request, name="login.html",
+            context={"error": "Hệ thống đang tạm thời quá tải, vui lòng thử đăng nhập lại sau vài giây."},
+        )
     if not user:
         return templates.TemplateResponse(
             request=request, name="login.html", context={"error": "Sai tên đăng nhập hoặc mật khẩu."}
@@ -316,7 +327,14 @@ async def api_mobile_login(request: Request):
     if not username or not password:
         return JSONResponse({"error": "Vui lòng nhập tên đăng nhập và mật khẩu."}, status_code=400)
 
-    user = users_store.verify_login(username, password)
+    try:
+        user = users_store.verify_login(username, password)
+    except Exception as e:
+        print(f"[api_mobile_login] Lỗi khi xác thực (Google Sheets API?): {e!r}")
+        return JSONResponse(
+            {"error": "Hệ thống đang tạm thời quá tải, vui lòng thử lại sau vài giây."},
+            status_code=503,
+        )
     if not user:
         return JSONResponse({"error": "Sai tên đăng nhập hoặc mật khẩu."}, status_code=401)
 
