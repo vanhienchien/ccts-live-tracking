@@ -5,3 +5,9 @@ __pycache__/
 *.bak
 credentials.json
 token.json
+
+# Cache dữ liệu — sinh ra lúc chạy (cào CCTS / thống kê), KHÔNG commit.
+# Trên Render dùng cache_store.py (CACHE_S3_*) để cache sống qua redeploy;
+# local chạy `git pull` xong app tự cào lại nếu thiếu 2 file này.
+last_known_data.json
+stats_daily_cache.json

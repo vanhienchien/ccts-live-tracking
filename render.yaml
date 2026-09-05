@@ -1,0 +1,50 @@
+# Render Blueprint — tài liệu hoá cấu hình deploy dưới dạng code. File này
+# KHÔNG tự động thay đổi service đang chạy thủ công trên Render Dashboard —
+# chỉ có tác dụng nếu bạn chủ động "New > Blueprint" trỏ vào repo này. Dùng
+# để: (1) biết chính xác cần khai báo biến môi trường nào khi tạo lại service
+# từ đầu, (2) bật /healthz làm health check thay vì Render tự đoán.
+services:
+  - type: web
+    name: ccts-live-map
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /healthz
+    envVars:
+      # ---- Bắt buộc ----
+      - key: SPREADSHEET_URL
+        sync: false
+      - key: SESSION_SECRET_KEY
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: CCTS_USERNAME_ES
+        sync: false
+      - key: CCTS_PASSWORD
+        sync: false
+      - key: CCTS_USERNAME_ITS
+        sync: false
+      - key: CCTS_PASSWORD_its
+        sync: false
+      - key: GITHUB_DATA_REPO
+        sync: false
+      # ---- Tuỳ chọn ----
+      - key: GITHUB_TOKEN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: CACHE_S3_BUCKET
+        sync: false
+      - key: CACHE_S3_ACCESS_KEY
+        sync: false
+      - key: CACHE_S3_SECRET_KEY
+        sync: false
+      - key: CACHE_S3_ENDPOINT
+        sync: false
+      - key: STATS_SCRAPE_ENABLED
+        value: "1"
+      - key: TICKET_REFRESH_SECONDS
+        value: "600"

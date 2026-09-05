@@ -1,0 +1,21 @@
+name: Đánh thức app trước 0h VN
+
+# Render free tier ngủ sau ~15 phút không ai truy cập. stats_midnight_loop()
+# trong main.py chỉ chạy cào thống kê lúc 0h VN nếu tiến trình đang SỐNG tại
+# thời điểm đó. Workflow này chỉ ping /healthz (public, nhẹ, không đụng
+# CCTS/Google Sheets) ~10 phút trước 0h để đánh thức Render nếu đang ngủ —
+# không cần secret/token nào, không tốn thêm bandwidth đáng kể.
+on:
+  schedule:
+    # 16:50 UTC = 23:50 giờ Việt Nam (UTC+7).
+    - cron: "50 16 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping /healthz để đánh thức Render (nếu đang ngủ)
+        run: |
+          curl -fsS --max-time 90 --retry 3 --retry-delay 10 \
+            "https://ccts-live-tracking.onrender.com/healthz"
