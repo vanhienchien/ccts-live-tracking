@@ -6,15 +6,11 @@ const CURRENT_USERNAME = (document.body.dataset.username || '').trim();
 const CURRENT_ROLE = (document.body.dataset.role || '').trim().toLowerCase();
 
 const map = L.map('map').setView([12.25, 108.5], 6.3);
-// Nền bản đồ CartoDB Voyager — tile chính thức (không cần API key), phong
-// cách tối giản khớp giao diện dashboard tối màu, thay cho endpoint Google
-// Maps không chính thức trước đây (không SLA, có thể bị chặn bất kỳ lúc
-// nào). Muốn đổi sang phong cách khác của CARTO, chỉ cần đổi "voyager" ở
-// URL thành "light_all" (tối giản hơn) hoặc "dark_all" (nền tối, hợp với
-// header) — https://github.com/CartoDB/basemap-styles
-L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-    subdomains: 'abcd',
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
+// Nền bản đồ Google Maps — CartoDB Voyager (thử trước đó) giờ bắt buộc API
+// key ("API KEY REQUIRED" phủ kín tile), nên quay lại Google theo yêu cầu.
+L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
+    subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
+    attribution: '&copy; Google Maps',
     maxZoom: 20,
 }).addTo(map);
 
@@ -48,16 +44,9 @@ L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r
     document.head.appendChild(style);
 })();
 
-// Gom cụm marker khi zoom xa - trước đây dùng L.layerGroup() nên hàng ngàn
-// trạm chồng lên nhau ở các khu đô thị đông trạm (HCM, Cần Thơ...), rối mắt.
-// disableClusteringAtZoom=16 khớp đúng mức zoom flyToStation() dùng, để tới
-// đó luôn thấy marker riêng lẻ như cũ.
-const stationLayer = L.markerClusterGroup({
-    maxClusterRadius: 50,
-    spiderfyOnMaxZoom: true,
-    showCoverageOnHover: false,
-    disableClusteringAtZoom: 16,
-}).addTo(map);
+// Hiện TẤT CẢ trạm đang có sự cố, không gộp cụm (theo yêu cầu - bản thử
+// gộp cụm/donut trước đó đã bỏ).
+const stationLayer = L.layerGroup().addTo(map);
 const staffMarkers = {}; // username -> { marker, wrenchMarker }
 
 let allStations = [];          // cache toàn bộ trạm nhận được gần nhất (đã lọc theo quyền ở server)
@@ -531,10 +520,7 @@ function applyStationFilter() {
 
     stations = stations.filter((s) => (s.is_bss_station ? showBssStations : showChargerStations));
 
-    // Dựng hết marker vào mảng rồi thêm 1 lần bằng addLayers() - nhanh hơn
-    // hẳn addTo() từng marker khi có hàng ngàn trạm (markerClusterGroup phải
-    // tính lại cụm mỗi lần addLayer đơn lẻ).
-    const markers = stations.map((s) => {
+    stations.forEach((s) => {
         const icon = s.is_unassigned
             ? unassignedStationIcon(s.has_near_overdue)
             : stationIcon(s.color, s.has_near_overdue, s.has_no_info_critical);
@@ -549,9 +535,8 @@ function applyStationFilter() {
             closeButton: false,
         });
         marker._stationCode = s.station_code;
-        return marker;
+        marker.addTo(stationLayer);
     });
-    stationLayer.addLayers(markers);
 }
 
 const chargerTypeCheckbox = document.getElementById('filter-charger');
@@ -946,16 +931,12 @@ function closeSearchResults() {
 function flyToStation(stationCode) {
     const s = allStations.find((x) => x.station_code === stationCode);
     if (!s) return;
-    let target = null;
-    stationLayer.eachLayer((layer) => {
-        if (layer._stationCode === stationCode) target = layer;
-    });
-    if (!target) return;
-    // zoomToShowLayer: nếu marker đang bị gộp trong 1 cụm (chưa đủ zoom để
-    // tách), hàm này tự zoom/pan tới mức marker hiện ra riêng lẻ rồi mới gọi
-    // callback - mở thẳng openPopup() như flyTo() cũ sẽ không thấy gì nếu
-    // marker còn đang ẩn trong cụm.
-    stationLayer.zoomToShowLayer(target, () => target.openPopup());
+    map.flyTo([s.lat, s.lng], 16, { duration: 1 });
+    setTimeout(() => {
+        stationLayer.eachLayer((layer) => {
+            if (layer._stationCode === stationCode) layer.openPopup();
+        });
+    }, 350);
 }
 
 function flyToStaff(username) {

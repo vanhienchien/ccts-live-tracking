@@ -67,34 +67,7 @@
   outline-offset: 2px;
 }
 
-/* ========== 6) CỤM MARKER (leaflet.markercluster) theo màu thương hiệu ==========
-   Plugin mặc định dùng vàng/cam nhạt (bg khác hẳn tông --primary/--accent
-   của app) - đổi sang thang màu trung tính-cam cho khớp dashboard. */
-.marker-cluster-small {
-  background-color: rgba(51, 65, 85, .45);
-}
-.marker-cluster-small div {
-  background-color: rgba(30, 41, 59, .85);
-}
-.marker-cluster-medium {
-  background-color: rgba(249, 115, 22, .35);
-}
-.marker-cluster-medium div {
-  background-color: rgba(234, 88, 12, .85);
-}
-.marker-cluster-large {
-  background-color: rgba(239, 68, 68, .35);
-}
-.marker-cluster-large div {
-  background-color: rgba(220, 38, 38, .85);
-}
-.marker-cluster div {
-  color: #fff;
-  font-weight: 700;
-  font-family: 'Inter', system-ui, -apple-system, sans-serif;
-}
-
-/* ========== 7) TICKET TABLE: ghim cột đầu khi cuộn ngang ==========
+/* ========== 6) TICKET TABLE: ghim cột đầu khi cuộn ngang ==========
    Bảng có 7 cột (2 cột cuối - Mô tả lỗi/Địa chỉ - khá rộng) nên thường phải
    cuộn ngang. Ghim cột "Mã Ticket" (dùng position:sticky ở app.js cho từng
    <td>) để luôn biết đang xem ticket nào dù đã cuộn qua phải - ở đây chỉ
