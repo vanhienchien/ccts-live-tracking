@@ -6,7 +6,11 @@
 // không gom cụm nếu bật "chế độ hiện tất cả").
 // ==========================================
 
-const map = L.map('map').setView([16.0, 107.5], 6);
+// preferCanvas: chế độ "Hiện tất cả" vẽ hàng nghìn điểm cùng lúc bằng
+// L.circleMarker (xem applyFilters) - cần bật canvas thì mới nhẹ, mặc định
+// Leaflet vẽ circleMarker bằng SVG (1 phần tử DOM/điểm, rất chậm ở số lượng
+// lớn). Marker dạng divIcon (chế độ gom cụm) không bị ảnh hưởng bởi cờ này.
+const map = L.map('map', { preferCanvas: true }).setView([16.0, 107.5], 6);
 L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
     subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
     attribution: '&copy; Google Maps',
@@ -45,9 +49,9 @@ function chargeStationIcon(type) {
                  fill="${color}" stroke="#ffffff" stroke-width="2"/>`;
 
     const html = `
-        <div style="position:relative;width:20px;height:26px;
-                    filter:drop-shadow(0 2px 4px rgba(0,0,0,.55));">
-            <svg width="20" height="26" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
+        <div style="position:relative;width:14px;height:18px;
+                    filter:drop-shadow(0 1px 3px rgba(0,0,0,.55));">
+            <svg width="14" height="18" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
                 ${shape}
                 ${glyph}
             </svg>
@@ -55,9 +59,9 @@ function chargeStationIcon(type) {
     return L.divIcon({
         className: '',
         html,
-        iconSize: [20, 26],
-        iconAnchor: [10, 26],
-        popupAnchor: [0, -24],
+        iconSize: [14, 18],
+        iconAnchor: [7, 18],
+        popupAnchor: [0, -16],
     });
 }
 
@@ -83,10 +87,6 @@ function buildChargeStationPopup(s) {
             <div class="cp-body">
                 <div class="cp-addr">📍 ${escapeHtml(addrParts.join(' · ') || '—')}</div>
                 <div class="cp-tech">🧑‍🔧 ${escapeHtml(techsText)}</div>
-                <div class="cp-counts">
-                    ${s.ev_count > 0 ? `<span class="cp-count-pill ev">⚡ ${s.ev_count}</span>` : ''}
-                    ${s.bss_count > 0 ? `<span class="cp-count-pill bss">🔋 ${s.bss_count}</span>` : ''}
-                </div>
                 <div class="cp-divider"></div>
                 <div class="cp-poles-label">Trụ (${poles.length})</div>
                 <div class="cp-poles-scroll">${polesHtml || '<div style="color:#94a3b8;font-size:12px;">Không có dữ liệu.</div>'}</div>
@@ -145,30 +145,54 @@ let selectedTechs = new Set(); // kỹ thuật viên đang tick chọn (rỗng =
 let showEv = true;
 let showBss = true;
 
+function bindStationPopup(layer, s) {
+    layer.bindPopup(() => buildChargeStationPopup(s), {
+        maxWidth: 280,
+        className: 'charge-station-popup',
+        closeButton: false,
+    });
+}
+
+// Chế độ gom cụm: marker divIcon (giọt nước/khiên, đẹp + rõ) - số lượng
+// hiện trên màn hình luôn ít (đã gom cụm) nên không lo hiệu năng.
+function buildFancyMarker(s) {
+    const marker = L.marker([s.lat, s.lng], { icon: chargeStationIcon(s.type) });
+    bindStationPopup(marker, s);
+    marker._evCount = s.ev_count || 0;
+    marker._bssCount = s.bss_count || 0;
+    return marker;
+}
+
+// Chế độ "Hiện tất cả": có thể vẽ CÙNG LÚC hàng nghìn điểm không gom cụm -
+// mỗi divIcon là 1 <div><svg> riêng (rất nặng ở số lượng lớn). circleMarker
+// vẽ thẳng lên Canvas (map preferCanvas:true ở trên) - hàng nghìn điểm vẫn
+// mượt vì trình duyệt chỉ tốn 1 lần vẽ canvas thay vì hàng nghìn phần tử DOM.
+function buildLightMarker(s) {
+    const color = s.type === 'ev' ? EV_COLOR : BSS_COLOR;
+    const marker = L.circleMarker([s.lat, s.lng], {
+        radius: 4,
+        weight: 1,
+        color: '#ffffff',
+        fillColor: color,
+        fillOpacity: 0.9,
+    });
+    bindStationPopup(marker, s);
+    return marker;
+}
+
 function applyFilters() {
     const stations = allChargeStations.filter((s) => {
         if (selectedTechs.size > 0 && !(s.techs || []).some((t) => selectedTechs.has(t))) return false;
         return (showEv && s.ev_count > 0) || (showBss && s.bss_count > 0);
     });
 
-    const markers = stations.map((s) => {
-        const marker = L.marker([s.lat, s.lng], { icon: chargeStationIcon(s.type) });
-        marker.bindPopup(() => buildChargeStationPopup(s), {
-            maxWidth: 280,
-            className: 'charge-station-popup',
-            closeButton: false,
-        });
-        marker._evCount = s.ev_count || 0;
-        marker._bssCount = s.bss_count || 0;
-        return marker;
-    });
-
     stationLayer.clearLayers();
     plainStationLayer.clearLayers();
+
     if (clusterMode) {
-        stationLayer.addLayers(markers);
+        stationLayer.addLayers(stations.map(buildFancyMarker));
     } else {
-        markers.forEach((m) => plainStationLayer.addLayer(m));
+        stations.forEach((s) => plainStationLayer.addLayer(buildLightMarker(s)));
     }
 }
 
