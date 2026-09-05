@@ -21,7 +21,10 @@ import pandas as pd
 from utils import extract_core_station_code, parse_duration_to_hours
 from config import CCTS_ACCOUNTS
 import github_data_store
-from ccts_shared import VN_TZ, CCTS_API_LOCK, ClientPool, is_unmanaged_region, load_static_data_filtered
+from ccts_shared import (
+    VN_TZ, CCTS_API_LOCK, ClientPool, is_unmanaged_region, load_static_data_filtered,
+    OPEN_STATUSES, CLOSED_STATUSES, CLOSED_STATUSES_NORM,
+)
 
 CACHE_FILE = "last_known_data.json"
 
@@ -34,8 +37,6 @@ STATUS_COLORS = {
     "pending for voms confirm": "#16a085",
 }
 
-CLOSED_STATUSES = ["Pending for local team close", "Pending for VOMS confirm"]
-OPEN_STATUSES = ["Open", "Appointment", "Pending for ASP close", "Pending for spare parts"]
 ENDPOINT_FIND_TICKET = "/ccts/cctsTicket/findCCTSTicket"
 
 NORTH_LAT_THRESHOLD = 16.2  # Trạm có lat >= ngưỡng này bị coi là miền Bắc -> loại bỏ
@@ -52,14 +53,16 @@ NORTH_LAT_THRESHOLD = 16.2  # Trạm có lat >= ngưỡng này bị coi là mi�
 #   đúng bản ghi tạo ticket ban đầu) -> cực kỳ nguy hiểm (khó giải trình cho
 #   bên thứ 3), tô màu RIÊNG (tím đậm) để cảnh báo.
 # ==========================================
-REOPEN_TRIGGER_STATUSES = {
-    "pending for local team close",
-    "pending for voms confirm",
-    "pending for asp close",
-}
+REOPEN_TRIGGER_STATUSES = CLOSED_STATUSES_NORM | {"pending for asp close"}
 REOPEN_LABEL_SUFFIX = " (mở lại)"
 NO_INFO_SEVERITY_KEY = "purple_critical"  # frontend cần map key này -> màu tím đậm
 ENRICH_MAX_CONCURRENCY = 4  # số request tra cứu chi tiết chạy song song tối đa (tránh bị đá session / rate-limit)
+
+# Trần thời gian giữ CCTS_API_LOCK cho 1 lượt cào/tra cứu. api_client.py đã
+# có timeout (5, 30)s cho MỖI request, nhưng nhiều tài khoản/ticket cộng dồn
+# (kể cả relogin thử lại) vẫn có thể kéo dài — trần này đảm bảo module kia
+# (stats_data.py, dùng chung khoá) không bị chờ vô thời hạn.
+CCTS_LOCK_TIMEOUT_SECONDS = 300
 
 
 def _status_color(status):
@@ -227,15 +230,22 @@ async def _fetch_tickets_window_multi_account(ticket_statuses, start_str, stop_s
 
     async with CCTS_API_LOCK:
         print(f"[ccts_data] Đã giữ CCTS_API_LOCK — cào live tickets ({total} tài khoản song song)...")
-        results = await asyncio.gather(
-            *(
-                _fetch_tickets_window_single_account(
-                    account["username"], account["password"], ticket_statuses, start_str, stop_str
-                )
-                for account in CCTS_ACCOUNTS
-            ),
-            return_exceptions=True,
-        )
+        try:
+            results = await asyncio.wait_for(
+                asyncio.gather(
+                    *(
+                        _fetch_tickets_window_single_account(
+                            account["username"], account["password"], ticket_statuses, start_str, stop_str
+                        )
+                        for account in CCTS_ACCOUNTS
+                    ),
+                    return_exceptions=True,
+                ),
+                timeout=CCTS_LOCK_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            print(f"[!] Cào live tickets vượt quá {CCTS_LOCK_TIMEOUT_SECONDS}s — huỷ, nhả khoá, giữ cache cũ.")
+            results = [asyncio.TimeoutError("CCTS_API_LOCK timeout")] * total
         print("[ccts_data] Nhả CCTS_API_LOCK.")
 
     success_count = 0
@@ -424,7 +434,7 @@ async def _enrich_open_overdue_ev_tickets(df_tickets_filtered, success_accounts)
     if not ticket_ids:
         return {}
 
-    async with CCTS_API_LOCK:
+    async def _do_enrich():
         print(
             f"[ccts_data] Đã giữ CCTS_API_LOCK — tra cứu chi tiết {len(ticket_ids)} "
             f"ticket Open-overdue (EV) bằng {len(success_accounts)} tài khoản "
@@ -450,8 +460,15 @@ async def _enrich_open_overdue_ev_tickets(df_tickets_filtered, success_accounts)
 
         results = await asyncio.gather(*(_bounded_lookup(tid) for tid in ticket_ids))
         print("[ccts_data] Nhả CCTS_API_LOCK (tra cứu chi tiết).")
+        return {tid: data for tid, data in results if data is not None}
 
-    enrichment_map = {tid: data for tid, data in results if data is not None}
+    async with CCTS_API_LOCK:
+        try:
+            enrichment_map = await asyncio.wait_for(_do_enrich(), timeout=CCTS_LOCK_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            print(f"[!] Tra cứu chi tiết ticket vượt quá {CCTS_LOCK_TIMEOUT_SECONDS}s — huỷ, nhả khoá.")
+            enrichment_map = {}
+
     print(
         f"[+] Tra cứu chi tiết thành công {len(enrichment_map)}/{len(ticket_ids)} "
         f"ticket Open-overdue (EV)."

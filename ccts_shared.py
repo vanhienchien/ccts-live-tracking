@@ -35,9 +35,24 @@ Gom vào đây để tránh code trùng lặp và đảm bảo 2 module không b
 from __future__ import annotations
 
 import asyncio
+import os
 from zoneinfo import ZoneInfo
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
+
+# ------------------------------------------------------------------
+# Trạng thái ticket OPEN/CLOSED — NGUỒN DUY NHẤT dùng chung toàn chương
+# trình (ccts_data.py, stats_data.py). Trước đây mỗi module tự định nghĩa
+# lại danh sách này (dễ lệch nhau khi sửa 1 chỗ quên chỗ kia — thực tế
+# stats_data.py từng chỉ coi "pending for local team close" là đóng, bỏ sót
+# "Pending for VOMS confirm", khiến ticket đóng bằng VOMS confirm bị loại
+# khỏi thống kê 30 ngày). Xem <ticket_definitions> trong CLAUDE.md.
+# ------------------------------------------------------------------
+OPEN_STATUSES = ["Open", "Appointment", "Pending for ASP close", "Pending for spare parts"]
+CLOSED_STATUSES = ["Pending for local team close", "Pending for VOMS confirm"]
+
+OPEN_STATUSES_NORM = {s.lower() for s in OPEN_STATUSES}
+CLOSED_STATUSES_NORM = {s.lower() for s in CLOSED_STATUSES}
 
 # ------------------------------------------------------------------
 # Khu vực KHÔNG còn được quản lý.
@@ -111,10 +126,19 @@ STATS_REFRESH_LOCK = asyncio.Lock()
 
 # ------------------------------------------------------------------
 # 2 tài khoản CỐ ĐỊNH dùng để cào thống kê (0h / khi khởi động).
+# Đọc từ cùng biến môi trường CCTS_USERNAME_ES/CCTS_PASSWORD và
+# CCTS_USERNAME_ITS/CCTS_PASSWORD_its như config.CCTS_ACCOUNTS, để đổi mật
+# khẩu CCTS chỉ cần sửa 1 chỗ (env) thay vì 2 nơi dễ lệch nhau.
 # ------------------------------------------------------------------
 STATS_SCRAPE_ACCOUNTS = [
-    {"username": "esmanager", "password": "Ccts123."},
-    {"username": "its_frontdesk 04", "password": "Duynam123."},
+    {
+        "username": os.environ.get("CCTS_USERNAME_ES", "esmanager"),
+        "password": os.environ.get("CCTS_PASSWORD", "Ccts123."),
+    },
+    {
+        "username": os.environ.get("CCTS_USERNAME_ITS", "its_frontdesk 04"),
+        "password": os.environ.get("CCTS_PASSWORD_its", "Duynam123."),
+    },
 ]
 
 

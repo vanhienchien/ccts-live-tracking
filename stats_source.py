@@ -44,10 +44,14 @@ from ccts_shared import VN_TZ, CCTS_API_LOCK, STATS_SCRAPE_ACCOUNTS, ClientPool
 # "local" → luôn đọc thư mục Excel, không gọi CCTS.
 STATS_DATA_SOURCE = os.environ.get("STATS_DATA_SOURCE", "ccts").strip().lower()
 
-# Thư mục chứa file Excel khi dùng nguồn "local".
+# Thư mục chứa file Excel khi dùng nguồn "local". Mặc định là thư mục
+# "data/" NẰM CẠNH file này (trước đây hard-code path Windows tuyệt đối
+# C:\Users\Admin\CCTS_DATA\data — os.path.join bỏ qua phần dirname() khi
+# gặp path tuyệt đối thứ 2, nên chỉ chạy được đúng trên máy đã tạo ra nó;
+# chưa từng "nổ" vì STATS_DATA_SOURCE mặc định là "ccts", không phải "local").
 STATS_LOCAL_DATA_DIR = os.environ.get(
     "STATS_LOCAL_DATA_DIR",
-    os.path.join(os.path.dirname(__file__), r"C:\Users\Admin\CCTS_DATA\data"),
+    os.path.join(os.path.dirname(__file__), "data"),
 )
 
 REQUIRED_SHEETS = [

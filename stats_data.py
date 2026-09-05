@@ -37,7 +37,7 @@ from typing import Any
 
 import pandas as pd
 
-from ccts_shared import VN_TZ, STATS_REFRESH_LOCK
+from ccts_shared import VN_TZ, STATS_REFRESH_LOCK, OPEN_STATUSES_NORM, CLOSED_STATUSES_NORM
 import stats_source
 
 STATS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_daily_cache.json")
@@ -338,18 +338,16 @@ def process_ticket_information(
     return df[keep].reset_index(drop=True)
 
 
-OPEN_STATUSES = {
-    "open",
-    "appointment",
-    "pending for asp close",
-    "pending for spare parts",
-    "pending for spare parts close",  # backward-compat
-}
-CLOSED_STATUS = "pending for local team close"
-REOPEN_HINT_STATUSES = {
-    "pending for local team close",
-    "pending for voms confirm",
-}
+# Nguồn OPEN/CLOSED giờ dùng chung với ccts_data.py qua ccts_shared.py (xem
+# đó để biết vì sao) — thêm biến thể "pending for spare parts close" giữ
+# backward-compat riêng cho module này.
+OPEN_STATUSES = OPEN_STATUSES_NORM | {"pending for spare parts close"}
+# BUG ĐÃ SỬA: trước đây CLOSED_STATUS là 1 chuỗi duy nhất
+# "pending for local team close", bỏ sót "Pending for VOMS confirm" — ticket
+# có trạng thái cuối là VOMS confirm bị loại khỏi thống kê 30 ngày dù theo
+# <ticket_definitions> đây vẫn tính là đã đóng.
+CLOSED_STATUSES = CLOSED_STATUSES_NORM
+REOPEN_HINT_STATUSES = CLOSED_STATUSES_NORM
 
 
 def _norm_status(val) -> str:
@@ -611,7 +609,7 @@ def extract_closed_tickets_from_events(
             if st in OPEN_STATUSES:
                 result = ("open", None)
                 break
-            if st == CLOSED_STATUS:
+            if st in CLOSED_STATUSES:
                 result = ("closed", evt_dt)
                 break
         if result and result[0] == "closed" and result[1] is not None:

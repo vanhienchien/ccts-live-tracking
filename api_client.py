@@ -16,6 +16,12 @@ from cryptography.hazmat.primitives import serialization
 class CCTSClient:
     """Client đăng nhập & gọi API hệ thống CCTS (Pure API Version - Không Playwright)."""
 
+    # (connect_timeout, read_timeout) áp cho MỌI request tới CCTS. Không có
+    # timeout kết hợp với CCTS_API_LOCK toàn cục (ccts_shared.py) từng có
+    # nghĩa là 1 kết nối treo sẽ đơ luôn cả bản đồ lẫn thống kê tới khi
+    # Render kill tiến trình.
+    REQUEST_TIMEOUT = (5, 30)
+
     def __init__(self, username="esmanager", password="Ccts123.", base_url="https://cloud.cnpowercore.com:8091"):
         self.username = username
         self.password = password
@@ -75,7 +81,9 @@ class CCTSClient:
         """Đăng nhập thuần API."""
       
         def _fetch_key():
-            return self.session.get(f"{self.base_url}/authen/index/getPublicKey")
+            return self.session.get(
+                f"{self.base_url}/authen/index/getPublicKey", timeout=self.REQUEST_TIMEOUT
+            )
         
         res_key = await asyncio.to_thread(_fetch_key)
         key_data = res_key.json()
@@ -93,7 +101,9 @@ class CCTSClient:
         }
         
         def _post_login():
-            return self.session.post(f"{self.base_url}/authen/login/validate", json=payload)
+            return self.session.post(
+                f"{self.base_url}/authen/login/validate", json=payload, timeout=self.REQUEST_TIMEOUT
+            )
         
         res_login = await asyncio.to_thread(_post_login)
         login_data = res_login.json()
@@ -123,13 +133,16 @@ class CCTSClient:
         url = f"{self.base_url}{endpoint}"
 
         def _execute():
-            return self.session.post(url, json=payload, headers=self.base_headers)
+            return self.session.post(
+                url, json=payload, headers=self.base_headers, timeout=self.REQUEST_TIMEOUT
+            )
 
         res = await asyncio.to_thread(_execute)
-        
+
         try:
             res_data = res.json()
-        except:
+        except (ValueError, json.JSONDecodeError) as e:
+            print(f"[-] Phản hồi không phải JSON hợp lệ từ {endpoint}: {e!r}")
             res_data = {"code": "500", "message": "Invalid JSON", "success": False}
 
         # Tự động re-login nếu token hết hạn / bị đá phiên (do người khác

@@ -62,10 +62,10 @@ CCTS_ACCOUNTS = [
 ]
 SESSION_COOKIE_NAME = "session_token"
 
-# Chuỗi bí mật tự đặt để bảo vệ endpoint /api/traccar (app Traccar Client di
-# động gửi vị trí vào đây) - tránh người lạ gửi toạ độ giả vào hệ thống.
-# Để trống thì endpoint không yêu cầu token (KHÔNG khuyến khích khi deploy thật).
-TRACCAR_TOKEN = os.environ.get("TRACCAR_TOKEN", "").strip()
+# Chuỗi bí mật ký JWT (cookie web + token mobile). BẮT BUỘC đặt trên Render —
+# thiếu thì mỗi lần restart sinh khoá ngẫu nhiên mới, khiến MỌI session cũ
+# (web + mobile) bị đăng xuất hàng loạt.
+SESSION_SECRET_KEY = os.environ.get("SESSION_SECRET_KEY", "").strip()
 
 # Số giây làm mới dữ liệu ticket từ CCTS (mặc định 15 phút)
 TICKET_REFRESH_SECONDS = int(os.environ.get("TICKET_REFRESH_SECONDS", 600))
