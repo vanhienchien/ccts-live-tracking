@@ -10,8 +10,12 @@ Xem README.md đi kèm để biết cách cấu hình biến môi trường & de
 import asyncio
 import hashlib
 import json
-import uuid
+import logging
+import secrets
+import time
+from contextlib import asynccontextmanager
 
+import jwt
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -23,8 +27,11 @@ import stats_data
 import sla_alert
 from ccts_data import get_static_data, filter_stations_for_user, filter_tech_by_region_for_user
 from location_hub import hub
-from config import SESSION_COOKIE_NAME, TICKET_REFRESH_SECONDS
+from config import SESSION_COOKIE_NAME, SESSION_SECRET_KEY, TICKET_REFRESH_SECONDS
 import os
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+logger = logging.getLogger("ccts.main")
 
 # auto | 1 | 0 — local test: set STATS_REFRESH_ON_STARTUP=0 để chỉ dùng cache có sẵn
 _STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "auto").strip().lower()
@@ -34,12 +41,59 @@ _STATS_STARTUP_MODE = os.environ.get("STATS_REFRESH_ON_STARTUP", "auto").strip()
 #     Render, khi bạn chủ động cào ở local rồi git push cache lên).
 _STATS_SCRAPE_ENABLED = os.environ.get("STATS_SCRAPE_ENABLED", "1").strip().lower() in ("1", "true", "yes", "on")
 
+# ==================== JWT session (thay cho dict SESSIONS trong RAM) ====================
+# Trước đây SESSIONS là 1 dict RAM: mất sạch mỗi lần Render restart/redeploy
+# (phải đăng nhập lại) và token mobile không bao giờ hết hạn. Giờ cookie
+# web + token mobile đều là JWT tự ký — sống qua restart (không cần tra dict
+# nào), có hạn rõ ràng. Đánh đổi: không "đăng xuất từ xa" được 1 token đơn lẻ
+# (không có blocklist) — muốn vô hiệu hoá TOÀN BỘ session đang có, đổi
+# SESSION_SECRET_KEY trên Render rồi restart.
+if not SESSION_SECRET_KEY:
+    SESSION_SECRET_KEY = secrets.token_hex(32)
+    logger.warning(
+        "SESSION_SECRET_KEY chưa được đặt trong biến môi trường — đã tự sinh "
+        "1 khoá NGẪU NHIÊN cho riêng lần chạy này. Mọi session (web + mobile) "
+        "sẽ bị đăng xuất khi tiến trình restart. Đặt SESSION_SECRET_KEY cố "
+        "định trên Render (vd `openssl rand -hex 32`) để tránh việc này."
+    )
+
+JWT_ALGORITHM = "HS256"
+WEB_SESSION_TTL_SECONDS = 60 * 60 * 12  # 12h — khớp max_age cookie cũ
+MOBILE_SESSION_TTL_SECONDS = int(os.environ.get("MOBILE_SESSION_TTL_DAYS", "90")) * 86400
+
+
+def _create_session_token(user: dict, ttl_seconds: int) -> str:
+    now = int(time.time())
+    payload = {
+        "sub": user["username"],
+        "full_name": user.get("full_name"),
+        "role": user.get("role"),
+        "region": user.get("region"),
+        "iat": now,
+        "exp": now + ttl_seconds,
+    }
+    return jwt.encode(payload, SESSION_SECRET_KEY, algorithm=JWT_ALGORITHM)
+
+
+def _decode_session_token(token: str):
+    """Trả về dict user (username/full_name/role/region) nếu token hợp lệ &
+    còn hạn, ngược lại None (hết hạn / sai chữ ký / rác) — coi như chưa đăng
+    nhập, không raise."""
+    try:
+        payload = jwt.decode(token, SESSION_SECRET_KEY, algorithms=[JWT_ALGORITHM])
+    except jwt.PyJWTError:
+        return None
+    return {
+        "username": payload.get("sub"),
+        "full_name": payload.get("full_name"),
+        "role": payload.get("role"),
+        "region": payload.get("region"),
+    }
+
 
 app = FastAPI(title="CCTS Live Map")
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
-
-SESSIONS = {}
 
 _latest_station_payload = {
     "stations": [], "total_tickets": 0, "missing_count": 0, "updated_at": None, "fetch_success": True,
@@ -68,10 +122,10 @@ def _station_payload_signature(payload) -> str:
 
 def get_current_user(request: Request):
     """Lấy user hiện tại từ cookie (web) HOẶC header 'Authorization: Bearer
-    <token>' (app di động). Cả 2 đều tra cùng 1 dict SESSIONS - token của
-    app tạo ra ở POST /api/mobile/login cũng nằm trong dict này, nên mọi
-    endpoint hiện có (/api/stations, /api/technicians...) dùng lại được
-    nguyên vẹn, không cần sửa gì thêm."""
+    <token>' (app di động). Cả 2 đều là JWT tự ký (_decode_session_token) -
+    token của app tạo ra ở POST /api/mobile/login dùng CHUNG hàm giải mã với
+    web, nên mọi endpoint hiện có (/api/stations, /api/technicians...) dùng
+    lại được nguyên vẹn, không cần sửa gì thêm."""
     token = request.cookies.get(SESSION_COOKIE_NAME)
     if not token:
         auth_header = request.headers.get("authorization") or ""
@@ -79,7 +133,7 @@ def get_current_user(request: Request):
             token = auth_header[7:].strip()
     if not token:
         return None
-    return SESSIONS.get(token)
+    return _decode_session_token(token)
 
 
 def require_admin(user):
@@ -112,10 +166,10 @@ async def refresh_stations_once() -> bool:
         try:
             sla_alert.check_and_alert(new_rows)
         except Exception as e:
-            print(f"⚠️ Lỗi kiểm tra/báo ticket sắp vỡ SLA (Telegram): {e!r}")
+            logger.warning(f"⚠️ Lỗi kiểm tra/báo ticket sắp vỡ SLA (Telegram): {e!r}")
         return True
     else:
-        print("⚠️ Tất cả tài khoản CCTS đều thất bại lần cào này - "
+        logger.warning("⚠️ Tất cả tài khoản CCTS đều thất bại lần cào này - "
               "GIỮ NGUYÊN dữ liệu lần cào gần nhất thành công, không xoá bản đồ.")
         return False
 
@@ -130,7 +184,7 @@ async def broadcast_stations_update(force: bool = False):
 
     signature = _station_payload_signature(_latest_station_payload)
     if not force and signature == _last_broadcast_signature:
-        print("[ws] Dữ liệu trạm không đổi so với lần gửi trước - bỏ qua broadcast.")
+        logger.info("[ws] Dữ liệu trạm không đổi so với lần gửi trước - bỏ qua broadcast.")
         return
 
     async with hub.lock:
@@ -157,13 +211,13 @@ async def refresh_stations_loop():
     while True:
         await asyncio.sleep(TICKET_REFRESH_SECONDS)
         if _refresh_paused:
-            print(f"⏸ Chu kỳ cào đang TẠM DỪNG — bỏ qua lần này (mỗi {TICKET_REFRESH_SECONDS}s kiểm tra lại).")
+            logger.info(f"⏸ Chu kỳ cào đang TẠM DỪNG — bỏ qua lần này (mỗi {TICKET_REFRESH_SECONDS}s kiểm tra lại).")
             continue
         try:
             await refresh_stations_once()
             await broadcast_stations_update()
         except Exception as e:
-            print(f"⚠️ Lỗi làm mới dữ liệu ticket (giữ nguyên dữ liệu cũ): {e!r}")
+            logger.warning(f"⚠️ Lỗi làm mới dữ liệu ticket (giữ nguyên dữ liệu cũ): {e!r}")
 
 
 async def _seconds_until_next_midnight_vn() -> float:
@@ -184,11 +238,11 @@ async def _run_stats_refresh(label: str):
     - Tự gộp (single-flight) nếu có 1 lượt cào khác đang chạy cùng lúc.
     Vì vậy ở đây chỉ cần log, không cần tự xử lý giữ cache cũ nữa."""
     try:
-        print(f"[stats] === Bắt đầu cào thống kê ({label}) ===")
+        logger.info(f"[stats] === Bắt đầu cào thống kê ({label}) ===")
         await stats_data.refresh_stats_cache()
-        print(f"[stats] === Cào thống kê ({label}) hoàn tất ===")
+        logger.info(f"[stats] === Cào thống kê ({label}) hoàn tất ===")
     except Exception as e:
-        print(f"[stats] Lỗi cào thống kê ({label}) (giữ cache cũ nếu có): {e!r}")
+        logger.error(f"[stats] Lỗi cào thống kê ({label}) (giữ cache cũ nếu có): {e!r}")
 
 
 async def stats_midnight_loop():
@@ -196,13 +250,13 @@ async def stats_midnight_loop():
     while True:
         wait_s = await _seconds_until_next_midnight_vn()
         hours = wait_s / 3600
-        print(f"[stats] Lịch cào 0h: còn ~{hours:.1f}h (đợi {int(wait_s)}s)...")
+        logger.info(f"[stats] Lịch cào 0h: còn ~{hours:.1f}h (đợi {int(wait_s)}s)...")
         await asyncio.sleep(wait_s)
         await _run_stats_refresh("định kỳ 0h")
 
 
-@app.on_event("startup")
-async def on_startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     global _latest_station_payload, _latest_tech_stats, _latest_ticket_rows
 
     get_static_data()
@@ -212,15 +266,15 @@ async def on_startup():
         _latest_station_payload = cached_payload
         _latest_tech_stats = cached_stats
         _latest_ticket_rows = cached_rows
-        print("✅ Đã nạp dữ liệu từ lần cào gần nhất (file cache).")
+        logger.info("✅ Đã nạp dữ liệu từ lần cào gần nhất (file cache).")
 
     # Stats: nạp cache ngay (nếu có) để /stats không trống; cào mới chạy NỀN — không chặn startup
     stats_cached = stats_data.load_stats_cache()
     if stats_cached:
-        print(f"✅ Đã nạp stats cache ({stats_cached.get('total_tickets', 0)} ticket, "
+        logger.info(f"✅ Đã nạp stats cache ({stats_cached.get('total_tickets', 0)} ticket, "
               f"cập nhật {stats_cached.get('generated_at', '?')}).")
     else:
-        print("[stats] Chưa có cache — trang /stats tạm trống đến khi cào nền xong.")
+        logger.info("[stats] Chưa có cache — trang /stats tạm trống đến khi cào nền xong.")
 
     # Cào stats lúc startup:
     #   STATS_REFRESH_ON_STARTUP=1     → luôn cào (prod / cần data mới)
@@ -238,10 +292,10 @@ async def on_startup():
         do_stats_startup = not bool(stats_cached)
 
     if do_stats_startup:
-        print(f"[stats] Startup: sẽ cào nền (mode={_STATS_STARTUP_MODE!r}, có_cache={bool(stats_cached)}).")
+        logger.info(f"[stats] Startup: sẽ cào nền (mode={_STATS_STARTUP_MODE!r}, có_cache={bool(stats_cached)}).")
         asyncio.create_task(_run_stats_refresh("khởi động"))
     else:
-        print(f"[stats] Startup: BỎ QUA cào — dùng cache có sẵn (mode={_STATS_STARTUP_MODE!r}). "
+        logger.info(f"[stats] Startup: BỎ QUA cào — dùng cache có sẵn (mode={_STATS_STARTUP_MODE!r}). "
               f"Muốn cào: STATS_REFRESH_ON_STARTUP=1 hoặc admin refresh-stats / đợi 0h.")
         # Cache cũ có thể chưa có charts đã nướng → bổ sung nền, không cào CCTS
         if stats_cached:
@@ -250,7 +304,7 @@ async def on_startup():
                     for key in ("daily_volume", "overdue_rate", "heatmap", "error_codes"):
                         stats_data.ensure_chart_in_cache(key)
                 except Exception as e:
-                    print(f"[stats] ensure charts nền lỗi: {e!r}")
+                    logger.error(f"[stats] ensure charts nền lỗi: {e!r}")
             asyncio.create_task(_ensure_charts_bg())
 
     async def _run_stations_refresh_once_bg():
@@ -263,14 +317,34 @@ async def on_startup():
         try:
             await refresh_stations_once()
         except Exception as e:
-            print(f"⚠️ Lỗi lần cào đầu tiên khi khởi động ({e!r}) - tiếp tục chạy với dữ liệu cache (nếu có).")
+            logger.warning(f"⚠️ Lỗi lần cào đầu tiên khi khởi động ({e!r}) - tiếp tục chạy với dữ liệu cache (nếu có).")
 
     asyncio.create_task(_run_stations_refresh_once_bg())
     asyncio.create_task(refresh_stations_loop())
     if _STATS_SCRAPE_ENABLED:
         asyncio.create_task(stats_midnight_loop())
     else:
-        print("[stats] STATS_SCRAPE_ENABLED=0 — bỏ qua lịch cào 0h, chỉ dùng cache.")
+        logger.info("[stats] STATS_SCRAPE_ENABLED=0 — bỏ qua lịch cào 0h, chỉ dùng cache.")
+
+    yield
+    # Không cần dọn gì lúc shutdown — các asyncio.create_task nền (refresh
+    # loop, stats midnight loop) chết theo tiến trình, không giữ tài nguyên
+    # ngoài (file/socket) cần đóng tường minh.
+
+
+app.router.lifespan_context = lifespan
+
+
+@app.get("/healthz")
+async def healthz():
+    """Endpoint public, không cần đăng nhập, trả về rất nhanh (không đụng
+    CCTS/Google Sheets) — dùng cho Render health check và cron/ping chống
+    ngủ đông."""
+    return {
+        "status": "ok",
+        "stations_updated_at": _latest_station_payload.get("updated_at"),
+        "refresh_paused": _refresh_paused,
+    }
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -289,7 +363,7 @@ async def login_submit(request: Request, username: str = Form(...), password: st
         # users_store) - nếu vẫn lỗi thì báo người dùng thử lại thay vì để
         # FastAPI bung traceback 500 thẳng ra (deploy vẫn chạy bình thường,
         # chỉ riêng lượt đăng nhập này thất bại).
-        print(f"[login] Lỗi khi xác thực (Google Sheets API?): {e!r}")
+        logger.error(f"[login] Lỗi khi xác thực (Google Sheets API?): {e!r}")
         return templates.TemplateResponse(
             request=request, name="login.html",
             context={"error": "Hệ thống đang tạm thời quá tải, vui lòng thử đăng nhập lại sau vài giây."},
@@ -299,11 +373,12 @@ async def login_submit(request: Request, username: str = Form(...), password: st
             request=request, name="login.html", context={"error": "Sai tên đăng nhập hoặc mật khẩu."}
         )
 
-    token = uuid.uuid4().hex
-    SESSIONS[token] = user
+    token = _create_session_token(user, WEB_SESSION_TTL_SECONDS)
 
     response = RedirectResponse("/", status_code=302)
-    response.set_cookie(SESSION_COOKIE_NAME, token, httponly=True, samesite="lax", max_age=60 * 60 * 12)
+    response.set_cookie(
+        SESSION_COOKIE_NAME, token, httponly=True, samesite="lax", max_age=WEB_SESSION_TTL_SECONDS
+    )
     return response
 
 
@@ -313,14 +388,16 @@ async def api_mobile_login(request: Request):
     KHÔNG set cookie như /login (dành cho web). Dùng lại đúng
     users_store.verify_login() nên không cần sửa gì bên users_store.
 
-    Token trả về được lưu vào CHUNG dict SESSIONS với web - nhờ vậy
-    get_current_user() ở trên tự nhận diện được, không cần route/logic
-    riêng cho từng endpoint dữ liệu (/api/stations, /api/technicians...).
+    Token trả về là JWT tự ký (dùng chung _create_session_token/
+    _decode_session_token với web) - nhờ vậy get_current_user() ở trên tự
+    nhận diện được, không cần route/logic riêng cho từng endpoint dữ liệu
+    (/api/stations, /api/technicians...). Client chỉ cần lưu token dạng
+    chuỗi và gửi lại nguyên vẹn - không cần đổi gì phía app Flutter dù nội
+    dung token đã đổi từ uuid ngẫu nhiên sang JWT.
 
-    LƯU Ý: token này KHÔNG tự hết hạn (giống hệt cách SESSIONS đang hoạt
-    động cho web hiện tại - chỉ mất khi server restart). Nếu sau này cần
-    "đăng xuất từ xa" 1 thiết bị, thêm hàm xoá theo token hoặc theo
-    username tại đây.
+    Hạn dùng: MOBILE_SESSION_TTL_SECONDS (mặc định 90 ngày, đổi qua env
+    MOBILE_SESSION_TTL_DAYS) - hết hạn thì app tự yêu cầu đăng nhập lại.
+    Muốn "đăng xuất từ xa" toàn bộ thiết bị: đổi SESSION_SECRET_KEY.
     """
     try:
         body = await request.json()
@@ -335,7 +412,7 @@ async def api_mobile_login(request: Request):
     try:
         user = users_store.verify_login(username, password)
     except Exception as e:
-        print(f"[api_mobile_login] Lỗi khi xác thực (Google Sheets API?): {e!r}")
+        logger.error(f"[api_mobile_login] Lỗi khi xác thực (Google Sheets API?): {e!r}")
         return JSONResponse(
             {"error": "Hệ thống đang tạm thời quá tải, vui lòng thử lại sau vài giây."},
             status_code=503,
@@ -343,17 +420,13 @@ async def api_mobile_login(request: Request):
     if not user:
         return JSONResponse({"error": "Sai tên đăng nhập hoặc mật khẩu."}, status_code=401)
 
-    token = uuid.uuid4().hex
-    SESSIONS[token] = user
+    token = _create_session_token(user, MOBILE_SESSION_TTL_SECONDS)
 
     return {"status": "ok", "token": token, "user": user}
 
 
 @app.get("/logout")
 async def logout(request: Request):
-    token = request.cookies.get(SESSION_COOKIE_NAME)
-    if token:
-        SESSIONS.pop(token, None)
     response = RedirectResponse("/login", status_code=302)
     response.delete_cookie(SESSION_COOKIE_NAME)
     return response
@@ -480,7 +553,7 @@ async def api_admin_refresh_stats(request: Request):
             "total_tickets": payload.get("total_tickets", 0),
         }
     except Exception as e:
-        print(f"[stats] Lỗi admin refresh-stats: {e!r}")
+        logger.error(f"[stats] Lỗi admin refresh-stats: {e!r}")
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
@@ -518,10 +591,10 @@ async def api_toggle_refresh(request: Request):
     _refresh_paused = not _refresh_paused
     if _refresh_paused:
         msg = "Đã TẠM DỪNG chu kỳ cào tự động."
-        print(f"⏸ Admin [{user.get('username')}] tạm dừng cào dữ liệu.")
+        logger.info(f"⏸ Admin [{user.get('username')}] tạm dừng cào dữ liệu.")
     else:
         msg = "Đã BẬT LẠI chu kỳ cào tự động."
-        print(f"▶ Admin [{user.get('username')}] bật lại cào dữ liệu.")
+        logger.info(f"▶ Admin [{user.get('username')}] bật lại cào dữ liệu.")
     return {
         "status": "ok",
         "paused": _refresh_paused,
@@ -646,7 +719,7 @@ async def api_mobile_location(request: Request):
 @app.websocket("/ws/location")
 async def ws_location(websocket: WebSocket):
     token = websocket.cookies.get(SESSION_COOKIE_NAME)
-    user = SESSIONS.get(token) if token else None
+    user = _decode_session_token(token) if token else None
     if not user:
         await websocket.close(code=4401)
         return
