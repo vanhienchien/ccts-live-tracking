@@ -23,7 +23,7 @@ import pandas as pd
 from stats_data import (
     is_excluded_tech,
     OPEN_STATUSES,
-    CLOSED_STATUS,
+    CLOSED_STATUSES,
     _norm_status,
     _parse_create_time,
 )
@@ -54,9 +54,9 @@ def _is_open_status(status_raw) -> bool:
     st = _norm_status(status_raw)
     if not st:
         return False
-    if st == CLOSED_STATUS:
+    if st in CLOSED_STATUSES:
         return False
-    if st in {"closed", "resolved", "done", "pending for voms confirm"}:
+    if st in {"closed", "resolved", "done"}:
         return False
     if st in OPEN_STATUSES:
         return True
