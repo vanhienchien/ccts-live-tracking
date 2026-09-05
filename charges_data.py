@@ -29,7 +29,10 @@ import pandas as pd
 
 from config import GITHUB_TOTAL_CHARGES_XLSX_PATH
 from github_data_store import fetch_github_raw
-from ccts_shared import VN_TZ
+from ccts_shared import VN_TZ, load_static_data_filtered
+from utils import extract_core_station_code
+
+UNASSIGNED_TECH = "Chưa phân công"
 
 CACHE_TTL_SECONDS = 300  # 5 phút, giống github_data_store.py
 
@@ -77,10 +80,20 @@ def _load_charges_df() -> pd.DataFrame:
     return df
 
 
-def _build_stations(df: pd.DataFrame) -> tuple[list[dict], int]:
-    """Gom từng dòng (1 dòng = 1 trụ sạc) theo toạ độ vật lý đã làm tròn.
-    Trả (list trạm, số dòng bị bỏ qua vì thiếu/sai toạ độ)."""
+def _build_stations(df: pd.DataFrame) -> tuple[list[dict], dict, int]:
+    """Gom từng dòng (1 dòng = 1 trụ sạc) theo toạ độ vật lý đã làm tròn, kèm
+    quy đổi Mã trạm -> kỹ thuật viên/khu vực (dùng chung tech_map/region_map
+    từ StationData.csv, y hệt bản đồ sự cố) để phục vụ bảng "số trụ mỗi kỹ
+    thuật viên quản lý". Trả (list trạm, tech_summary theo khu vực, số dòng
+    bị bỏ qua vì thiếu/sai toạ độ).
+
+    tech_summary: {region: {tech_name: {"ev_count", "bss_count", "total_count"}}}
+    - đếm theo TỪNG TRỤ (không theo trạm gộp toạ độ), vì 1 trạm vật lý có
+    thể có trụ EV/BSS do 2 kỹ thuật viên khác nhau phụ trách."""
+    _, tech_map, region_map, _, _ = load_static_data_filtered()
+
     groups: dict[tuple[float, float], dict] = {}
+    tech_summary: dict[str, dict[str, dict]] = {}
     skipped = 0
 
     # iterrows() (không phải itertuples()) - itertuples() sanitize tên cột
@@ -101,6 +114,10 @@ def _build_stations(df: pd.DataFrame) -> tuple[list[dict], int]:
         district = _to_str(row_d.get("Quận Huyện/ District"))
         province = _to_str(row_d.get("Tỉnh thành/Province"))
 
+        core_code = extract_core_station_code(code)
+        tech_name = tech_map.get(core_code) or UNASSIGNED_TECH
+        region = region_map.get(core_code) or "KV không quản lý"
+
         key = (round(lat, COORD_ROUND_DP), round(lng, COORD_ROUND_DP))
         g = groups.get(key)
         if g is None:
@@ -108,18 +125,27 @@ def _build_stations(df: pd.DataFrame) -> tuple[list[dict], int]:
                 "lat": lat, "lng": lng,
                 "codes": set(), "name": name,
                 "district": district, "province": province,
-                "ev_count": 0, "bss_count": 0,
+                "ev_count": 0, "bss_count": 0, "techs": set(),
             }
             groups[key] = g
 
         if code:
             g["codes"].add(code)
+        if tech_name:
+            g["techs"].add(tech_name)
         if is_bss:
             g["bss_count"] += 1
         else:
             g["ev_count"] += 1
         if not g["name"] and name:
             g["name"] = name
+
+        region_bucket = tech_summary.setdefault(region, {})
+        tstat = region_bucket.setdefault(tech_name, {"ev_count": 0, "bss_count": 0})
+        if is_bss:
+            tstat["bss_count"] += 1
+        else:
+            tstat["ev_count"] += 1
 
     stations = []
     for g in groups.values():
@@ -135,8 +161,26 @@ def _build_stations(df: pd.DataFrame) -> tuple[list[dict], int]:
             "total_count": g["ev_count"] + g["bss_count"],
             # Ưu tiên EV: chỉ "bss" khi HOÀN TOÀN không có trụ EV nào.
             "type": "bss" if g["ev_count"] == 0 else "ev",
+            "techs": sorted(g["techs"]),
         })
-    return stations, skipped
+
+    # Sắp xếp mỗi khu vực theo tổng số trụ giảm dần - dễ so sánh "ai quản lý
+    # nhiều nhất" ngay khi mở bảng, không cần tự cộng.
+    tech_summary_out = {}
+    for region, techs in tech_summary.items():
+        rows = [
+            {
+                "tech_name": tech_name,
+                "ev_count": t["ev_count"],
+                "bss_count": t["bss_count"],
+                "total_count": t["ev_count"] + t["bss_count"],
+            }
+            for tech_name, t in techs.items()
+        ]
+        rows.sort(key=lambda r: r["total_count"], reverse=True)
+        tech_summary_out[region] = rows
+
+    return stations, tech_summary_out, skipped
 
 
 def refresh_charges_cache(force: bool = False) -> dict:
@@ -149,9 +193,10 @@ def refresh_charges_cache(force: bool = False) -> dict:
 
     try:
         df = _load_charges_df()
-        stations, skipped = _build_stations(df)
+        stations, tech_summary, skipped = _build_stations(df)
         payload = {
             "stations": stations,
+            "tech_summary": tech_summary,
             "total_poles": int(len(df)),
             "total_stations": len(stations),
             "skipped_rows": skipped,
