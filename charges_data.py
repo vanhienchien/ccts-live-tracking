@@ -129,7 +129,7 @@ def _build_stations(df: pd.DataFrame) -> tuple[list[dict], dict, int]:
                 "lat": lat, "lng": lng,
                 "codes": set(), "name": name,
                 "district": district, "province": province,
-                "ev_count": 0, "bss_count": 0, "techs": set(),
+                "ev_count": 0, "bss_count": 0, "techs": set(), "poles": [],
             }
             groups[key] = g
 
@@ -143,6 +143,8 @@ def _build_stations(df: pd.DataFrame) -> tuple[list[dict], dict, int]:
             g["ev_count"] += 1
         if not g["name"] and name:
             g["name"] = name
+        if sn:
+            g["poles"].append({"sn": sn, "is_bss": is_bss})
 
         region_bucket = tech_summary.setdefault(region, {})
         tstat = region_bucket.setdefault(tech_name, {"ev_count": 0, "bss_count": 0})
@@ -166,6 +168,7 @@ def _build_stations(df: pd.DataFrame) -> tuple[list[dict], dict, int]:
             # Ưu tiên EV: chỉ "bss" khi HOÀN TOÀN không có trụ EV nào.
             "type": "bss" if g["ev_count"] == 0 else "ev",
             "techs": sorted(g["techs"]),
+            "poles": sorted(g["poles"], key=lambda p: (p["is_bss"], p["sn"])),
         })
 
     # Sắp xếp mỗi khu vực theo tổng số trụ giảm dần - dễ so sánh "ai quản lý
