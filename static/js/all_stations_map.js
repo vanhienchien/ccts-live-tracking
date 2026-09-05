@@ -12,12 +12,10 @@ L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
     maxZoom: 20,
 }).addTo(map);
 
-// Màu cố ý CHỌN LỆCH hẳn bảng màu bản đồ Google (xanh lá đất liền, xanh
-// dương nhạt mặt nước, vàng đường lớn) để icon luôn nổi bật bất kể nền:
-// chàm (indigo) cho EV, hồng tím (magenta) cho BSS - không trùng đỏ/cam/
-// xanh lá vốn đã mang nghĩa "mức độ nghiêm trọng" ở bản đồ sự cố.
-const EV_COLOR = '#4338ca';
-const BSS_COLOR = '#c026d3';
+// EV = đỏ, BSS = xanh dương - theo yêu cầu, cả 2 đều bão hoà cao + viền
+// trắng dày để nổi bật trên mọi nền bản đồ (không trùng cam của lõi cụm).
+const EV_COLOR = '#dc2626';
+const BSS_COLOR = '#2563eb';
 const CLUSTER_CORE_COLOR = '#f97316'; // cam - theo yêu cầu, thay cho màu đen/xám cũ
 
 function escapeHtml(str) {
@@ -87,9 +85,9 @@ function buildChargeStationPopup(s) {
 }
 
 // ---------- Icon cụm: vòng tỉ lệ EV/BSS + lõi cam ghi tổng số trụ ----------
-// Trước đây là 1 chấm đen/xám trơn chỉ ghi số - giờ vòng ngoài tô theo tỉ lệ
-// conic-gradient (chàm=EV, hồng tím=BSS) để biết ngay tỉ trọng loại trụ
-// trong khu vực mà không cần bấm vào; lõi trong đổi sang cam theo yêu cầu.
+// Cỡ đã THU NHỎ hẳn so với bản trước (26/32/38px thay vì 42/50/58px) theo
+// yêu cầu - vẫn giữ vòng ngoài conic-gradient (đỏ=EV, xanh dương=BSS) để
+// biết tỉ trọng loại trụ mà không cần bấm vào.
 function buildChargeClusterIcon(cluster) {
     let evCount = 0, bssCount = 0;
     cluster.getAllChildMarkers().forEach((m) => {
@@ -103,14 +101,14 @@ function buildChargeClusterIcon(cluster) {
         ? `conic-gradient(${EV_COLOR} 0deg ${evDeg}deg, ${BSS_COLOR} ${evDeg}deg 360deg)`
         : EV_COLOR;
 
-    const size = total < 50 ? 42 : total < 300 ? 50 : 58;
-    const fontSize = total < 50 ? 13 : total < 300 ? 14.5 : 16;
-    const holeSize = size - 12;
+    const size = total < 50 ? 26 : total < 300 ? 32 : 38;
+    const fontSize = total < 50 ? 10.5 : total < 300 ? 11.5 : 13;
+    const holeSize = size - 9;
 
     return L.divIcon({
         html: `
             <div style="width:${size}px;height:${size}px;border-radius:50%;background:${ring};
-                        box-shadow:0 3px 10px rgba(15,23,42,.4);border:3px solid #fff;
+                        box-shadow:0 2px 6px rgba(15,23,42,.4);border:2px solid #fff;
                         display:flex;align-items:center;justify-content:center;">
               <div style="width:${holeSize}px;height:${holeSize}px;border-radius:50%;background:${CLUSTER_CORE_COLOR};
                           display:flex;align-items:center;justify-content:center;
@@ -130,7 +128,8 @@ const stationLayer = L.markerClusterGroup({
     iconCreateFunction: buildChargeClusterIcon,
 }).addTo(map);
 
-let allChargeStations = [];   // cache toàn bộ trạm nhận từ API
+let allChargeStations = [];    // cache toàn bộ trạm nhận từ API
+let allTechSummary = {};       // {region: [{tech_name,...}]} - giữ lại để phục vụ chọn tất cả khu vực
 let selectedTechs = new Set(); // kỹ thuật viên đang tick chọn trong bảng lọc (rỗng = hiện tất cả)
 
 function applyTechFilter() {
@@ -149,28 +148,34 @@ function applyTechFilter() {
     stationLayer.addLayers(markers);
 }
 
-// ---------- Bảng lọc kỹ thuật viên (theo khu vực) ----------
+// ---------- Bảng lọc kỹ thuật viên (theo khu vực, thu gọn được) ----------
 // Hiện số trụ (EV/BSS/Tổng) NGAY TRONG danh sách - không cần chọn mới thấy,
-// nên tự nhiên "so sánh" được nhiều kỹ thuật viên cùng lúc bằng mắt; tick
-// chọn thêm để lọc bản đồ chỉ còn trạm của (các) kỹ thuật viên đó.
+// nên tự nhiên "so sánh" được nhiều kỹ thuật viên cùng lúc bằng mắt. Mỗi
+// khu vực mặc định THU GỌN (bấm tiêu đề để mở) - đỡ dài khi có nhiều KT;
+// tick ở tiêu đề khu vực để chọn/bỏ chọn CẢ khu vực 1 lần.
 const techPanel = document.getElementById('tech-panel');
 const techPanelHandle = document.getElementById('tech-panel-handle');
 const techPanelBody = document.getElementById('tech-panel-body');
 const techSelectedCount = document.getElementById('tech-selected-count');
+const techSelectAllBtn = document.getElementById('tech-select-all');
+const techClearAllBtn = document.getElementById('tech-clear-all');
 
 function renderTechPanel(techSummary) {
+    allTechSummary = techSummary || {};
     if (!techPanelBody) return;
-    const regions = Object.keys(techSummary || {}).sort();
+    const regions = Object.keys(allTechSummary).sort();
     if (regions.length === 0) {
         techPanelBody.innerHTML = '<div class="tech-panel-empty">Không có dữ liệu.</div>';
         return;
     }
     techPanelBody.innerHTML = regions.map((region) => {
-        const rows = techSummary[region] || [];
+        const rows = allTechSummary[region] || [];
+        const names = rows.map((r) => r.tech_name);
+        const allSelected = names.length > 0 && names.every((n) => selectedTechs.has(n));
         const rowsHtml = rows.map((r) => {
             const checked = selectedTechs.has(r.tech_name) ? 'checked' : '';
             return `
-                <label class="tech-row">
+                <label class="tech-row ${checked ? 'selected' : ''}">
                     <input type="checkbox" class="tech-check" value="${escapeHtml(r.tech_name)}" ${checked}>
                     <span class="tech-name">${escapeHtml(r.tech_name)}</span>
                     <span class="tech-counts">
@@ -181,17 +186,51 @@ function renderTechPanel(techSummary) {
                 </label>`;
         }).join('');
         return `
-            <div class="region-group">
-                <div class="region-header">${escapeHtml(region)}</div>
-                ${rowsHtml}
+            <div class="region-group" data-region="${escapeHtml(region)}">
+                <div class="region-header">
+                    <input type="checkbox" class="region-check" ${allSelected ? 'checked' : ''}
+                           title="Chọn/bỏ chọn cả khu vực này">
+                    <span class="region-name">${escapeHtml(region)}</span>
+                    <span class="region-count">${rows.length}</span>
+                    <span class="chevron">▸</span>
+                </div>
+                <div class="region-techs">${rowsHtml}</div>
             </div>`;
     }).join('');
+
+    // Bấm tiêu đề (trừ ô tick) để thu gọn/mở rộng khu vực.
+    techPanelBody.querySelectorAll('.region-header').forEach((header) => {
+        header.addEventListener('click', (e) => {
+            if (e.target.classList.contains('region-check')) return;
+            header.closest('.region-group').classList.toggle('expanded');
+        });
+    });
+
+    // Tick ở tiêu đề: chọn/bỏ chọn TOÀN BỘ kỹ thuật viên trong khu vực đó.
+    techPanelBody.querySelectorAll('.region-check').forEach((cb) => {
+        cb.addEventListener('change', () => {
+            const group = cb.closest('.region-group');
+            const region = group.dataset.region;
+            (allTechSummary[region] || []).forEach((r) => {
+                if (cb.checked) selectedTechs.add(r.tech_name);
+                else selectedTechs.delete(r.tech_name);
+            });
+            renderTechPanel(allTechSummary);
+            updateSelectedCount();
+            applyTechFilter();
+        });
+    });
 
     techPanelBody.querySelectorAll('.tech-check').forEach((cb) => {
         cb.addEventListener('change', () => {
             if (cb.checked) selectedTechs.add(cb.value);
             else selectedTechs.delete(cb.value);
             cb.closest('.tech-row').classList.toggle('selected', cb.checked);
+            // Cập nhật lại tick ở tiêu đề khu vực (có thể đã đủ/hết đủ điều kiện all-selected)
+            const region = cb.closest('.region-group').dataset.region;
+            const regionCb = cb.closest('.region-group').querySelector('.region-check');
+            const names = (allTechSummary[region] || []).map((r) => r.tech_name);
+            regionCb.checked = names.length > 0 && names.every((n) => selectedTechs.has(n));
             updateSelectedCount();
             applyTechFilter();
         });
@@ -211,6 +250,57 @@ if (techPanelHandle) {
     });
 }
 
+// Chọn tất cả / Bỏ chọn tất cả - áp dụng cho MỌI khu vực cùng lúc.
+if (techSelectAllBtn) {
+    techSelectAllBtn.addEventListener('click', () => {
+        Object.values(allTechSummary).forEach((rows) => {
+            rows.forEach((r) => selectedTechs.add(r.tech_name));
+        });
+        renderTechPanel(allTechSummary);
+        updateSelectedCount();
+        applyTechFilter();
+    });
+}
+if (techClearAllBtn) {
+    techClearAllBtn.addEventListener('click', () => {
+        selectedTechs.clear();
+        renderTechPanel(allTechSummary);
+        updateSelectedCount();
+        applyTechFilter();
+    });
+}
+
+// ---------- Thống kê trụ thiếu toạ độ ----------
+const missingCoordBadge = document.getElementById('missing-coord-badge');
+const missingCoordPanel = document.getElementById('missing-coord-panel');
+
+function renderMissingCoordPanel(items) {
+    if (!missingCoordBadge || !missingCoordPanel) return;
+    if (!items || items.length === 0) {
+        missingCoordBadge.style.display = 'none';
+        return;
+    }
+    missingCoordBadge.style.display = 'inline-flex';
+    missingCoordBadge.textContent = `⚠️ ${items.length} trụ thiếu toạ độ`;
+    missingCoordPanel.innerHTML = items.slice(0, 200).map((it) => `
+        <div class="mc-item">
+            <div class="mc-sn">${escapeHtml(it.sn || '—')}</div>
+            <div class="mc-meta">${escapeHtml(it.station_code || '—')} · ${escapeHtml(it.name || '—')}</div>
+        </div>`).join('') + (items.length > 200
+            ? `<div class="mc-more">… và ${items.length - 200} trụ khác.</div>` : '');
+}
+
+if (missingCoordBadge) {
+    missingCoordBadge.addEventListener('click', () => {
+        missingCoordPanel.classList.toggle('open');
+    });
+    document.addEventListener('click', (e) => {
+        if (!missingCoordPanel.classList.contains('open')) return;
+        if (missingCoordPanel.contains(e.target) || missingCoordBadge.contains(e.target)) return;
+        missingCoordPanel.classList.remove('open');
+    });
+}
+
 async function loadAllStations() {
     const summaryBadge = document.getElementById('summary-badge');
     try {
@@ -223,6 +313,7 @@ async function loadAllStations() {
         allChargeStations = data.stations || [];
         applyTechFilter();
         renderTechPanel(data.tech_summary || {});
+        renderMissingCoordPanel(data.missing_coord_items || []);
         updateSelectedCount();
 
         summaryBadge.textContent =

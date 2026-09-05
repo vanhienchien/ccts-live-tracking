@@ -94,7 +94,7 @@ def _build_stations(df: pd.DataFrame) -> tuple[list[dict], dict, int]:
 
     groups: dict[tuple[float, float], dict] = {}
     tech_summary: dict[str, dict[str, dict]] = {}
-    skipped = 0
+    missing_coord: list[dict] = []
 
     # iterrows() (không phải itertuples()) - itertuples() sanitize tên cột
     # có khoảng trắng/ký tự đặc biệt (vd "Vĩ độ (lat)") thành _1, _2... nên
@@ -104,7 +104,11 @@ def _build_stations(df: pd.DataFrame) -> tuple[list[dict], dict, int]:
         lat = _to_float(row_d.get("Vĩ độ (lat)"))
         lng = _to_float(row_d.get("Kinh độ (long)"))
         if lat is None or lng is None:
-            skipped += 1
+            missing_coord.append({
+                "sn": _to_str(row_d.get("SN")),
+                "station_code": _to_str(row_d.get("Mã trạm/Code Station")),
+                "name": _to_str(row_d.get("Tên trạm/ Name Station")),
+            })
             continue
 
         sn = _to_str(row_d.get("SN"))
@@ -180,7 +184,7 @@ def _build_stations(df: pd.DataFrame) -> tuple[list[dict], dict, int]:
         rows.sort(key=lambda r: r["total_count"], reverse=True)
         tech_summary_out[region] = rows
 
-    return stations, tech_summary_out, skipped
+    return stations, tech_summary_out, missing_coord
 
 
 def refresh_charges_cache(force: bool = False) -> dict:
@@ -193,20 +197,21 @@ def refresh_charges_cache(force: bool = False) -> dict:
 
     try:
         df = _load_charges_df()
-        stations, tech_summary, skipped = _build_stations(df)
+        stations, tech_summary, missing_coord = _build_stations(df)
         payload = {
             "stations": stations,
             "tech_summary": tech_summary,
             "total_poles": int(len(df)),
             "total_stations": len(stations),
-            "skipped_rows": skipped,
+            "skipped_rows": len(missing_coord),
+            "missing_coord_items": missing_coord,
             "generated_at": datetime.now(VN_TZ).isoformat(timespec="seconds"),
         }
         _cache["data"] = payload
         _cache["ts"] = now
         print(
             f"[charges_data] Đã nạp {len(df)} trụ sạc -> gộp thành {len(stations)} trạm "
-            f"({skipped} dòng bỏ qua vì thiếu/sai toạ độ)."
+            f"({len(missing_coord)} dòng bỏ qua vì thiếu/sai toạ độ)."
         )
         return payload
     except Exception as e:
