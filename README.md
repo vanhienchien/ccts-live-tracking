@@ -29,9 +29,23 @@ Tạo file `.env` ở thư mục gốc (không commit file này lên Git):
 ```env
 SPREADSHEET_URL=https://docs.google.com/spreadsheets/d/xxxxxxxx/edit
 GOOGLE_SERVICE_ACCOUNT_FILE=service_account.json
-CCTS_USERNAME=esmanager
+CCTS_USERNAME_ES=esmanager
 CCTS_PASSWORD=Ccts123.
+CCTS_USERNAME_ITS=its_frontdesk 04
+CCTS_PASSWORD_its=Duynam123.
 TICKET_REFRESH_SECONDS=600
+
+# BẮT BUỘC trên Render — ký cookie web + token mobile (JWT). Thiếu thì mỗi
+# lần restart tự sinh khoá ngẫu nhiên mới, đăng xuất hàng loạt. Tạo 1 lần:
+# openssl rand -hex 32
+SESSION_SECRET_KEY=
+
+# Tuỳ chọn — bật object storage (Cloudflare R2/S3) để cache map + stats
+# sống qua redeploy trên Render thay vì chỉ nằm trong git (xem cache_store.py).
+CACHE_S3_BUCKET=
+CACHE_S3_ACCESS_KEY=
+CACHE_S3_SECRET_KEY=
+CACHE_S3_ENDPOINT=
 ```
 
 Đặt file `service_account.json` (key Service Account đã Share Editor cho Google
