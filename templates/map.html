@@ -5,8 +5,6 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CCTS Live Map · ELECSERVE</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
-<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1347,6 +1345,7 @@
 
       <div class="header-right">
         <a class="logout" href="/stats" title="Thống kê sự cố theo ngày / khu vực">📊 <span class="lbl">Thống kê</span></a>
+        <a class="logout" href="/all-stations" title="Bản đồ tổng hợp toàn bộ trụ sạc EV + BSS">🗺️ <span class="lbl">Bản đồ trạm</span></a>
         {% if user.role and user.role.strip().lower() == 'admin' %}
           <button id="btn-manual-refresh" onclick="triggerManualRefresh()" title="Làm mới dữ liệu trạm ngay">🔄</button>
           <button id="btn-toggle-refresh" onclick="toggleAutoRefresh()" title="Tạm dừng / Bật lại chu kỳ cào tự động" data-paused="0">⏸</button>
@@ -1393,7 +1392,6 @@
   </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
-  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
   <script src="/static/app.js"></script>
   <script>
     // Sync visual state of filter chips with checkbox (label already toggles the checkbox natively)

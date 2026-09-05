@@ -41,6 +41,12 @@ GITHUB_CP_MODEL_JSON_PATH = os.environ.get(
 GITHUB_ENGINEER_COORDS_JSON_PATH = os.environ.get(
     "GITHUB_ENGINEER_COORDS_JSON_PATH", "EngineerCoords.json"
 ).strip()
+# Toàn bộ trụ sạc (EV + BSS) của mọi trạm, kể cả trạm không có sự cố - dùng
+# cho trang "Bản đồ tổng hợp trạm sạc" (charges_data.py), khác với
+# StationData.csv (chỉ có toạ độ + phân công KT cho trạm ĐANG quản lý).
+GITHUB_TOTAL_CHARGES_XLSX_PATH = os.environ.get(
+    "GITHUB_TOTAL_CHARGES_XLSX_PATH", "total_charges.xlsx"
+).strip()
 
 # ==================== CCTS ACCOUNTS ====================
 CCTS_ACCOUNTS = [

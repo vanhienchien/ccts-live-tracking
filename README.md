@@ -169,9 +169,9 @@ project trên Render.
    ```
 4. Nếu tên file khác mặc định, chỉnh thêm (không bắt buộc):
    ```env
-   GITHUB_STATIONS_JSON_PATH=list_Stations.json
-   GITHUB_LONGLAT_XLSX_PATH=listLongLat.xlsx
-   GITHUB_CP_MODEL_XLSX_PATH=ChargePoint_Model.xlsx
+   GITHUB_STATION_DATA_CSV_PATH=StationData.csv
+   GITHUB_CP_MODEL_JSON_PATH=ChargePointModels.json
+   GITHUB_ENGINEER_COORDS_JSON_PATH=EngineerCoords.json
    ```
 
 Từ giờ, quy trình cập nhật của bạn chỉ còn: sửa file trên máy → `git push` →
@@ -182,3 +182,25 @@ không đụng gì tới Render.
 > **gỡ bỏ** theo yêu cầu (đi kèm với việc bỏ Google Sheets cho dữ liệu này) —
 > giờ việc đổi kỹ thuật viên phụ trách chỉ thực hiện bằng cách sửa
 > `list_Stations.json` rồi push lên GitHub như trên.
+
+## 10. Bản đồ tổng hợp toàn bộ trạm sạc (`/all-stations`)
+
+Trang riêng (`charges_data.py`) hiện **TOÀN BỘ trụ sạc EV + BSS của mọi
+trạm trong hệ thống**, kể cả trạm hiện không có sự cố — khác hẳn bản đồ live
+(`/`, chỉ hiện trạm ĐANG có ticket mở). Nguồn dữ liệu: `total_charges.xlsx`,
+đọc qua GitHub Contents API giống 3 file ở mục 9 (cùng repo, cùng cơ chế
+cache 5 phút — sửa file, push, đợi tối đa 5 phút là thấy dữ liệu mới).
+
+Cột bắt buộc trong file Excel (sheet đầu tiên): `SN` (mã trụ — bắt đầu bằng
+`BSS-` thì coi là trụ đổi pin, còn lại là trụ EV), `Mã trạm/Code Station`,
+`Vĩ độ (lat)`, `Kinh độ (long)`, `Tên trạm/ Name Station`, `Quận Huyện/
+District`, `Tỉnh thành/Province`.
+
+Các trụ được **gộp theo TOẠ ĐỘ VẬT LÝ** (làm tròn ~11m), không theo Mã trạm
+— vì 1 vị trí thực tế có thể mang 2 Mã trạm khác nhau (1 mã EV, 1 mã BSS).
+Trạm có cả 2 loại trụ sẽ ưu tiên hiển thị icon **EV**.
+
+Đổi tên file mặc định (không bắt buộc):
+```env
+GITHUB_TOTAL_CHARGES_XLSX_PATH=total_charges.xlsx
+```

@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CCTS Bản đồ trạm sạc · ELECSERVE</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --primary: #1e293b;
+    --bg: #f1f5f9;
+    --surface: #ffffff;
+    --border: #e2e8f0;
+    --text: #0f172a;
+    --text-muted: #64748b;
+    --radius: 12px;
+    --shadow: 0 4px 16px rgba(15, 23, 42, .08);
+    --ev-color: #2563eb;
+    --bss-color: #7c3aed;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  .topbar {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    color: #f8fafc;
+    padding: 14px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    box-shadow: 0 2px 12px rgba(0,0,0,.2);
+    flex-wrap: wrap;
+    position: relative;
+    z-index: 1000;
+  }
+  .topbar h1 { margin: 0; font-size: 17px; font-weight: 600; white-space: nowrap; }
+  .legend {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    font-size: 12.5px;
+    color: #cbd5e1;
+  }
+  .legend .item { display: flex; align-items: center; gap: 6px; }
+  .legend .dot {
+    width: 14px; height: 14px; border-radius: 50%;
+    display: inline-flex; align-items: center; justify-content: center;
+    font-size: 9px; color: #fff; flex-shrink: 0;
+  }
+  .topbar .meta {
+    margin-left: auto;
+    font-size: 12.5px;
+    color: #94a3b8;
+    display: flex;
+    gap: 14px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .topbar .badge {
+    background: rgba(249, 115, 22, .2);
+    color: #fdba74;
+    padding: 3px 10px;
+    border-radius: 999px;
+    font-weight: 600;
+  }
+  .topbar a {
+    color: #cbd5e1;
+    text-decoration: none;
+    font-weight: 500;
+  }
+  .topbar a:hover { color: #fff; }
+
+  #map {
+    width: 100%;
+    height: calc(100vh - 54px);
+  }
+
+  .charge-popup { font-family: 'Inter', system-ui, sans-serif; font-size: 13px; min-width: 220px; }
+  .charge-popup .cp-name { font-weight: 700; font-size: 13.5px; color: var(--text); margin-bottom: 4px; }
+  .charge-popup .cp-addr { color: var(--text-muted); font-size: 12px; margin-bottom: 8px; line-height: 1.4; }
+  .charge-popup .cp-counts { display: flex; gap: 8px; margin-bottom: 6px; }
+  .charge-popup .cp-count-pill {
+    display: inline-flex; align-items: center; gap: 4px;
+    padding: 3px 9px; border-radius: 999px; font-size: 11.5px; font-weight: 600;
+  }
+  .charge-popup .cp-count-pill.ev { background: #dbeafe; color: var(--ev-color); }
+  .charge-popup .cp-count-pill.bss { background: #ede9fe; color: var(--bss-color); }
+  .charge-popup .cp-codes { font-size: 11px; color: var(--text-muted); word-break: break-word; }
+
+  @media (max-width: 640px) {
+    .topbar { padding: 10px 14px; gap: 10px; }
+    .topbar h1 { font-size: 14.5px; }
+    .legend { display: none; }
+    .topbar .meta { font-size: 11.5px; gap: 8px; }
+  }
+</style>
+</head>
+<body>
+  <div class="topbar">
+    <h1>🗺️ CCTS · Bản đồ tổng hợp trạm sạc</h1>
+    <div class="legend">
+      <span class="item"><span class="dot" style="background:var(--ev-color);">⚡</span> Trụ EV</span>
+      <span class="item"><span class="dot" style="background:var(--bss-color);">🔋</span> Trụ BSS</span>
+    </div>
+    <div class="meta">
+      <span class="badge" id="summary-badge">Đang tải…</span>
+      {% if user %}<span style="color:#94a3b8;font-size:12.5px;">{{ user.full_name or user.username }}</span>{% endif %}
+      <a href="/">← Bản đồ live</a>
+      <a href="/stats">📊 Thống kê</a>
+    </div>
+  </div>
+
+  <div id="map"></div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+  <script src="/static/js/all_stations_map.js"></script>
+</body>
+</html>

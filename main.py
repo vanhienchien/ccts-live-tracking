@@ -24,6 +24,7 @@ from fastapi.staticfiles import StaticFiles
 import users_store
 import ccts_data
 import stats_data
+import charges_data
 from ccts_data import get_static_data, filter_stations_for_user, filter_tech_by_region_for_user
 from location_hub import hub
 from config import SESSION_COOKIE_NAME, SESSION_SECRET_KEY, TICKET_REFRESH_SECONDS
@@ -447,6 +448,41 @@ async def stats_page(request: Request):
     return templates.TemplateResponse(
         request=request, name="stats.html", context={"user": user}
     )
+
+
+@app.get("/all-stations", response_class=HTMLResponse)
+async def all_stations_page(request: Request):
+    """Bản đồ tổng hợp TOÀN BỘ trụ sạc (EV + BSS) của mọi trạm, kể cả trạm
+    không có sự cố - dữ liệu từ total_charges.xlsx (charges_data.py), khác
+    với bản đồ live (chỉ hiện trạm đang có ticket mở). Cùng quyền xem với
+    /stats - chỉ điều phối trở lên."""
+    user = get_current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    if not can_view_stats(user):
+        return RedirectResponse("/", status_code=302)
+    return templates.TemplateResponse(
+        request=request, name="all_stations_map.html", context={"user": user}
+    )
+
+
+@app.get("/api/all-charging-stations")
+async def api_all_charging_stations(request: Request):
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+    if not can_view_stats(user):
+        return JSONResponse({"error": "forbidden", "detail": "Kỹ thuật viên không được xem trang này."}, status_code=403)
+
+    try:
+        payload = charges_data.refresh_charges_cache()
+    except Exception as e:
+        logger.error(f"[all-stations] Lỗi tải total_charges.xlsx: {e!r}")
+        return JSONResponse(
+            {"error": "Chưa tải được dữ liệu trụ sạc. Thử lại sau vài giây.", "stations": []},
+            status_code=503,
+        )
+    return payload
 
 
 @app.get("/api/stats/daily-volume")

@@ -57,7 +57,7 @@ def _github_headers():
     return headers
 
 
-def _fetch_github_raw(path: str) -> bytes:
+def fetch_github_raw(path: str) -> bytes:
     if not GITHUB_DATA_REPO:
         raise RuntimeError(
             "Chưa cấu hình biến môi trường GITHUB_DATA_REPO "
@@ -88,11 +88,11 @@ def _fetch_github_raw(path: str) -> bytes:
 
 
 def _fetch_github_json(path: str):
-    return json.loads(_fetch_github_raw(path).decode("utf-8"))
+    return json.loads(fetch_github_raw(path).decode("utf-8"))
 
 
 def _fetch_github_csv(path: str) -> pd.DataFrame:
-    raw = _fetch_github_raw(path).decode("utf-8-sig")
+    raw = fetch_github_raw(path).decode("utf-8-sig")
     return pd.read_csv(StringIO(raw), dtype=str).fillna("")
 
 
