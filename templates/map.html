@@ -5,6 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CCTS Live Map · ELECSERVE</title>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+<link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1310,9 +1312,10 @@
     font-weight:700;
 }
 </style>
+<link rel="stylesheet" href="{{ url_for('static', path='css/map-enhancements.css') }}">
 </head>
 <body data-username="{{ user.username }}" data-role="{{ user.role }}">
-  <div class="header">
+  <header class="header">
     <img class="header-logo" src="{{ url_for('static', path='images/logo-remove.png') }}" alt="ELECSERVE">
     <div class="info">
       <div class="search-wrap">
@@ -1329,7 +1332,7 @@
         <span class="chip-dot"></span> 🔋 BSS
       </label>
 
-      <span class="user-detail">{{ user.full_name }}:{{ user.role }}{% if user.region %} · {{ user.region }}{% endif %}</span>
+      <span class="user-detail" title="{{ user.full_name }} · {{ user.role }}{% if user.region %} · {{ user.region }}{% endif %}">{{ user.full_name }} · {{ user.role }}{% if user.region %} · {{ user.region }}{% endif %}</span>
 
       <span class="status-group" style="position:relative;">
         <span class="status-label">Sự cố:</span>
@@ -1351,17 +1354,18 @@
         <a class="logout" href="/logout" title="Đăng xuất">🚪 <span class="lbl">Đăng xuất</span></a>
       </div>
     </div>
-  </div>
+  </header>
   <div id="header-updated-at" title="Thời gian cập nhật dữ liệu gần nhất">—</div>
 
-  <div id="map">
-    <div id="tech-filter-panel"></div>
-    <button id="my-location-btn" title="Vị trí của bạn">📍</button>
-  </div>
+  <main class="app-main">
+    <div id="map">
+      <div id="tech-filter-panel"></div>
+      <button id="my-location-btn" title="Vị trí của bạn">📍</button>
+    </div>
 
-  <button id="tech-filter-handle" title="Lọc theo kỹ thuật viên">◀ 🧑‍🔧</button>
-  <button id="ticket-panel-handle" title="Danh sách Ticket theo kỹ thuật viên">▶ 📋</button>
-  <div id="ticket-panel">
+    <button id="tech-filter-handle" title="Lọc theo kỹ thuật viên">◀ 🧑‍🔧</button>
+    <button id="ticket-panel-handle" title="Danh sách Ticket theo kỹ thuật viên">▶ 📋</button>
+    <div id="ticket-panel">
     <div class="ticket-panel-body">
       <div class="ticket-tech-bar">
         <span class="ticket-tech-bar-label">Kỹ thuật viên</span>
@@ -1385,9 +1389,11 @@
         </div>
       </div>
     </div>
-  </div>
+    </div>
+  </main>
 
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
   <script src="/static/app.js"></script>
   <script>
     // Sync visual state of filter chips with checkbox (label already toggles the checkbox natively)

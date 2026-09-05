@@ -70,15 +70,6 @@ SESSION_SECRET_KEY = os.environ.get("SESSION_SECRET_KEY", "").strip()
 # Số giây làm mới dữ liệu ticket từ CCTS (mặc định 15 phút)
 TICKET_REFRESH_SECONDS = int(os.environ.get("TICKET_REFRESH_SECONDS", 600))
 
-# ==================== CẢNH BÁO TELEGRAM (SLA sắp vỡ hạn) ====================
-# Đặt 2 biến này trên Render > Environment để bật cảnh báo tự động cho ticket
-# sắp vỡ SLA 48h (còn ~0-3h). Thiếu 1 trong 2 -> tính năng tự tắt (chỉ log ra
-# console), không ảnh hưởng phần còn lại của app.
-#   TELEGRAM_BOT_TOKEN : token bot lấy từ @BotFather trên Telegram
-#   TELEGRAM_CHAT_ID   : chat ID nhận tin (cá nhân hoặc group)
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-
 _gc = None
 _spreadsheet = None  # cache Spreadsheet object - open_by_url() gọi fetch_sheet_metadata()
                       # (1 API call riêng) mỗi lần, nên KHÔNG mở lại mỗi request.

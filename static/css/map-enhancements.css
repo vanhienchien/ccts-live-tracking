@@ -1,0 +1,106 @@
+/*
+ * map-enhancements.css — lớp bổ sung, nạp SAU khối <style> inline trong
+ * map.html. Không viết lại hệ thống cũ (đã ổn định qua nhiều lần chỉnh sửa
+ * thực tế) — chỉ sửa đúng các điểm yếu cụ thể: ticket-panel che kín màn
+ * hình, chữ popup quá nhỏ, thiếu focus-visible cho bàn phím, thiếu
+ * safe-area cho iPhone có notch. Cùng selector + đứng sau trong cascade
+ * nên thắng mà không cần !important.
+ */
+
+/* ========== 1) TICKET PANEL: docked sidebar trên desktop ==========
+   Mặc định (mobile) giữ nguyên full-screen — đúng cho màn hình nhỏ, bảng
+   ticket cần toàn bộ chiều rộng. Từ 992px trở lên, chuyển thành drawer neo
+   bên trái với chiều rộng giới hạn, để bản đồ vẫn nhìn thấy được bên phải
+   thay vì bị che kín 100%. */
+@media (min-width: 992px) {
+  #ticket-panel {
+    right: auto;
+    width: min(760px, 62vw);
+    border-radius: 0 20px 20px 0;
+    box-shadow: 8px 0 32px rgba(15, 23, 42, .18);
+  }
+}
+
+/* ========== 2) POPUP TICKET: cỡ chữ đọc được hơn ========== */
+.ccts-status { font-size: 10px; }
+.ccts-near-overdue { font-size: 10px; }
+.ccts-ticket-owner { font-size: 10.5px; }
+.ccts-ticket-meta { font-size: 11px; }
+.ccts-ticket-duration { font-size: 11.5px; }
+.ccts-ticket-description { font-size: 11.5px; }
+.ccts-tech-name { font-size: 11.5px; }
+
+/* ========== 3) TAP TARGET tối thiểu cho nút thao tác chính trên mobile ==========
+   Popup micro-button (copy, close trong ticket) giữ nguyên vì không gian
+   chật hẹp — chỉ nhích các nút điều hướng chính trên header, ảnh hưởng
+   thao tác thật nhiều nhất. */
+@media (max-width: 480px) {
+  .header-right a.logout,
+  .header-right button {
+    min-width: 40px;
+    min-height: 40px;
+  }
+}
+
+/* ========== 4) SAFE-AREA cho iPhone có notch/Dynamic Island ========== */
+@media (max-width: 700px) {
+  .header {
+    padding-top: max(10px, env(safe-area-inset-top));
+    padding-left: max(12px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+  }
+}
+
+/* ========== 5) FOCUS-VISIBLE nhất quán cho điều hướng bàn phím ==========
+   Chỉ hiện khi dùng Tab (:focus-visible), không hiện khi click chuột, nên
+   không thêm nhiễu thị giác cho thao tác chuột/chạm bình thường. */
+.hdr-btn:focus-visible,
+.logout:focus-visible,
+.filter-chip:focus-visible,
+.close-btn:focus-visible,
+#my-location-btn:focus-visible,
+#tech-filter-close:focus-visible,
+.ticket-panel-close-btn:focus-visible,
+#tech-filter-handle:focus-visible,
+#ticket-panel-handle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ========== 6) CỤM MARKER (leaflet.markercluster) theo màu thương hiệu ==========
+   Plugin mặc định dùng vàng/cam nhạt (bg khác hẳn tông --primary/--accent
+   của app) - đổi sang thang màu trung tính-cam cho khớp dashboard. */
+.marker-cluster-small {
+  background-color: rgba(51, 65, 85, .45);
+}
+.marker-cluster-small div {
+  background-color: rgba(30, 41, 59, .85);
+}
+.marker-cluster-medium {
+  background-color: rgba(249, 115, 22, .35);
+}
+.marker-cluster-medium div {
+  background-color: rgba(234, 88, 12, .85);
+}
+.marker-cluster-large {
+  background-color: rgba(239, 68, 68, .35);
+}
+.marker-cluster-large div {
+  background-color: rgba(220, 38, 38, .85);
+}
+.marker-cluster div {
+  color: #fff;
+  font-weight: 700;
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+}
+
+/* ========== 7) TICKET TABLE: ghim cột đầu khi cuộn ngang ==========
+   Bảng có 7 cột (2 cột cuối - Mô tả lỗi/Địa chỉ - khá rộng) nên thường phải
+   cuộn ngang. Ghim cột "Mã Ticket" (dùng position:sticky ở app.js cho từng
+   <td>) để luôn biết đang xem ticket nào dù đã cuộn qua phải - ở đây chỉ
+   cần đồng bộ phần header (th) dính theo cả 2 trục thay vì chỉ trục dọc. */
+#ticket-panel-table-wrap th:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 11; /* cao hơn th thường (10) vì cần nổi trên cả 2 trục */
+}

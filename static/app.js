@@ -6,10 +6,15 @@ const CURRENT_USERNAME = (document.body.dataset.username || '').trim();
 const CURRENT_ROLE = (document.body.dataset.role || '').trim().toLowerCase();
 
 const map = L.map('map').setView([12.25, 108.5], 6.3);
-// Nền bản đồ Google Maps
-L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
-    subdomains: ['mt0', 'mt1', 'mt2', 'mt3'],
-    attribution: '&copy; Google Maps',
+// Nền bản đồ CartoDB Voyager — tile chính thức (không cần API key), phong
+// cách tối giản khớp giao diện dashboard tối màu, thay cho endpoint Google
+// Maps không chính thức trước đây (không SLA, có thể bị chặn bất kỳ lúc
+// nào). Muốn đổi sang phong cách khác của CARTO, chỉ cần đổi "voyager" ở
+// URL thành "light_all" (tối giản hơn) hoặc "dark_all" (nền tối, hợp với
+// header) — https://github.com/CartoDB/basemap-styles
+L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+    subdomains: 'abcd',
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     maxZoom: 20,
 }).addTo(map);
 
@@ -43,7 +48,16 @@ L.tileLayer('https://{s}.google.com/vt/lyrs=m&x={x}&y={y}&z={z}', {
     document.head.appendChild(style);
 })();
 
-const stationLayer = L.layerGroup().addTo(map);
+// Gom cụm marker khi zoom xa - trước đây dùng L.layerGroup() nên hàng ngàn
+// trạm chồng lên nhau ở các khu đô thị đông trạm (HCM, Cần Thơ...), rối mắt.
+// disableClusteringAtZoom=16 khớp đúng mức zoom flyToStation() dùng, để tới
+// đó luôn thấy marker riêng lẻ như cũ.
+const stationLayer = L.markerClusterGroup({
+    maxClusterRadius: 50,
+    spiderfyOnMaxZoom: true,
+    showCoverageOnHover: false,
+    disableClusteringAtZoom: 16,
+}).addTo(map);
 const staffMarkers = {}; // username -> { marker, wrenchMarker }
 
 let allStations = [];          // cache toàn bộ trạm nhận được gần nhất (đã lọc theo quyền ở server)
@@ -517,7 +531,10 @@ function applyStationFilter() {
 
     stations = stations.filter((s) => (s.is_bss_station ? showBssStations : showChargerStations));
 
-    stations.forEach((s) => {
+    // Dựng hết marker vào mảng rồi thêm 1 lần bằng addLayers() - nhanh hơn
+    // hẳn addTo() từng marker khi có hàng ngàn trạm (markerClusterGroup phải
+    // tính lại cụm mỗi lần addLayer đơn lẻ).
+    const markers = stations.map((s) => {
         const icon = s.is_unassigned
             ? unassignedStationIcon(s.has_near_overdue)
             : stationIcon(s.color, s.has_near_overdue, s.has_no_info_critical);
@@ -532,8 +549,9 @@ function applyStationFilter() {
             closeButton: false,
         });
         marker._stationCode = s.station_code;
-        marker.addTo(stationLayer);
+        return marker;
     });
+    stationLayer.addLayers(markers);
 }
 
 const chargerTypeCheckbox = document.getElementById('filter-charger');
@@ -928,12 +946,16 @@ function closeSearchResults() {
 function flyToStation(stationCode) {
     const s = allStations.find((x) => x.station_code === stationCode);
     if (!s) return;
-    map.flyTo([s.lat, s.lng], 16, { duration: 1 });
-    setTimeout(() => {
-        stationLayer.eachLayer((layer) => {
-            if (layer._stationCode === stationCode) layer.openPopup();
-        });
-    }, 350);
+    let target = null;
+    stationLayer.eachLayer((layer) => {
+        if (layer._stationCode === stationCode) target = layer;
+    });
+    if (!target) return;
+    // zoomToShowLayer: nếu marker đang bị gộp trong 1 cụm (chưa đủ zoom để
+    // tách), hàm này tự zoom/pan tới mức marker hiện ra riêng lẻ rồi mới gọi
+    // callback - mở thẳng openPopup() như flyTo() cũ sẽ không thấy gì nếu
+    // marker còn đang ẩn trong cụm.
+    stationLayer.zoomToShowLayer(target, () => target.openPopup());
 }
 
 function flyToStaff(username) {
@@ -1105,15 +1127,24 @@ function renderTicketTable(tickets, techName) {
             ? 'background:#fef2f2 !important;'
             : (hours >= 24 ? 'background:#fffbeb !important;' : '');
         const statusLabel = t.status_display || t.status || '';
+        // Mô tả lỗi/Địa chỉ giới hạn 2 dòng (line-clamp) thay vì wrap vô hạn -
+        // trước đây 1 dòng mô tả dài làm CẢ HÀNG cao vọt (HTML table: các ô
+        // cùng hàng luôn cao bằng ô cao nhất), lãng phí không gian hiển thị dù
+        // các cột khác (Mã Ticket, Trạng thái...) chỉ có 1 dòng chữ ngắn.
+        // title="" giữ nguyên văn đầy đủ, xem khi rê chuột vào phần bị cắt.
+        const clampCell = (text, maxWidth) => `
+            <td style="max-width:${maxWidth}px;line-height:1.45;overflow:hidden;
+                display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;"
+                title="${escapeHtmlAttr(text ?? '')}">${text ?? ''}</td>`;
         return `
         <tr style="${rowBg}">
-            <td style="font-weight:500;white-space:nowrap;">${t.ticket_id ?? ''}</td>
+            <td style="font-weight:500;white-space:nowrap;position:sticky;left:0;${rowBg || 'background:#fff;'}">${t.ticket_id ?? ''}</td>
             ${durationCellHtml(t)}
             <td style="white-space:nowrap;">${t.station_code ?? ''}</td>
             <td style="white-space:nowrap;">${t.cp_id ?? ''}</td>
             <td style="white-space:nowrap;${t.is_no_info_critical ? 'color:#dc2626;font-weight:700;' : ''}">${statusLabel}</td>
-            <td style="max-width:320px;white-space:normal;line-height:1.45;">${t.description ?? ''}</td>
-            <td style="max-width:280px;white-space:normal;line-height:1.45;">${t.address ?? ''}</td>
+            ${clampCell(t.description, 320)}
+            ${clampCell(t.address, 280)}
         </tr>
     `;
     }).join('');

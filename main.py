@@ -24,7 +24,6 @@ from fastapi.staticfiles import StaticFiles
 import users_store
 import ccts_data
 import stats_data
-import sla_alert
 from ccts_data import get_static_data, filter_stations_for_user, filter_tech_by_region_for_user
 from location_hub import hub
 from config import SESSION_COOKIE_NAME, SESSION_SECRET_KEY, TICKET_REFRESH_SECONDS
@@ -163,10 +162,6 @@ async def refresh_stations_once() -> bool:
         _latest_tech_stats = new_stats
         _latest_ticket_rows = new_rows
         ccts_data.save_cache_to_file(new_payload, new_stats, new_rows)
-        try:
-            sla_alert.check_and_alert(new_rows)
-        except Exception as e:
-            logger.warning(f"⚠️ Lỗi kiểm tra/báo ticket sắp vỡ SLA (Telegram): {e!r}")
         return True
     else:
         logger.warning("⚠️ Tất cả tài khoản CCTS đều thất bại lần cào này - "
