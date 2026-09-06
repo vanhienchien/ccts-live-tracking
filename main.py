@@ -16,7 +16,7 @@ import time
 from contextlib import asynccontextmanager
 
 import jwt
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, Form
+from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect, Form
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
@@ -25,8 +25,10 @@ import users_store
 import ccts_data
 import stats_data
 import charges_data
+import fcm_tokens
 from ccts_data import get_static_data, filter_stations_for_user, filter_tech_by_region_for_user
 from location_hub import hub
+from near_overdue_scanner import near_overdue_loop
 from config import SESSION_COOKIE_NAME, SESSION_SECRET_KEY, TICKET_REFRESH_SECONDS
 import os
 
@@ -317,6 +319,10 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_run_stations_refresh_once_bg())
     asyncio.create_task(refresh_stations_loop())
+    # Scanner nền: quét ticket near-overdue → gửi FCM push (thay sla_alert.py cũ).
+    # Đọc _latest_ticket_rows hiện tại qua closure; tự về chế độ "chỉ log" nếu
+    # chưa cấu hình credential Firebase.
+    asyncio.create_task(near_overdue_loop(lambda: _latest_ticket_rows))
     if _STATS_SCRAPE_ENABLED:
         asyncio.create_task(stats_midnight_loop())
     else:
@@ -419,6 +425,39 @@ async def api_mobile_login(request: Request):
     token = _create_session_token(user, MOBILE_SESSION_TTL_SECONDS)
 
     return {"status": "ok", "token": token, "user": user}
+
+
+@app.post("/api/mobile/fcm-token")
+async def api_mobile_fcm_token(request: Request):
+    """App di động (Flutter `PushService`) đăng ký / gỡ FCM device token.
+
+    Body: {"token": "<fcm_token>", "action": "register" | "delete"}
+      - thiếu `action` → coi như "register" (app gửi vậy khi login / token refresh).
+      - "delete" → gỡ token (app gọi khi đăng xuất).
+    Xác thực bằng Bearer token y hệt mọi endpoint mobile khác. Token được lưu
+    theo `username` ở `fcm_tokens.json` (file, không cần DB). Đăng ký lại cùng
+    token chỉ làm mới timestamp.
+    """
+    user = get_current_user(request)
+    if not user:
+        return JSONResponse({"error": "unauthorized"}, status_code=401)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "Dữ liệu gửi lên không hợp lệ."}, status_code=400)
+
+    fcm_token = (body.get("token") or "").strip()
+    action = (body.get("action") or "register").strip().lower()
+    if not fcm_token:
+        return JSONResponse({"error": "Thiếu token."}, status_code=400)
+
+    if action == "delete":
+        fcm_tokens.delete(fcm_token)
+        return {"status": "ok", "action": "delete"}
+
+    fcm_tokens.register(user["username"], fcm_token)
+    return {"status": "ok", "action": "register"}
 
 
 @app.get("/logout")
@@ -640,7 +679,18 @@ async def api_stations(request: Request):
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
     filtered = filter_stations_for_user(_latest_station_payload["stations"], user)
-    return {**_latest_station_payload, "stations": filtered}
+    body = {**_latest_station_payload, "stations": filtered}
+
+    # ETag theo nội dung ĐÃ LỌC (KTV vùng khác nhau -> payload khác -> etag
+    # khác). Bỏ qua 'updated_at' (luôn đổi mỗi chu kỳ cào dù ticket không đổi)
+    # bằng cách chỉ hash danh sách 'stations'. App di động gửi lại
+    # 'If-None-Match' -> nhận 304 (body rỗng) thay vì tải + parse lại toàn bộ
+    # JSON mỗi lần poll. Client cũ không gửi header này -> vẫn nhận 200 như cũ.
+    raw = json.dumps(filtered, sort_keys=True, default=str, ensure_ascii=False)
+    etag = 'W/"' + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32] + '"'
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers={"ETag": etag})
+    return JSONResponse(body, headers={"ETag": etag})
 
 
 @app.get("/api/technicians")
@@ -747,15 +797,42 @@ async def api_mobile_location(request: Request):
     return {"status": "ok"}
 
 
+def _ws_token(websocket: WebSocket):
+    """Lấy JWT cho kết nối WebSocket theo thứ tự ưu tiên:
+      1. query param  `?token=<jwt>`  — app di động / trình duyệt KHÔNG set được
+         header tuỳ ý trên WebSocket.
+      2. header       `Authorization: Bearer <jwt>`
+      3. cookie       (giữ nguyên tương thích ngược cho web — không đổi).
+    Trả về (token, nguồn) hoặc (None, None).
+    """
+    tok = (websocket.query_params.get("token") or "").strip()
+    if tok:
+        return tok, "query"
+    auth = websocket.headers.get("authorization") or ""
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip(), "bearer"
+    cookie_tok = websocket.cookies.get(SESSION_COOKIE_NAME)
+    if cookie_tok:
+        return cookie_tok, "cookie"
+    return None, None
+
+
 @app.websocket("/ws/location")
 async def ws_location(websocket: WebSocket):
-    token = websocket.cookies.get(SESSION_COOKIE_NAME)
+    token, src = _ws_token(websocket)
+    # Cùng bộ giải mã JWT với get_current_user (web cookie + mobile Bearer) —
+    # không cần logic auth riêng.
     user = _decode_session_token(token) if token else None
     if not user:
-        await websocket.close(code=4401)
+        logger.info("[ws] /ws/location bị từ chối — thiếu / sai token (src=%s).", src)
+        await websocket.close(code=4001)  # Unauthorized
         return
 
     await websocket.accept()
+    logger.info(
+        "[ws] /ws/location kết nối OK — user=%s role=%s src=%s",
+        user.get("username"), user.get("role"), src,
+    )
     await hub.register(websocket, user)
 
     try:
@@ -782,6 +859,7 @@ async def ws_location(websocket: WebSocket):
                 continue
     finally:
         await hub.unregister(websocket)
+        logger.info("[ws] /ws/location ngắt — user=%s", user.get("username"))
 
 
 if __name__ == "__main__":

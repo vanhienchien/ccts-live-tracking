@@ -13,3 +13,4 @@ cryptography>=42,<44
 boto3>=1.34,<2
 httpx~=0.27
 PyJWT~=2.9
+firebase-admin>=6.5,<7
