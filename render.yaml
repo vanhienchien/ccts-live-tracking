@@ -44,3 +44,13 @@ services:
         value: "1"
       - key: TICKET_REFRESH_SECONDS
         value: "600"
+      # FCM push (near-overdue): service-account JSON của project Firebase
+      # ccts-mobie. Thiếu → scanner chỉ log, không gửi.
+      - key: FIREBASE_CREDENTIALS_JSON
+        sync: false
+      # Sentry telemetry lỗi. SENTRY_DSN đã có default trong observability.py
+      # (project python-fastapi); đặt ở đây để đổi project, hoặc "-" để TẮT.
+      - key: SENTRY_DSN
+        sync: false
+      - key: SENTRY_ENV
+        value: "production"

@@ -14,3 +14,4 @@ boto3>=1.34,<2
 httpx~=0.27
 PyJWT~=2.9
 firebase-admin>=6.5,<7
+sentry-sdk>=2,<3

@@ -20,6 +20,7 @@ import os
 import threading
 
 import fcm_tokens
+import observability
 
 logger = logging.getLogger("ccts.fcm")
 
@@ -85,6 +86,7 @@ def _ensure_init() -> bool:
             logger.info("[fcm] Firebase Admin SDK đã khởi tạo — sẵn sàng gửi push.")
         except Exception as e:
             logger.error("[fcm] initialize_app thất bại: %r", e)
+            observability.capture_exception(e, where="fcm_init")
             _enabled = False
         return _enabled
 
@@ -140,5 +142,6 @@ def send_notification(username: str, ticket_id: str, title: str, body: str) -> d
                 logger.info("[fcm] Token …%s không hợp lệ (%s) — đã xoá.", tok[-8:], name)
             else:
                 logger.warning("[fcm] Gửi tới …%s lỗi: %r", tok[-8:], e)
+                observability.capture_exception(e, where="fcm_send", ticket_id=ticket_id)
     logger.info("[fcm] user=%s ticket=%s → sent=%d failed=%d", username, ticket_id, sent, failed)
     return {"sent": sent, "failed": failed, "skipped": False}

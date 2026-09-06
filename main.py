@@ -26,6 +26,7 @@ import ccts_data
 import stats_data
 import charges_data
 import fcm_tokens
+import observability
 from ccts_data import get_static_data, filter_stations_for_user, filter_tech_by_region_for_user
 from location_hub import hub
 from near_overdue_scanner import near_overdue_loop
@@ -135,7 +136,10 @@ def get_current_user(request: Request):
             token = auth_header[7:].strip()
     if not token:
         return None
-    return _decode_session_token(token)
+    user = _decode_session_token(token)
+    if user:
+        observability.set_user(user.get("username"), user.get("role"), user.get("region"))
+    return user
 
 
 def require_admin(user):
@@ -257,6 +261,9 @@ async def stats_midnight_loop():
 async def lifespan(app: FastAPI):
     global _latest_station_payload, _latest_tech_stats, _latest_ticket_rows
 
+    # Telemetry lỗi từ xa — bật nếu có env SENTRY_DSN, ngược lại no-op.
+    observability.init_sentry()
+
     get_static_data()
 
     cached_payload, cached_stats, cached_rows = ccts_data.load_cache_from_file()
@@ -366,6 +373,7 @@ async def login_submit(request: Request, username: str = Form(...), password: st
         # FastAPI bung traceback 500 thẳng ra (deploy vẫn chạy bình thường,
         # chỉ riêng lượt đăng nhập này thất bại).
         logger.error(f"[login] Lỗi khi xác thực (Google Sheets API?): {e!r}")
+        observability.capture_exception(e, where="login_web")
         return templates.TemplateResponse(
             request=request, name="login.html",
             context={"error": "Hệ thống đang tạm thời quá tải, vui lòng thử đăng nhập lại sau vài giây."},
@@ -415,6 +423,7 @@ async def api_mobile_login(request: Request):
         user = users_store.verify_login(username, password)
     except Exception as e:
         logger.error(f"[api_mobile_login] Lỗi khi xác thực (Google Sheets API?): {e!r}")
+        observability.capture_exception(e, where="login_mobile")
         return JSONResponse(
             {"error": "Hệ thống đang tạm thời quá tải, vui lòng thử lại sau vài giây."},
             status_code=503,

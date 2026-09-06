@@ -27,6 +27,7 @@ import tempfile
 import time
 
 import fcm_service
+import observability
 import users_store
 
 logger = logging.getLogger("ccts.near_overdue_scanner")
@@ -72,6 +73,7 @@ def _name_to_username() -> dict:
                     out[key] = u["username"]
     except Exception as e:
         logger.warning("[near_overdue] Không lấy được danh sách user: %r", e)
+        observability.capture_exception(e, where="near_overdue_name_map")
     return out
 
 
@@ -139,4 +141,5 @@ async def near_overdue_loop(rows_provider) -> None:
             await asyncio.to_thread(_scan_once_sync, rows)
         except Exception as e:
             logger.error("[near_overdue] Lỗi vòng quét (bỏ qua, thử lại sau): %r", e)
+            observability.capture_exception(e, where="near_overdue_loop")
         await asyncio.sleep(SCAN_INTERVAL_SECONDS)
