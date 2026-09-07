@@ -60,35 +60,71 @@ const FLAG_SVG = `<svg width="14" height="16" viewBox="0 0 24 28" xmlns="http://
   <path d="M6.2 3.2h11.5c.7 0 1.1.8.7 1.35L15.8 9.2l2.6 4.65c.4.55 0 1.35-.7 1.35H6.2V3.2z" fill="none" stroke="#5b21b6" stroke-width="0.8"/>
 </svg>`;
 
-// ---------- Icon trạm sạc: ghim giọt nước cổ điển ----------
-function stationIcon(color, hasNearOverdue, hasNoInfoCritical) {
+// ---------- Icon trạm sạc: phân biệt HÌNH DẠNG theo loại trụ ----------
+// EV  = ghim đầu TRÒN (giọt nước) + tia sét ⚡
+// BSS = ghim đầu BO VUÔNG (squircle) + biểu tượng viên pin 🔋
+// 2 ghim cùng khung 26×36, cùng "trọng lượng" thị giác, chỉ khác phần đầu +
+// glyph nên nhận diện tức thì mà vẫn là một bộ. Thân ghim tô theo MỨC ĐỘ
+// NGHIÊM TRỌNG (đỏ/cam/xanh theo giờ tồn đọng) — khác all_stations_map.js
+// (màu cố định EV/BSS).
+//
+// Cho nét mịn & chuyên nghiệp:
+//  - Thân ghim là path 1 nét bằng Bézier (không gấp khúc như hình khiên cũ).
+//  - Viền trắng vẽ bằng paint-order="stroke" -> quầng trắng đều tăm tắp 2 bên,
+//    góc bo tròn (stroke-linejoin=round), không lệ thuộc thứ tự vẽ.
+//  - Glyph là hình ĐẶC (fill) thay cho nét mảnh 1.8px (ở ~20px hiển thị nét
+//    mảnh bị vỡ/nhoè); pin = khung đặc + 3 vạch pin.
+//  - shape-rendering="geometricPrecision" + bóng đổ mỏng (không "khói xám").
+function stationIcon(color, hasNearOverdue, hasNoInfoCritical, isBss) {
     // purple_critical (cache cũ) map về đỏ như overdue thường
     const colorMap = { red: '#dc2626', orange: '#ea580c', green: '#16a34a', purple_critical: '#dc2626' };
     const fill = colorMap[color] || '#3b82f6';
 
     // Ticket Open-overdue CHƯA có thông tin — chỉ cờ tím, KHÔNG vòng tròn bao quanh
     const criticalBadge = hasNoInfoCritical ? `
-        <div style="position:absolute; top:-10px; right:-12px; width:14px; height:16px;
+        <div style="position:absolute; top:-9px; right:-11px; width:14px; height:16px;
                     display:flex; align-items:center; justify-content:center;
                     filter: drop-shadow(0 1px 2px rgba(0,0,0,.4));
                     animation:unassigned-pulse 1.4s infinite; z-index:11;">${FLAG_SVG}</div>
     ` : '';
 
     const warningBadge = (!hasNoInfoCritical && hasNearOverdue) ? `
-        <div style="position:absolute; top:-9px; right:-11px; width:20px; height:20px; border-radius:50%;
+        <div style="position:absolute; top:-9px; right:-10px; width:19px; height:19px; border-radius:50%;
                     background:#1e293b; color:#fbbf24; display:flex; align-items:center; justify-content:center;
-                    font-size:11px; border:2px solid #fff; box-shadow:0 2px 6px rgba(0,0,0,.45);
+                    font-size:10.5px; border:2px solid #fff; box-shadow:0 2px 6px rgba(0,0,0,.45);
                     animation:unassigned-pulse 1.4s infinite; z-index:10;">⏰</div>
     ` : '';
 
+    // Thân ghim (viewBox 0 0 26 36, mũi nhọn ở 13,34)
+    const shape = isBss
+        ? `<path d="M8 1.6 H18 C21.2 1.6 23.8 4.2 23.8 7.4 V15.7
+                    C23.8 18.5 23.3 20.3 21.9 22.7 C19.4 26.9 16.5 30.5 13 34
+                    C9.5 30.5 6.6 26.9 4.1 22.7 C2.7 20.3 2.2 18.5 2.2 15.7 V7.4
+                    C2.2 4.2 4.8 1.6 8 1.6 Z"
+                 fill="${fill}" stroke="#ffffff" stroke-width="2.6" stroke-linejoin="round" paint-order="stroke"/>`
+        : `<path d="M13 1.6 C6.75 1.6 1.7 6.7 1.7 12.95 C1.7 21.5 13 34 13 34
+                    C13 34 24.3 21.5 24.3 12.95 C24.3 6.7 19.25 1.6 13 1.6 Z"
+                 fill="${fill}" stroke="#ffffff" stroke-width="2.6" stroke-linejoin="round" paint-order="stroke"/>`;
+
+    // Glyph trắng (đặc): BSS = viên pin có 3 vạch, EV = tia sét (Heroicons)
+    const glyph = isBss
+        ? `<rect x="4.3" y="7.9" width="14.5" height="10.2" rx="2.5" fill="#ffffff"/>
+           <rect x="18.7" y="10.6" width="2.7" height="4.8" rx="1.2" fill="#ffffff"/>
+           <rect x="5.9" y="9.5" width="11.3" height="7" rx="1.4" fill="${fill}"/>
+           <rect x="7.15" y="10.7" width="2" height="4.6" rx="0.7" fill="#ffffff"/>
+           <rect x="10.0"  y="10.7" width="2" height="4.6" rx="0.7" fill="#ffffff"/>
+           <rect x="12.85" y="10.7" width="2" height="4.6" rx="0.7" fill="#ffffff"/>`
+        : `<path transform="translate(6.47 5.93) scale(0.68)"
+                 d="M11.983 1.907a.75.75 0 00-1.292-.657l-8.5 9.5A.75.75 0 002.75 12h6.572l-1.305 6.093a.75.75 0 001.292.657l8.5-9.5A.75.75 0 0017.25 8h-6.572l1.305-6.093z"
+                 fill="#ffffff"/>`;
+
     const htmlContent = `
-        <div style="position:relative; width:16px; height:22px;">
-            <svg width="16" height="22" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
-                <path d="M15 0C6.7 0 0 6.7 0 15c0 11.25 15 27 15 27s15-15.75 15-27C30 6.7 23.3 0 15 0z"
-                      fill="${fill}" stroke="rgba(0,0,0,.3)" stroke-width="1.2"/>
-                <circle cx="15" cy="15" r="9" fill="#ffffff"/>
-                <text x="15" y="19" font-size="12" font-weight="700" text-anchor="middle"
-                      font-family="Inter, system-ui, sans-serif" fill="${fill}">i</text>
+        <div style="position:relative; width:20px; height:28px;
+                    filter:drop-shadow(0 1px 1px rgba(0,0,0,.4));">
+            <svg width="20" height="28" viewBox="0 0 26 36" xmlns="http://www.w3.org/2000/svg"
+                 shape-rendering="geometricPrecision">
+                ${shape}
+                ${glyph}
             </svg>
             ${criticalBadge}
             ${warningBadge}
@@ -97,9 +133,9 @@ function stationIcon(color, hasNearOverdue, hasNoInfoCritical) {
     return L.divIcon({
         className: '',
         html: htmlContent,
-        iconSize: [16, 22],
-        iconAnchor: [8, 22],
-        popupAnchor: [0, -20],
+        iconSize: [20, 28],
+        iconAnchor: [10, 26],
+        popupAnchor: [0, -25],
     });
 }
 
@@ -523,7 +559,7 @@ function applyStationFilter() {
     stations.forEach((s) => {
         const icon = s.is_unassigned
             ? unassignedStationIcon(s.has_near_overdue)
-            : stationIcon(s.color, s.has_near_overdue, s.has_no_info_critical);
+            : stationIcon(s.color, s.has_near_overdue, s.has_no_info_critical, s.is_bss_station);
         const marker = L.marker([s.lat, s.lng], { icon });
         // Hàm callback: Leaflet chỉ gọi buildStationPopup(s) khi popup thực sự
         // được mở, không tốn CPU dựng HTML sẵn cho toàn bộ trạm mỗi lần vẽ lại.

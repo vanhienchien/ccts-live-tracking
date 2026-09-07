@@ -31,27 +31,42 @@ function escapeHtml(str) {
 }
 
 // ---------- Icon trạm: 2 HÌNH DẠNG khác nhau (không chỉ khác màu) ----------
+// EV  = ghim đầu TRÒN (giọt nước) + tia sét ⚡
+// BSS = ghim đầu BO VUÔNG (squircle) + biểu tượng viên pin 🔋
+// Giữ ĐỒNG BỘ với stationIcon() trong static/app.js (bản đồ sự cố): cùng path,
+// cùng glyph; ở đây chỉ khác là màu cố định theo loại trụ (EV đỏ / BSS xanh).
+// Nét mịn: path 1 nét (Bézier, không gấp khúc), viền trắng paint-order="stroke",
+// glyph là hình ĐẶC, shape-rendering="geometricPrecision".
 function chargeStationIcon(type) {
     const isEv = type === 'ev';
     const color = isEv ? EV_COLOR : BSS_COLOR;
-    const glyph = isEv
-        ? `<path transform="translate(7,6) scale(0.7)"
-                 d="M11.983 1.907a.75.75 0 00-1.292-.657l-8.5 9.5A.75.75 0 002.75 12h6.572l-1.305 6.093a.75.75 0 001.292.657l8.5-9.5A.75.75 0 0017.25 8h-6.572l1.305-6.093z"
-                 fill="#ffffff"/>`
-        : `<rect x="9" y="9" width="13" height="9" rx="2" fill="none" stroke="#ffffff" stroke-width="1.8"/>
-           <rect x="22" y="11.5" width="2.4" height="4" rx="1" fill="#ffffff"/>
-           <rect x="10.5" y="10.5" width="4.5" height="6" rx="1" fill="#ffffff"/>`;
 
     const shape = isEv
-        ? `<path d="M15 0C6.7 0 0 6.7 0 15c0 11.25 15 27 15 27s15-15.75 15-27C30 6.7 23.3 0 15 0z"
-                 fill="${color}" stroke="#ffffff" stroke-width="2"/>`
-        : `<path d="M15 2 L24 2 Q28 2 28 6 L28 19 Q28 22.5 25 24.5 L15 40 L5 24.5 Q2 22.5 2 19 L2 6 Q2 2 6 2 Z"
-                 fill="${color}" stroke="#ffffff" stroke-width="2"/>`;
+        ? `<path d="M13 1.6 C6.75 1.6 1.7 6.7 1.7 12.95 C1.7 21.5 13 34 13 34
+                    C13 34 24.3 21.5 24.3 12.95 C24.3 6.7 19.25 1.6 13 1.6 Z"
+                 fill="${color}" stroke="#ffffff" stroke-width="2.6" stroke-linejoin="round" paint-order="stroke"/>`
+        : `<path d="M8 1.6 H18 C21.2 1.6 23.8 4.2 23.8 7.4 V15.7
+                    C23.8 18.5 23.3 20.3 21.9 22.7 C19.4 26.9 16.5 30.5 13 34
+                    C9.5 30.5 6.6 26.9 4.1 22.7 C2.7 20.3 2.2 18.5 2.2 15.7 V7.4
+                    C2.2 4.2 4.8 1.6 8 1.6 Z"
+                 fill="${color}" stroke="#ffffff" stroke-width="2.6" stroke-linejoin="round" paint-order="stroke"/>`;
+
+    const glyph = isEv
+        ? `<path transform="translate(6.47 5.93) scale(0.68)"
+                 d="M11.983 1.907a.75.75 0 00-1.292-.657l-8.5 9.5A.75.75 0 002.75 12h6.572l-1.305 6.093a.75.75 0 001.292.657l8.5-9.5A.75.75 0 0017.25 8h-6.572l1.305-6.093z"
+                 fill="#ffffff"/>`
+        : `<rect x="4.3" y="7.9" width="14.5" height="10.2" rx="2.5" fill="#ffffff"/>
+           <rect x="18.7" y="10.6" width="2.7" height="4.8" rx="1.2" fill="#ffffff"/>
+           <rect x="5.9" y="9.5" width="11.3" height="7" rx="1.4" fill="${color}"/>
+           <rect x="7.15" y="10.7" width="2" height="4.6" rx="0.7" fill="#ffffff"/>
+           <rect x="10.0"  y="10.7" width="2" height="4.6" rx="0.7" fill="#ffffff"/>
+           <rect x="12.85" y="10.7" width="2" height="4.6" rx="0.7" fill="#ffffff"/>`;
 
     const html = `
-        <div style="position:relative;width:14px;height:18px;
-                    filter:drop-shadow(0 1px 3px rgba(0,0,0,.55));">
-            <svg width="14" height="18" viewBox="0 0 30 42" xmlns="http://www.w3.org/2000/svg">
+        <div style="position:relative;width:17px;height:23px;
+                    filter:drop-shadow(0 1px 1px rgba(0,0,0,.4));">
+            <svg width="17" height="23" viewBox="0 0 26 36" xmlns="http://www.w3.org/2000/svg"
+                 shape-rendering="geometricPrecision">
                 ${shape}
                 ${glyph}
             </svg>
@@ -59,9 +74,9 @@ function chargeStationIcon(type) {
     return L.divIcon({
         className: '',
         html,
-        iconSize: [14, 18],
-        iconAnchor: [7, 18],
-        popupAnchor: [0, -16],
+        iconSize: [17, 23],
+        iconAnchor: [8.5, 21.5],
+        popupAnchor: [0, -20],
     });
 }
 
