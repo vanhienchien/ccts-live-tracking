@@ -96,15 +96,19 @@ function stationIcon(color, hasNearOverdue, hasNoInfoCritical, isBss) {
     ` : '';
 
     // Thân ghim (viewBox 0 0 26 36, mũi nhọn ở 13,34)
+    // [THỬ NGHIỆM] Bỏ viền trắng ngoài — chỉ còn thân đặc + bóng đổ.
+    // Muốn khôi phục: thêm lại  stroke="#ffffff" stroke-width="2.6"
+    //   stroke-linejoin="round" paint-order="stroke"  vào 2 <path> dưới,
+    // hoặc: git restore static/app.js static/js/all_stations_map.js
     const shape = isBss
         ? `<path d="M8 1.6 H18 C21.2 1.6 23.8 4.2 23.8 7.4 V15.7
                     C23.8 18.5 23.3 20.3 21.9 22.7 C19.4 26.9 16.5 30.5 13 34
                     C9.5 30.5 6.6 26.9 4.1 22.7 C2.7 20.3 2.2 18.5 2.2 15.7 V7.4
                     C2.2 4.2 4.8 1.6 8 1.6 Z"
-                 fill="${fill}" stroke="#ffffff" stroke-width="2.6" stroke-linejoin="round" paint-order="stroke"/>`
+                 fill="${fill}"/>`
         : `<path d="M13 1.6 C6.75 1.6 1.7 6.7 1.7 12.95 C1.7 21.5 13 34 13 34
                     C13 34 24.3 21.5 24.3 12.95 C24.3 6.7 19.25 1.6 13 1.6 Z"
-                 fill="${fill}" stroke="#ffffff" stroke-width="2.6" stroke-linejoin="round" paint-order="stroke"/>`;
+                 fill="${fill}"/>`;
 
     // Glyph trắng (đặc): BSS = viên pin có 3 vạch, EV = tia sét (Heroicons)
     const glyph = isBss

@@ -41,15 +41,19 @@ function chargeStationIcon(type) {
     const isEv = type === 'ev';
     const color = isEv ? EV_COLOR : BSS_COLOR;
 
+    // [THỬ NGHIỆM] Bỏ viền trắng ngoài (giữ đồng bộ với static/app.js).
+    // Khôi phục: thêm lại  stroke="#ffffff" stroke-width="2.6"
+    //   stroke-linejoin="round" paint-order="stroke"  vào 2 <path>,
+    // hoặc: git restore static/js/all_stations_map.js static/app.js
     const shape = isEv
         ? `<path d="M13 1.6 C6.75 1.6 1.7 6.7 1.7 12.95 C1.7 21.5 13 34 13 34
                     C13 34 24.3 21.5 24.3 12.95 C24.3 6.7 19.25 1.6 13 1.6 Z"
-                 fill="${color}" stroke="#ffffff" stroke-width="2.6" stroke-linejoin="round" paint-order="stroke"/>`
+                 fill="${color}"/>`
         : `<path d="M8 1.6 H18 C21.2 1.6 23.8 4.2 23.8 7.4 V15.7
                     C23.8 18.5 23.3 20.3 21.9 22.7 C19.4 26.9 16.5 30.5 13 34
                     C9.5 30.5 6.6 26.9 4.1 22.7 C2.7 20.3 2.2 18.5 2.2 15.7 V7.4
                     C2.2 4.2 4.8 1.6 8 1.6 Z"
-                 fill="${color}" stroke="#ffffff" stroke-width="2.6" stroke-linejoin="round" paint-order="stroke"/>`;
+                 fill="${color}"/>`;
 
     const glyph = isEv
         ? `<path transform="translate(6.47 5.93) scale(0.68)"
