@@ -20,6 +20,17 @@ from fastapi import FastAPI, Request, Response, WebSocket, WebSocketDisconnect, 
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
+
+# orjson: serialize JSON nhanh hơn json chuẩn ~3-10 lần, ít cấp phát bộ nhớ
+# hơn — đáng kể với payload /api/stations, /api/tech-tickets (hàng nghìn
+# dòng). Nếu vì lý do nào đó thiếu orjson thì tự lùi về JSONResponse.
+try:
+    from fastapi.responses import ORJSONResponse as _DefaultJSONResponse
+    import orjson as _orjson
+except Exception:  # pragma: no cover
+    _DefaultJSONResponse = JSONResponse
+    _orjson = None
 
 import users_store
 import ccts_data
@@ -94,7 +105,10 @@ def _decode_session_token(token: str):
     }
 
 
-app = FastAPI(title="CCTS Live Map")
+app = FastAPI(title="CCTS Live Map", default_response_class=_DefaultJSONResponse)
+# Nén gzip mọi response >= 1 KB (JSON /api/* nén được ~85-90%). compresslevel=5
+# là điểm cân bằng tốc-độ/tỉ-lệ-nén khuyến nghị cho payload động.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 templates = Jinja2Templates(directory="templates")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -104,6 +118,95 @@ _latest_station_payload = {
 _latest_tech_stats = {}
 _latest_ticket_rows = []
 _refresh_paused = False  # True = tạm dừng chu kỳ cào tự động (chỉ admin bật/tắt)
+
+# ---------------------------------------------------------------------------
+# Side-cache: kết quả các lệnh gọi ĐỒNG BỘ + CHẶN (đọc Google Sheets / GitHub)
+# mà 3 tag "Lọc kỹ thuật viên", "Danh sách ticket theo KTV", "Bản đồ trạm"
+# cần. Trước đây route gọi thẳng trong `async def` → 1 request chậm (Google
+# đơ 1-2s) làm ĐƠ luôn event loop, mọi user khác treo theo. Giờ:
+#   - Vòng lặp nền tự làm ấm mỗi chu kỳ (side_caches_loop).
+#   - Route chỉ đọc biến RAM này; nếu quá cũ thì tự làm mới QUA THREAD
+#     (asyncio.to_thread) để không chặn event loop.
+_SIDE_CACHE_TTL = 900.0  # 15 phút — nền tự refresh trước khi kịp hết hạn
+_side_cache: dict = {
+    "static": None, "static_ts": 0.0,
+    "users": None, "users_ts": 0.0,
+}
+_side_cache_lock = asyncio.Lock()
+
+
+async def get_static_data_cached(force: bool = False):
+    """(coords_map, tech_map, region_map, cp_model_map, tech_by_region) —
+    không bao giờ chặn event loop."""
+    now = time.time()
+    cached = _side_cache["static"]
+    if not force and cached is not None and (now - _side_cache["static_ts"]) < _SIDE_CACHE_TTL:
+        return cached
+    async with _side_cache_lock:
+        now = time.time()
+        cached = _side_cache["static"]
+        if not force and cached is not None and (now - _side_cache["static_ts"]) < _SIDE_CACHE_TTL:
+            return cached
+        try:
+            data = await asyncio.to_thread(get_static_data)
+            _side_cache["static"] = data
+            _side_cache["static_ts"] = time.time()
+        except Exception as e:
+            logger.warning(f"[side-cache] Lỗi làm mới static data: {e!r}")
+            if cached is not None:
+                return cached
+            raise
+        return _side_cache["static"]
+
+
+async def list_users_public_cached(force: bool = False):
+    """Danh sách user (không mật khẩu) — không bao giờ chặn event loop."""
+    now = time.time()
+    cached = _side_cache["users"]
+    if not force and cached is not None and (now - _side_cache["users_ts"]) < _SIDE_CACHE_TTL:
+        return cached
+    async with _side_cache_lock:
+        now = time.time()
+        cached = _side_cache["users"]
+        if not force and cached is not None and (now - _side_cache["users_ts"]) < _SIDE_CACHE_TTL:
+            return cached
+        try:
+            data = await asyncio.to_thread(users_store.list_users_public)
+            _side_cache["users"] = data
+            _side_cache["users_ts"] = time.time()
+        except Exception as e:
+            logger.warning(f"[side-cache] Lỗi làm mới users: {e!r}")
+            if cached is not None:
+                return cached
+            raise
+        return _side_cache["users"]
+
+
+async def _warm_side_caches():
+    """Làm ấm toàn bộ side-cache 1 lượt (startup + mỗi chu kỳ nền)."""
+    try:
+        await get_static_data_cached(force=True)
+    except Exception:
+        pass
+    try:
+        await list_users_public_cached(force=True)
+    except Exception:
+        pass
+    try:
+        # charges_data tự có TTL 5' — gọi qua thread để hâm nóng, không chặn.
+        await asyncio.to_thread(charges_data.refresh_charges_cache)
+    except Exception as e:
+        logger.warning(f"[side-cache] Lỗi hâm nóng charges cache: {e!r}")
+
+
+async def side_caches_loop():
+    """Nền: làm ấm side-cache đều đặn để route không bao giờ phải tự tải."""
+    while True:
+        await asyncio.sleep(_SIDE_CACHE_TTL * 0.6)  # refresh trước khi hết hạn
+        try:
+            await _warm_side_caches()
+        except Exception as e:
+            logger.warning(f"[side-cache] Lỗi vòng lặp hâm nóng: {e!r}")
 
 # Chữ ký (hash) của lần broadcast_stations_update() gần nhất - dùng để BỎ QUA
 # việc gửi lại toàn bộ payload trạm qua WebSocket cho mọi client nếu dữ liệu
@@ -264,7 +367,10 @@ async def lifespan(app: FastAPI):
     # Telemetry lỗi từ xa — bật nếu có env SENTRY_DSN, ngược lại no-op.
     observability.init_sentry()
 
-    get_static_data()
+    try:
+        get_static_data()  # mồi github_data_store._cache 1 lần lúc khởi động
+    except Exception as e:
+        logger.warning(f"[startup] Không mồi được static data (sẽ thử lại nền): {e!r}")
 
     cached_payload, cached_stats, cached_rows = ccts_data.load_cache_from_file()
     if cached_payload:
@@ -273,11 +379,14 @@ async def lifespan(app: FastAPI):
         _latest_ticket_rows = cached_rows
         logger.info("✅ Đã nạp dữ liệu từ lần cào gần nhất (file cache).")
 
-    # Stats: nạp cache ngay (nếu có) để /stats không trống; cào mới chạy NỀN — không chặn startup
-    stats_cached = stats_data.load_stats_cache()
+    # Stats: chỉ nạp BẢN GỌN (meta + charts, vài KB) để /stats không trống —
+    # KHÔNG kéo bản đầy đủ 30 MB từ R2 lúc boot nữa (đó là nguyên nhân cold
+    # start lâu). Bản đầy đủ chỉ được nạp khi thật sự phải build lại 1 biểu đồ.
+    stats_cached = stats_data.load_stats_charts_cache()
     if stats_cached:
-        logger.info(f"✅ Đã nạp stats cache ({stats_cached.get('total_tickets', 0)} ticket, "
-              f"cập nhật {stats_cached.get('generated_at', '?')}).")
+        _meta = stats_cached.get("meta") or {}
+        logger.info(f"✅ Đã nạp stats charts cache ({len(stats_cached.get('charts') or {})} biểu đồ, "
+              f"cập nhật {_meta.get('generated_at', '?')}).")
     else:
         logger.info("[stats] Chưa có cache — trang /stats tạm trống đến khi cào nền xong.")
 
@@ -326,6 +435,11 @@ async def lifespan(app: FastAPI):
 
     asyncio.create_task(_run_stations_refresh_once_bg())
     asyncio.create_task(refresh_stations_loop())
+    # Side-cache (static GitHub / users Google Sheet / charges xlsx): làm ấm
+    # ngay + giữ ấm nền để 3 tag "Lọc KTV" / "DS ticket theo KTV" / "Bản đồ
+    # trạm" không bao giờ phải tự tải trong request.
+    asyncio.create_task(_warm_side_caches())
+    asyncio.create_task(side_caches_loop())
     # Scanner nền: quét ticket near-overdue → gửi FCM push (thay sla_alert.py cũ).
     # Đọc _latest_ticket_rows hiện tại qua closure; tự về chế độ "chỉ log" nếu
     # chưa cấu hình credential Firebase.
@@ -523,7 +637,10 @@ async def api_all_charging_stations(request: Request):
         return JSONResponse({"error": "forbidden", "detail": "Kỹ thuật viên không được xem trang này."}, status_code=403)
 
     try:
-        payload = charges_data.refresh_charges_cache()
+        # refresh_charges_cache tự có TTL 5' (trả cache ngay khi còn hạn);
+        # bọc to_thread để lần hết-hạn rơi vào request không CHẶN event loop
+        # (tải + parse xlsx từ GitHub mất vài giây).
+        payload = await asyncio.to_thread(charges_data.refresh_charges_cache)
     except Exception as e:
         logger.error(f"[all-stations] Lỗi tải total_charges.xlsx: {e!r}")
         return JSONResponse(
@@ -695,6 +812,18 @@ async def api_stations(request: Request):
     # bằng cách chỉ hash danh sách 'stations'. App di động gửi lại
     # 'If-None-Match' -> nhận 304 (body rỗng) thay vì tải + parse lại toàn bộ
     # JSON mỗi lần poll. Client cũ không gửi header này -> vẫn nhận 200 như cũ.
+    #
+    # Dùng orjson: hash + serialize payload vài nghìn dòng nhanh hơn json
+    # chuẩn nhiều lần. Serialize body 1 LẦN rồi trả Response thẳng (tránh
+    # JSONResponse serialize lại lần 2).
+    if _orjson is not None:
+        etag_src = _orjson.dumps(filtered, option=_orjson.OPT_SORT_KEYS, default=str)
+        etag = 'W/"' + hashlib.sha256(etag_src).hexdigest()[:32] + '"'
+        if request.headers.get("if-none-match") == etag:
+            return Response(status_code=304, headers={"ETag": etag})
+        body_bytes = _orjson.dumps(body, default=str)
+        return Response(body_bytes, media_type="application/json", headers={"ETag": etag})
+
     raw = json.dumps(filtered, sort_keys=True, default=str, ensure_ascii=False)
     etag = 'W/"' + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:32] + '"'
     if request.headers.get("if-none-match") == etag:
@@ -708,9 +837,9 @@ async def api_technicians(request: Request):
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)
 
-    _, _, _, _, tech_by_region = get_static_data()
+    _, _, _, _, tech_by_region = await get_static_data_cached()
     tech_by_region = filter_tech_by_region_for_user(tech_by_region, user)
-    all_users = users_store.list_users_public()
+    all_users = await list_users_public_cached()
 
     name_to_username = {}
     for u in all_users:

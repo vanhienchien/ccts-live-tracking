@@ -44,15 +44,34 @@ from ccts_shared import VN_TZ, CCTS_API_LOCK, STATS_SCRAPE_ACCOUNTS, ClientPool
 # "local" → luôn đọc thư mục Excel, không gọi CCTS.
 STATS_DATA_SOURCE = os.environ.get("STATS_DATA_SOURCE", "ccts").strip().lower()
 
-# Thư mục chứa file Excel khi dùng nguồn "local". Mặc định là thư mục
-# "data/" NẰM CẠNH file này (trước đây hard-code path Windows tuyệt đối
-# C:\Users\Admin\CCTS_DATA\data — os.path.join bỏ qua phần dirname() khi
-# gặp path tuyệt đối thứ 2, nên chỉ chạy được đúng trên máy đã tạo ra nó;
-# chưa từng "nổ" vì STATS_DATA_SOURCE mặc định là "ccts", không phải "local").
-STATS_LOCAL_DATA_DIR = os.environ.get(
-    "STATS_LOCAL_DATA_DIR",
-    os.path.join(os.path.dirname(__file__), "data"),
-)
+# Thư mục chứa file Excel khi dùng nguồn "local".
+#   1) Nếu có env STATS_LOCAL_DATA_DIR → dùng đúng path đó.
+#   2) Ngược lại: thử lần lượt các vị trí quen thuộc, lấy thư mục ĐẦU TIÊN
+#      thực sự tồn tại:
+#         - <repo>/data        (C:\Users\Admin\CCTS_DATA\data — nơi thực tế
+#                                đang chứa file, NGANG HÀNG với folder app/)
+#         - <app>/data         (thư mục "data/" nằm cạnh file này)
+#      Nếu không có cái nào tồn tại → mặc định về <repo>/data để thông báo
+#      lỗi trỏ đúng chỗ người dùng cần bỏ file vào.
+_APP_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_DIR = os.path.dirname(_APP_DIR)
+
+
+def _resolve_local_data_dir() -> str:
+    env_dir = os.environ.get("STATS_LOCAL_DATA_DIR", "").strip()
+    if env_dir:
+        return env_dir
+    candidates = [
+        os.path.join(_REPO_DIR, "data"),
+        os.path.join(_APP_DIR, "data"),
+    ]
+    for path in candidates:
+        if os.path.isdir(path):
+            return path
+    return candidates[0]
+
+
+STATS_LOCAL_DATA_DIR = _resolve_local_data_dir()
 
 REQUIRED_SHEETS = [
     "Ticket Information", "Events Record", "Spare Parts Record",

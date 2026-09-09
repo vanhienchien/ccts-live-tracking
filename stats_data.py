@@ -41,6 +41,11 @@ from ccts_shared import VN_TZ, STATS_REFRESH_LOCK, OPEN_STATUSES_NORM, CLOSED_ST
 import stats_source
 
 STATS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_daily_cache.json")
+# Bản gọn: chỉ {version, meta, charts} — KHÔNG kèm mảng tickets thô. Đây là
+# thứ duy nhất route /api/stats/* cần khi phục vụ request, nhỏ hơn bản đầy
+# đủ vài chục lần nên cold-start (đọc từ R2) gần như tức thì và không giữ
+# ~30 MB thường trú trong RAM chỉ để trả 4 biểu đồ.
+STATS_CHARTS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_charts_cache.json")
 SAMPLE_XLSX = os.path.join(os.path.dirname(__file__), "Tickets_esmanager_20260728_201743.xlsx")
 
 # Công ty đã RÚT KHỎI khu vực HCM (08/2026) -> HCM không còn nằm trong danh
@@ -74,6 +79,18 @@ _REGION_PREFIX_RULES: list[tuple[str, str]] = [
 ]
 
 _memory_cache: dict[str, Any] | None = None
+# Bản gọn (meta + charts) giữ riêng trong RAM để route /api/stats/* không
+# phải đụng tới _memory_cache (bản đầy đủ ~30 MB) khi chỉ cần biểu đồ.
+_memory_charts_cache: dict[str, Any] | None = None
+
+
+def _slim_charts_payload(payload: dict) -> dict:
+    """Rút gọn payload đầy đủ → chỉ giữ phần cần cho /api/stats/*."""
+    return {
+        "version": payload.get("version", 2),
+        "meta": payload.get("meta") or {},
+        "charts": payload.get("charts") or {},
+    }
 
 
 def _extract_core_station_code(station_code: str | None) -> str | None:
@@ -835,12 +852,18 @@ def records_to_tickets_df(records) -> pd.DataFrame:
 
 
 def save_stats_cache(payload: dict) -> None:
-    global _memory_cache
+    global _memory_cache, _memory_charts_cache
     _memory_cache = payload
+    slim = _slim_charts_payload(payload)
+    _memory_charts_cache = slim
     try:
         from cache_store import save_stats_cache_file
-        save_stats_cache_file(payload, STATS_CACHE_FILE)
-        print(f"[stats] Đã lưu cache → {STATS_CACHE_FILE} (+ S3 nếu bật)")
+        pushed = save_stats_cache_file(payload, STATS_CACHE_FILE)
+        if pushed:
+            print(f"[stats] Đã lưu cache → {STATS_CACHE_FILE} + đẩy R2/S3 OK")
+        else:
+            print(f"[stats] Đã lưu cache local → {STATS_CACHE_FILE} "
+                  "(R2/S3 KHÔNG đẩy — xem log [cache_store] phía trên)")
     except Exception as e:
         try:
             with open(STATS_CACHE_FILE, "w", encoding="utf-8") as f:
@@ -849,6 +872,31 @@ def save_stats_cache(payload: dict) -> None:
         except Exception as e2:
             print(f"[stats] Lỗi ghi cache: {e2}")
         print(f"[stats] cache_store save: {e}")
+
+    # Bản gọn (meta + charts) — thứ route /api/stats/* thực sự đọc.
+    try:
+        from cache_store import save_stats_charts_cache_file
+        pushed = save_stats_charts_cache_file(slim, STATS_CHARTS_CACHE_FILE)
+        n_charts = len(slim.get("charts") or {})
+        print(f"[stats] Đã lưu cache CHARTS ({n_charts} biểu đồ) → "
+              f"{STATS_CHARTS_CACHE_FILE}" + (" + R2/S3 OK" if pushed else " (local)"))
+    except Exception as e:
+        print(f"[stats] cache_store save charts: {e}")
+
+
+def _persist_charts_slim() -> None:
+    """Ghi lại bản gọn từ _memory_cache hiện có (gọi sau khi ensure_chart_in_cache
+    bổ sung 1 biểu đồ còn thiếu vào cache cũ)."""
+    global _memory_charts_cache
+    if not _memory_cache:
+        return
+    slim = _slim_charts_payload(_memory_cache)
+    _memory_charts_cache = slim
+    try:
+        from cache_store import save_stats_charts_cache_file
+        save_stats_charts_cache_file(slim, STATS_CHARTS_CACHE_FILE)
+    except Exception as e:
+        print(f"[stats] cache_store persist charts: {e}")
 
 
 def load_stats_cache():
@@ -872,6 +920,37 @@ def load_stats_cache():
                     return data
         except Exception as e2:
             print(f"[stats] Lỗi đọc cache: {e2}")
+    return None
+
+
+def load_stats_charts_cache() -> dict | None:
+    """Trả bản gọn {version, meta, charts} cho route /api/stats/*.
+
+    Thứ tự: RAM → file/R2 bản gọn → (chỉ khi cả 2 trống) rút gọn từ bản
+    đầy đủ. KHÔNG bao giờ ép nạp bản đầy đủ 30 MB chỉ để trả biểu đồ."""
+    global _memory_charts_cache
+    if _memory_charts_cache is not None:
+        return _memory_charts_cache
+    try:
+        from cache_store import load_stats_charts_cache_file
+        data = load_stats_charts_cache_file(STATS_CHARTS_CACHE_FILE)
+        if isinstance(data, dict) and data.get("charts"):
+            _memory_charts_cache = data
+            return data
+    except Exception as e:
+        print(f"[stats] cache_store load charts: {e}")
+
+    # Phao dự phòng: chưa có bản gọn (deploy đầu) → rút từ bản đầy đủ nếu có.
+    full = load_stats_cache()
+    if isinstance(full, dict) and (full.get("charts") or full.get("meta")):
+        slim = _slim_charts_payload(full)
+        _memory_charts_cache = slim
+        try:
+            from cache_store import save_stats_charts_cache_file
+            save_stats_charts_cache_file(slim, STATS_CHARTS_CACHE_FILE)
+        except Exception:
+            pass
+        return slim
     return None
 
 
@@ -1036,14 +1115,26 @@ def _prebuild_chart_payloads(cache_payload: dict) -> dict:
 
 
 def ensure_chart_in_cache(chart_key: str):
-    """Lấy chart đã nướng; nếu cache cũ thiếu thì build 1 lần và ghi lại."""
+    """Lấy chart đã nướng cho route /api/stats/*.
+
+    Đường nhanh (99% trường hợp): đọc từ bản gọn (meta + charts) — vài KB,
+    không đụng tới bản đầy đủ 30 MB. Chỉ khi bản gọn THIẾU đúng biểu đồ này
+    (cache đời cũ) mới nạp bản đầy đủ để build lại từ tickets thô 1 lần."""
+    slim = load_stats_charts_cache()
+    if slim:
+        charts = slim.get("charts")
+        if isinstance(charts, dict) and charts.get(chart_key) is not None:
+            return charts[chart_key]
+
+    # --- Chậm: build lại từ bản đầy đủ (hiếm) ---
     cache = load_stats_cache()
     if not cache:
         return None
     charts = cache.get("charts")
     if not isinstance(charts, dict):
         charts = {}
-    if chart_key in charts and charts[chart_key] is not None:
+    if charts.get(chart_key) is not None:
+        _persist_charts_slim()
         return charts[chart_key]
 
     builders = {
@@ -1091,7 +1182,18 @@ if __name__ == "__main__":
     #   python stats_data.py                 → dùng STATS_DATA_SOURCE (env, mặc định "ccts")
     #   python stats_data.py --source local   → ép đọc file Excel trong thư mục "data/"
     #   python stats_data.py --source local --folder duong/dan/khac
+    #
+    # Nạp .env để cào xong ĐẨY CACHE LÊN R2/S3 (CACHE_S3_*) — script này
+    # không đi qua config.py nên nếu không nạp ở đây thì cache chỉ nằm
+    # local, web trên Render sẽ không thấy dữ liệu thống kê.
     import argparse
+
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv()
+    except Exception:
+        pass
 
     parser = argparse.ArgumentParser(description="Làm mới cache thống kê CCTS.")
     parser.add_argument("--source", choices=["ccts", "local"], default=None,
