@@ -142,6 +142,16 @@ STATS_SCRAPE_ACCOUNTS = [
 ]
 
 
+class SessionKickedError(Exception):
+    """Phiên bị ĐÁ bởi 1 lượt đăng nhập khác (code 512 — "logged in
+    elsewhere"), KHÔNG phải hết hạn tự nhiên. Các action() trong
+    ccts_data.py/stats_source.py nên raise lỗi này (thay vì âm thầm trả
+    dữ liệu rỗng) khi phát hiện response bị đá, để ClientPool.call_with_retry
+    biết mà KHÔNG login lại ngay trong lượt này (tránh đá ngược lại phiên
+    người dùng vừa đăng nhập) — chỉ huỷ cache, báo thất bại, để chu kỳ cào
+    tiếp theo (vd 15 phút sau) tự đăng nhập lại bình thường."""
+
+
 class ClientPool:
     """Pool các CCTSClient đã login, khoá theo username, tự relogin khi cần."""
 
@@ -174,8 +184,18 @@ class ClientPool:
         return client, True
 
     async def call_with_retry(self, username, password, action):
-        """Gọi `await action(client)`; nếu lỗi (có thể do bị đá session) thì
-        huỷ cache + login lại 1 lần rồi thử lại đúng 1 lần nữa.
+        """Gọi `await action(client)`.
+
+        - Nếu action() raise SessionKickedError (bị đá bởi phiên khác, vd
+          người dùng vừa đăng nhập trên web UI): CHỈ huỷ cache + báo thất
+          bại NGAY, KHÔNG đăng nhập lại trong lượt này — tự relogin ngay
+          lúc này chính là hành vi đá ngược lại phiên vừa đăng nhập, gây
+          vòng lặp đá qua đá lại. Chu kỳ cào kế tiếp sẽ tự đăng nhập lại
+          bình thường (không còn ai tranh chấp phiên).
+        - Nếu action() raise lỗi khác (vd phiên hết hạn tự nhiên, lỗi
+          mạng): huỷ cache + login lại 1 lần rồi thử lại đúng 1 lần nữa
+          (an toàn vì không có tranh chấp phiên với người dùng khác).
+
         Trả về (result, success_bool). Không raise ra ngoài."""
         try:
             client, _ = await self.get_or_login(username, password)
@@ -187,8 +207,16 @@ class ClientPool:
         try:
             result = await action(client)
             return result, True
+        except SessionKickedError as e:
+            print(
+                f"[!] [{username}] bị đá session (đăng nhập nơi khác) khi gọi API: {e}. "
+                f"KHÔNG đăng nhập lại ngay trong lượt này (tránh đá ngược lại phiên vừa "
+                f"đăng nhập) — huỷ cache, chờ chu kỳ cào kế tiếp tự đăng nhập lại."
+            )
+            self.invalidate(username)
+            return None, False
         except Exception as e:
-            print(f"[-] Lỗi khi gọi API cho [{username}] (có thể bị đá session): {e}")
+            print(f"[-] Lỗi khi gọi API cho [{username}] (có thể phiên hết hạn tự nhiên): {e}")
             self.invalidate(username)
             try:
                 client, _ = await self.get_or_login(username, password)

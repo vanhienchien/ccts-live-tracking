@@ -1,14 +1,19 @@
 name: Đánh thức app trước 0h VN
 
-# Render free tier ngủ sau ~15 phút không ai truy cập. stats_midnight_loop()
-# trong main.py chỉ chạy cào thống kê lúc 0h VN nếu tiến trình đang SỐNG tại
-# thời điểm đó. Workflow này chỉ ping /healthz (public, nhẹ, không đụng
-# CCTS/Google Sheets) ~10 phút trước 0h để đánh thức Render nếu đang ngủ —
-# không cần secret/token nào, không tốn thêm bandwidth đáng kể.
+# 2026-09-15: workflow này KHÔNG còn giải quyết được vấn đề gốc — dù đánh
+# thức Render lúc 23:50 VN, nếu lượt cào thống kê 0h (chạy bên trong tiến
+# trình web, xem stats_midnight_loop() trong main.py) kéo dài hơn cửa sổ
+# không-traffic của Render, Render vẫn tự ngủ lại GIỮA CHỪNG và mất cache
+# chưa kịp lưu.
+#
+# Đã thay bằng stats-midnight.yml: chạy hẳn `python stats_data.py` trên
+# GitHub Actions (không phụ thuộc Render sống hay ngủ), đẩy cache thẳng lên
+# R2/S3 — Render chỉ cần đọc cache khi có người ghé /stats.
+#
+# Giữ lại file này ở dạng CHỈ BẤM TAY (workflow_dispatch) phòng khi cần
+# đánh thức Render thủ công vì lý do khác (vd trước 1 buổi demo) — đã TẮT
+# lịch tự động 23:50 hàng ngày để không tốn traffic/giờ chạy vô ích.
 on:
-  schedule:
-    # 16:50 UTC = 23:50 giờ Việt Nam (UTC+7).
-    - cron: "50 16 * * *"
   workflow_dispatch: {}
 
 jobs:

@@ -6,11 +6,80 @@ import io
 import json
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 
 import pandas as pd
 import requests
 from cryptography.hazmat.primitives.asymmetric import padding
 from cryptography.hazmat.primitives import serialization
+
+# ===== AN TOÀN KHI BỊ "ĐÁ" (code 512 — đăng nhập nơi khác) =====
+# Đồng bộ với bản vá 2026-09-15 của scripts/api_client.py (client dùng cho
+# các script tự động hoá chạy trên máy Windows). CCTS chỉ cho 1 phiên/tài
+# khoản trên web này — nếu web app (Render) và ai đó đăng nhập tay trên
+# console.cnpowercore.com dùng CHUNG account thì CHẮC CHẮN đá nhau.
+#
+# 2 phát hiện quan trọng khi đối chiếu lại file NÀY với bản đã vá:
+#   1) BUG "success" dạng CHUỖI: server có lúc trả success="false" (chuỗi,
+#      không phải bool) — code cũ dùng `not res_data.get("success", True)`
+#      để phát hiện lỗi, nhưng `not "false"` = False trong Python (chuỗi
+#      không rỗng luôn truthy) -> điều kiện này KHÔNG BAO GIỜ bắt được lỗi
+#      qua nhánh "success" nếu code không nằm sẵn trong ["401","403",
+#      "50001"]. Hệ quả: bị đá (code 512, không nằm trong danh sách đó) từ
+#      TRƯỚC ĐẾN NAY không hề được phát hiện/relogin ở file này — client sẽ
+#      lặng lẽ trả dữ liệu rỗng vô thời hạn cho tới khi tiến trình Render bị
+#      restart. Sửa bằng _is_success() chuẩn hoá cả 2 dạng bool/chuỗi.
+#   2) Tự động relogin NGAY LẬP TỨC khi bị đá là hành vi RỦI RO (dù bug #1
+#      khiến nó chưa từng thực sự chạy tới cho code 512): việc đăng nhập lại
+#      đó lại đá ngược phiên người vừa đăng nhập tay ra. Sau khi sửa bug #1,
+#      nếu giữ nguyên hành vi relogin-ngay sẽ kích hoạt đúng vòng lặp đá qua
+#      đá lại đó. Vì vậy: chỉ tự relogin NGAY cho lỗi hết hạn tự nhiên
+#      (không có ai tranh chấp phiên); riêng code 512 (bị đá thật) thì KHÔNG
+#      tự relogin trong _post() nữa — export_and_download_tickets() tự xử
+#      lý an toàn (đợi rồi relogin, xem _wait_and_relogin_after_kick()); các
+#      hàm khác (search_ticket, get_ticket_follow_records...) sẽ trả thẳng
+#      response 512 về — nơi gọi (ccts_data.py, qua ClientPool) coi đó là 1
+#      lượt cào rỗng và tự thử lại ở chu kỳ 15 phút kế tiếp như bình thường.
+SESSION_INVALID_CODES = {"401", "403", "50001", "512"}
+SESSION_INVALID_KEYWORDS = ("token", "logged in elsewhere", "please log in again")
+EXPORT_KICK_WAIT_SECONDS = 30
+MAX_EXPORT_RELOGIN_ATTEMPTS = 5
+
+
+def _is_success(res_data: dict) -> bool:
+    """Chuẩn hoá field 'success' — server có lúc trả CHUỖI ("true"/"false")
+    thay vì boolean JSON thật (xác nhận qua logs/api_anomalies_*.log của
+    scripts/api_client.py, chữ ký lỗi 512 ngày 2026-09-12: chuỗi "false").
+    So sánh truthy trực tiếp trên chuỗi là SAI vì "false" (chuỗi không rỗng)
+    vẫn truthy trong Python."""
+    val = res_data.get("success", True)
+    if isinstance(val, str):
+        return val.strip().lower() == "true"
+    return bool(val)
+
+
+def _is_session_invalidated(res_data: dict) -> bool:
+    if _is_success(res_data):
+        return False
+    if str(res_data.get("code")) in SESSION_INVALID_CODES:
+        return True
+    message = str(res_data.get("message", "")).lower()
+    return any(kw in message for kw in SESSION_INVALID_KEYWORDS)
+
+
+def _extract_task_pk(res_data: dict) -> Optional[str]:
+    """Cố lấy taskPk của export task vừa tạo trực tiếp từ response của
+    createExportTask (nếu server trả về). Trả None nếu không tìm thấy — nơi
+    gọi sẽ tự chụp nhanh bằng cách gọi lại exportTask/list ngay sau đó."""
+    data = res_data.get("data")
+    if isinstance(data, dict):
+        for key in ("taskPk", "taskPK", "id", "pk", "exportTaskPk"):
+            val = data.get(key)
+            if val is not None:
+                return str(val)
+    elif isinstance(data, (str, int)):
+        return str(data)
+    return None
 
 
 class CCTSClient:
@@ -120,10 +189,22 @@ class CCTSClient:
         print(f"[✓] Đăng nhập thành công! Token: {self.token[:30]}...")
 
     async def _post(self, endpoint, payload=None):
-        """POST helper - Tương thích hoàn toàn với ccts_data.py"""
+        """POST helper - Tương thích hoàn toàn với ccts_data.py.
+
+        AN TOÀN KHI BỊ ĐÁ (2026-09-15, đồng bộ scripts/api_client.py): chỉ
+        tự động đăng nhập lại NGAY khi phiên hết hạn TỰ NHIÊN (401/403/
+        50001 hoặc message chứa "token"/"please log in again") — trường hợp
+        này không có ai tranh chấp phiên nên an toàn để tự phục hồi ngay.
+        Khi bị "đá" thật sự (code 512 — đăng nhập nơi khác), KHÔNG tự đăng
+        nhập lại ở đây nữa: tự relogin ngay lập tức chính là hành vi đá
+        ngược lại phiên người vừa đăng nhập, gây vòng lặp đá qua đá lại rất
+        rủi ro cho 1 web app chạy nền liên tục như thế này. Trả thẳng
+        response 512 về cho nơi gọi (export_and_download_tickets() tự xử lý
+        an toàn qua _wait_and_relogin_after_kick(); các hàm khác coi đây là
+        1 lượt gọi rỗng, tự thử lại ở chu kỳ sau)."""
         if payload is None:
             payload = {}
-        
+
         # Đảm bảo có token
         if isinstance(payload, dict):
             payload = dict(payload)  # copy
@@ -145,32 +226,68 @@ class CCTSClient:
             print(f"[-] Phản hồi không phải JSON hợp lệ từ {endpoint}: {e!r}")
             res_data = {"code": "500", "message": "Invalid JSON", "success": False}
 
-        # Tự động re-login nếu token hết hạn / bị đá phiên (do người khác
-        # đăng nhập cùng tài khoản — CCTS chỉ cho 1 phiên/tài khoản).
-        # LƯU Ý: trước đây code=="403" mà message KHÔNG chứa chữ "token" thì
-        # sẽ KHÔNG kích hoạt relogin (dù 403 đã nằm trong danh sách mã lỗi
-        # auth ở điều kiện ngoài) — CCTS có thể trả 403 kèm message khác
-        # (vd "Forbidden", rỗng...) khi phiên bị đá, khiến script cứ lặp lại
-        # request thất bại âm thầm mà không tự đăng nhập lại. Sửa: coi
-        # code nằm trong ["401", "403", "50001"] LÀ ĐỦ để relogin, không cần
-        # thêm điều kiện message chứa "token" nữa.
-        if res_data.get("code") in ["401", "403", "50001"] or not res_data.get("success", True):
-            is_auth_issue = (
-                str(res_data.get("code")) in ["401", "403", "50001"]
-                or "token" in str(res_data.get("message", "")).lower()
-            )
-            if is_auth_issue:
-                print(f"[!] Phiên đăng nhập không hợp lệ (code={res_data.get('code')!r}, "
-                      f"message={res_data.get('message')!r}) — có thể bị đá phiên do tài khoản "
-                      f"[{self.username}] được đăng nhập ở nơi khác. Đang re-login...")
-                await self.login()
-                # Thử lại lần nữa
-                if isinstance(payload, dict):
-                    payload["token"] = self.token
-                res = await asyncio.to_thread(_execute)
+        if _is_session_invalidated(res_data):
+            code_str = str(res_data.get("code"))
+            was_kicked = code_str == "512"
+
+            if was_kicked:
+                print(f"[!] Tài khoản '{self.username}' bị đăng nhập nơi khác (code 512) khi gọi "
+                      f"{endpoint}. KHÔNG tự đăng nhập lại ở đây (tránh đá ngược phiên vừa đăng "
+                      f"nhập) — trả kết quả 512 về cho nơi gọi tự xử lý.")
+                return res_data
+
+            print(f"[!] Phiên đăng nhập hết hạn tự nhiên (code={res_data.get('code')!r}, "
+                  f"message={res_data.get('message')!r}) cho tài khoản [{self.username}]. "
+                  f"Đang re-login...")
+            await self.login()
+            # Thử lại lần nữa
+            if isinstance(payload, dict):
+                payload["token"] = self.token
+            res = await asyncio.to_thread(_execute)
+            try:
                 res_data = res.json()
+            except (ValueError, json.JSONDecodeError) as e:
+                print(f"[-] Phản hồi không phải JSON hợp lệ từ {endpoint} (sau re-login): {e!r}")
+                res_data = {"code": "500", "message": "Invalid JSON", "success": False}
 
         return res_data
+
+    async def _wait_and_relogin_after_kick(self, wait_seconds: int = EXPORT_KICK_WAIT_SECONDS) -> bool:
+        """Chờ `wait_seconds` giây rồi đăng nhập lại "êm" đúng 1 lần sau khi
+        bị đá (code 512). KHÔNG dùng lại kiểu đăng nhập lại ngay lập tức —
+        đó chính là hành vi rủi ro đã bỏ khỏi _post(). Trả về True nếu
+        đăng nhập lại thành công, False nếu vẫn thất bại."""
+        print(f"[i] Bị đá — đợi {wait_seconds}s rồi đăng nhập lại (tránh đá ngược lại phiên vừa "
+              f"đăng nhập)...")
+        await asyncio.sleep(wait_seconds)
+        try:
+            await self.login()
+            return True
+        except Exception as e:
+            print(f"[!] Đăng nhập lại thất bại sau khi bị đá: {e}")
+            return False
+
+    @staticmethod
+    def _pick_own_export_task(tasks: list, task_pk=None, file_name: str = None) -> Optional[dict]:
+        """Tìm ĐÚNG task export của mình trong danh sách server trả về —
+        KHÔNG BAO GIỜ lấy đại tasks[0]. Danh sách export task là CHUNG cho
+        account, sắp mới nhất lên đầu; nếu trong lúc mình đang chờ/bị đá mà
+        có người khác (vd đăng nhập tay trên console.cnpowercore.com) export
+        1 file mới, file đó sẽ nhảy lên đầu danh sách -> lấy tasks[0] sẽ trả
+        NHẦM FILE của người khác thay vì file mình vừa yêu cầu (bug thực tế
+        đã xảy ra ở scripts/api_client.py, vá ngày 2026-09-15). `taskPk` là
+        định danh duy nhất mỗi task — xác nhận từ chính source code frontend
+        thật (component/dialog/exportDialog.js dùng đúng field này để khớp
+        task khi nhận cập nhật qua WebSocket)."""
+        if task_pk is not None:
+            for t in tasks:
+                if str(t.get("taskPk")) == str(task_pk):
+                    return t
+        if file_name:
+            for t in tasks:
+                if t.get("fileName") == file_name:
+                    return t
+        return None
 
     # ------------------------------------------------------------------
     # Tra cứu chi tiết ticket (search + lịch sử trạng thái) — dùng để làm
@@ -348,38 +465,114 @@ class CCTSClient:
             sla_timeout=sla_timeout,
             offset=offset,
         )
-        if not res_export.get("success") and str(res_export.get("code")) not in ("200", "0"):
+
+        kick_recoveries = 0
+        task_pk = None
+        file_name = None
+
+        # AN TOÀN KHI BỊ ĐÁ NGAY LÚC GỬI YÊU CẦU (2026-09-15, đồng bộ
+        # scripts/api_client.py): _post() không còn tự relogin cho code 512
+        # nữa (xem _post()) -> tự xử lý ở đây bằng cách đợi rồi gửi lại. An
+        # toàn vì CHƯA có task nào được server ghi nhận, không có rủi ro
+        # trùng file.
+        while _is_session_invalidated(res_export) and str(res_export.get("code")) == "512":
+            kick_recoveries += 1
+            if kick_recoveries > MAX_EXPORT_RELOGIN_ATTEMPTS:
+                print(f"[!] Bị đá liên tục {MAX_EXPORT_RELOGIN_ATTEMPTS} lần ngay lúc gửi yêu cầu "
+                      f"export cho [{self.username}]. Dừng lại — chưa có export nào được tạo trên "
+                      f"server nên không mất dữ liệu.")
+                return None
+            await self._wait_and_relogin_after_kick()
+            res_export = await self.create_export_task(
+                start_time, end_time,
+                ticket_status=ticket_status,
+                sla_timeout=sla_timeout,
+                offset=offset,
+            )
+
+        if not _is_success(res_export) and str(res_export.get("code")) not in ("200", "0"):
             print(f"[-] Thất bại khi gửi yêu cầu xuất: {res_export.get('message')}")
             return None
 
-        print("[+] Đã gửi yêu cầu xuất. Đang chờ file sẵn sàng...")
+        # Cố lấy taskPk NGAY từ response tạo task (nếu server trả về) — cách
+        # chính xác nhất, không có khoảng hở đua tranh với export của người
+        # khác. Nếu không có, chụp nhanh NGAY LẬP TỨC bản ghi mới nhất ngay
+        # sau khi tạo (khoảng hở đua tranh chỉ còn đúng 1 round-trip này).
+        task_pk = _extract_task_pk(res_export)
+        if not task_pk:
+            snap = await self.get_export_tasks(page_num=1, page_size=5)
+            if _is_success(snap):
+                snap_data = snap.get("data", {})
+                snap_tasks = snap_data.get("list", []) if isinstance(snap_data, dict) else []
+                if not isinstance(snap_tasks, list):
+                    snap_tasks = snap_data.get("records", [])
+                if snap_tasks:
+                    task_pk = snap_tasks[0].get("taskPk")
+                    file_name = snap_tasks[0].get("fileName")
+
+        if not task_pk and not file_name:
+            print(f"[!] CẢNH BÁO: không xác định được taskPk/fileName của export vừa tạo cho "
+                  f"[{self.username}] — nếu có người khác export file khác trong lúc chờ, có thể "
+                  f"lấy nhầm file.")
+
+        print(f"[+] Đã gửi yêu cầu xuất (taskPk={task_pk}). Đang chờ file sẵn sàng...")
         start_poll = time.time()
         download_url = None
         current_interval = check_interval
         status = "n/a"
 
         while time.time() - start_poll < timeout:
-            res_tasks = await self.get_export_tasks(page_num=1, page_size=5)
+            res_tasks = await self.get_export_tasks(page_num=1, page_size=20)
+
+            if _is_session_invalidated(res_tasks) and str(res_tasks.get("code")) == "512":
+                kick_recoveries += 1
+                if kick_recoveries > MAX_EXPORT_RELOGIN_ATTEMPTS:
+                    print(f"[!] Bị đá liên tục {MAX_EXPORT_RELOGIN_ATTEMPTS} lần khi đang chờ file "
+                          f"export cho [{self.username}]. Dừng lại.")
+                    return None
+                # Task đã được server ghi nhận & vẫn xử lý nền dù phiên bị đá hay
+                # không -> KHÔNG gửi lại createExportTask, chỉ đăng nhập lại rồi hỏi lại.
+                await self._wait_and_relogin_after_kick()
+                continue
+
             data = res_tasks.get("data", {})
             tasks = data.get("list", []) if isinstance(data, dict) else []
             if not isinstance(tasks, list):
                 tasks = data.get("records", [])
 
-            if tasks:
+            if not tasks:
+                await asyncio.sleep(current_interval)
+                continue
+
+            # QUAN TRỌNG: KHÔNG lấy đại tasks[0] — có thể là task của người khác vừa
+            # export trong lúc mình đang chờ/bị đá (xem _pick_own_export_task()).
+            latest = self._pick_own_export_task(tasks, task_pk=task_pk, file_name=file_name)
+
+            if latest is None:
+                if task_pk or file_name:
+                    print(f"[*] Chưa thấy task export của mình (taskPk={task_pk}) trong "
+                          f"{len(tasks)} task gần nhất. Đợi {current_interval}s...")
+                    await asyncio.sleep(current_interval)
+                    current_interval = min(current_interval + 5, 20)
+                    continue
+                # Không có định danh nào để khớp -> fallback tasks[0] kèm cảnh báo.
+                print(f"[!] CẢNH BÁO: không có taskPk/fileName để khớp chính xác cho "
+                      f"[{self.username}] — dùng tạm task mới nhất trong danh sách.")
                 latest = tasks[0]
-                download_url = (
-                    latest.get("fileUrl")
-                    or latest.get("downloadUrl")
-                    or latest.get("fileLocation")
-                    or latest.get("accessLocation")
-                )
-                status = str(latest.get("status"))
-                if status == "2" and download_url:
-                    print(f"[✓] File Excel sẵn sàng: {download_url}")
-                    break
-                if latest.get("errorMsg"):
-                    print(f"[-] Task xuất lỗi từ server: {latest.get('errorMsg')}")
-                    return None
+
+            download_url = (
+                latest.get("fileUrl")
+                or latest.get("downloadUrl")
+                or latest.get("fileLocation")
+                or latest.get("accessLocation")
+            )
+            status = str(latest.get("status"))
+            if status == "2" and download_url:
+                print(f"[✓] File Excel sẵn sàng (taskPk={latest.get('taskPk')}): {download_url}")
+                break
+            if latest.get("errorMsg"):
+                print(f"[-] Task xuất lỗi từ server: {latest.get('errorMsg')}")
+                return None
 
             print(f"[*] File chưa sẵn sàng (status={status}). Đợi {current_interval}s...")
             await asyncio.sleep(current_interval)

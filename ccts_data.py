@@ -21,9 +21,10 @@ import pandas as pd
 from utils import extract_core_station_code, parse_duration_to_hours
 from config import CCTS_ACCOUNTS
 import github_data_store
+from api_client import _is_session_invalidated
 from ccts_shared import (
-    VN_TZ, CCTS_API_LOCK, ClientPool, is_unmanaged_region, load_static_data_filtered,
-    OPEN_STATUSES, CLOSED_STATUSES, CLOSED_STATUSES_NORM,
+    VN_TZ, CCTS_API_LOCK, ClientPool, SessionKickedError, is_unmanaged_region,
+    load_static_data_filtered, OPEN_STATUSES, CLOSED_STATUSES, CLOSED_STATUSES_NORM,
 )
 
 CACHE_FILE = "last_known_data.json"
@@ -178,7 +179,17 @@ _pool = ClientPool()
 
 
 async def _post_find_tickets(client, username, ticket_statuses, start_str, stop_str):
-    """Gọi API find ticket, gắn _source_account, trả list thô."""
+    """Gọi API find ticket, gắn _source_account, trả list thô.
+
+    QUAN TRỌNG (2026-09-15): client._post() không raise khi phiên bị đá/hết
+    hạn — nó trả về 1 dict lỗi (vd code=512 "logged in elsewhere") giống hệt
+    cấu trúc dict thành công. Nếu không kiểm tra ở đây, `data.get("list", [])`
+    sẽ ra [] và hàm này coi như "cào thành công, chỉ là không có ticket nào"
+    — khiến _fetch_tickets_window_multi_account() tính all_success=True dù
+    tài khoản này thực chất bị đá, làm dữ liệu bị THIẾU ÂM THẦM thay vì kích
+    hoạt fallback giữ cache cũ. Do đó phải raise tường minh ở đây khi phát
+    hiện phiên không hợp lệ, để ClientPool.call_with_retry() biết mà báo
+    thất bại (ok=False) đúng lúc."""
     payload = {
         "page": {"pageNum": 1, "pageSize": 2000},
         "timezoneOffset": 420,
@@ -187,6 +198,19 @@ async def _post_find_tickets(client, username, ticket_statuses, start_str, stop_
         "ticketStatus": ticket_statuses,
     }
     res_data = await client._post(ENDPOINT_FIND_TICKET, payload)
+
+    if _is_session_invalidated(res_data):
+        code_str = str(res_data.get("code"))
+        message = res_data.get("message")
+        if code_str == "512":
+            raise SessionKickedError(
+                f"[{username}] bị đá session (code=512, message={message!r}) khi gọi findCCTSTicket."
+            )
+        raise RuntimeError(
+            f"[{username}] phiên không hợp lệ sau khi gọi findCCTSTicket "
+            f"(code={code_str!r}, message={message!r})."
+        )
+
     data = res_data.get("data", {})
     tickets = data.get("list", []) if isinstance(data, dict) else data
     if not isinstance(tickets, list):
