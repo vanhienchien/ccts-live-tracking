@@ -14,7 +14,7 @@ import json
 import re
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 import pandas as pd
 
@@ -66,24 +66,60 @@ ENRICH_MAX_CONCURRENCY = 4  # số request tra cứu chi tiết chạy song song
 CCTS_LOCK_TIMEOUT_SECONDS = 300
 
 # ==========================================
-# Diff Open-ticket giữa 2 lần cào liên tiếp (mỗi TICKET_REFRESH_SECONDS) để:
-#   1) Đếm real-time số ticket "vừa đóng" theo KTV (không cần tải lại lịch sử).
-#   2) Phân biệt ticket "mới xuất hiện" trong Open-list là MỚI THẬT hay là
-#      ticket CŨ vừa mở lại (mà lần cào trước lỡ không thấy — session lỗi,
-#      restart app, hoặc nó đóng/mở lại nhanh hơn 1 chu kỳ).
+# Đếm real-time số ticket "vừa đóng" theo KTV giữa 2 lần cào liên tiếp (mỗi
+# TICKET_REFRESH_SECONDS) — KHÔNG cần tải lại lịch sử, chỉ so sánh snapshot
+# Open của LẦN CÀO NGAY TRƯỚC (_latest_ticket_rows/last_known_data.json) với
+# lần này (xem _rollup_closed_by_tech bên dưới).
 #
-# Không cần ledger lưu toàn bộ lịch sử ticket: chỉ cần đúng snapshot Open
-# của LẦN CÀO NGAY TRƯỚC (đã có sẵn trong _latest_ticket_rows/last_known_data.json)
-# + field "Create Time" (ngày tạo ticket gốc, API trả sẵn) để phân loại:
-#   - Create Time cách hiện tại < NEW_TICKET_GRACE_HOURS -> ticket mới thật,
-#     không cần tra cứu gì thêm.
-#   - Create Time cũ hơn -> khả năng là ticket cũ vừa mở lại -> tra cứu
-#     timeline thật qua _lookup_ticket_enrichment() (dùng lại machinery đã có
-#     cho overdue-EV) để xác nhận is_reopened, không đoán qua cache.
-NEW_TICKET_GRACE_HOURS = 2  # rộng hơn nhiều 1 chu kỳ cào (mặc định 600s) để chịu được lệch/miss 1-2 chu kỳ
-CREATE_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
+# 2026-09-16: đã BỎ phần "phân biệt ticket mới xuất hiện là mới thật hay cũ
+# mở lại" từng ở đây (_classify_new_vs_reopened, dựa vào Create Time + tra
+# cứu từng ticket) — is_reopened giờ được xác nhận đầy đủ & rẻ hơn cho MỌI
+# ticket đang mở qua _fetch_reopen_map_via_export() (export Excel, xem bên
+# dưới), không cần đoán qua diff giữa 2 chu kỳ nữa.
 CLOSED_COUNTER_FILE = "closed_today_counts.json"
 
+# Mốc bắt đầu cửa sổ cào ticket "đang mở" — dùng CHUNG cho fetch_live_tickets()
+# (API list) và _fetch_reopen_map_via_export() (export Excel) để cả 2 luôn
+# nhìn cùng 1 phạm vi ticket, tránh lệch tập hợp giữa 2 nguồn.
+OPEN_WINDOW_START_STR = "2026-04-30 17:00:00"
+
+# ==========================================
+# Xác nhận is_reopened cho MỌI ticket đang mở (không giới hạn EV/overdue như
+# _enrich_open_overdue_ev_tickets ở trên) bằng export Excel lọc SERVER-SIDE
+# theo ticket_status=OPEN_STATUSES — nhanh (~20s theo thực nghiệm, khác hẳn
+# export ĐẦY ĐỦ lịch sử dùng cho /stats có thể mất tới 180s) vì chỉ trả về
+# đúng các ticket đang ở 4 trạng thái mở, kèm sheet "Events Record" (lịch sử
+# followRecordStatus thật) cho từng ticket đó — y hệt dữ liệu
+# scripts/auto_ccts_optimized.py đã dùng để tự phát hiện ticket mở lại.
+#
+# 2026-09-16: bổ sung theo yêu cầu — trước đó chỉ có 2 nguồn phát hiện mở lại
+# (EV+overdue qua tra cứu từng ticket, và diff giữa 2 chu kỳ cào liên tiếp),
+# cả 2 đều bỏ sót ticket BSS hoặc ticket đã mở lại từ TRƯỚC khi app bắt đầu
+# theo dõi (chưa từng thấy nó "biến mất" để làm mốc so sánh). Nguồn này chạy
+# MỖI chu kỳ, không cần job nền riêng, không cần cache 2 lớp.
+#
+# Tối ưu RAM: export_and_download_tickets() LUÔN parse đủ 6 sheet trước rồi
+# mới trim cột theo usecols_map (xem api_client.py) — nếu không khai báo,
+# 5 sheet ta không cần (Ticket Information, Appointment, Solutions, Spare
+# Parts Record, Additional information) vẫn bị giữ FULL-WIDTH trong RAM cho
+# tới khi hàm return. Khai báo trim CHO CẢ 6 sheet (chỉ giữ "Ticket ID" ở 5
+# sheet không dùng, và đúng 2 cột cần ở "Events Record") để không có sheet
+# nào full-width sống trong RAM, kể cả tạm thời — quan trọng vì 2 tài khoản
+# chạy song song (asyncio.gather) nhân đôi mức đỉnh bộ nhớ cùng lúc.
+REOPEN_EXPORT_USECOLS = {
+    "Ticket Information": ["Ticket ID"],
+    "Events Record": ["Ticket ID", "Ticket Status"],
+    "Spare Parts Record": ["Ticket ID"],
+    "Appointment": ["Ticket ID"],
+    "Additional information": ["Ticket ID"],
+    "Solutions": ["Ticket ID"],
+}
+
+# Timeout riêng cho export "chỉ ticket đang mở" (mặc định hàm dùng 180s —
+# hiệu chỉnh cho export ĐẦY ĐỦ lịch sử 60 ngày của /stats, quá rộng rãi cho
+# export nhỏ này, thực tế ~20s). Hạ xuống để nhả CCTS_API_LOCK sớm hơn nếu
+# có sự cố, thay vì treo gần hết CCTS_LOCK_TIMEOUT_SECONDS mỗi 600s.
+REOPEN_EXPORT_TIMEOUT_SECONDS = int(os.environ.get("REOPEN_EXPORT_TIMEOUT_SECONDS", "90"))
 # ==========================================
 # Cảnh báo SỚM ticket Open + chưa có thông tin xử lý (has_no_info) sắp quá
 # hạn 48h — hạ ngưỡng enrichment xuống 47.5h (còn ≤30 phút) để is_no_info_
@@ -359,10 +395,16 @@ async def fetch_live_tickets():
     Trả về (DataFrame, fetch_success_bool, success_accounts).
     fetch_success=True chỉ khi mọi tài khoản CCTS đều cào thành công.
     success_accounts = [(username, password), ...] các tài khoản đã cào
-    thành công trong chu kỳ này."""
-    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    thành công trong chu kỳ này.
+
+    QUAN TRỌNG (2026-09-16): phải dùng giờ VN (VN_TZ), KHÔNG dùng
+    datetime.now() trần — xem giải thích chi tiết ở _fetch_reopen_map_via_export().
+    Bug này tồn tại từ trước (Render chạy UTC, createStopTime bị lùi ~7h so
+    với thời điểm thật), khả năng làm ticket vừa tạo trong ~7h gần nhất bị
+    thiếu khỏi bản đồ cho tới khi cửa sổ giờ trôi qua đủ xa."""
+    now_str = datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
     raw, any_success, success_accounts = await _fetch_tickets_window_multi_account(
-        OPEN_STATUSES, "2026-04-30 17:00:00", now_str
+        OPEN_STATUSES, OPEN_WINDOW_START_STR, now_str
     )
 
     processed = _process_raw_tickets(raw)
@@ -559,96 +601,107 @@ def _apply_enrichment(status, ticket_id, enrichment_map):
     return status_display, severity_override, is_reopened, has_no_info
 
 
-def _parse_create_time_utc(value):
-    """Parse "Create Time" của CCTS thành datetime UTC-naive. API trả giờ
-    UTC (create_export_task() tự trừ 7h khi GỬI lên nên chiều ngược lại —
-    ĐỌC về — là giờ gốc UTC, chưa +7 để ra giờ VN). Trả None nếu không parse
-    được (không đoán bừa — nơi gọi sẽ coi là "cần tra cứu lại cho chắc")."""
-    if value is None:
-        return None
-    text = str(value).strip()
-    if not text or text.lower() in {"nan", "none", "null"}:
-        return None
-    for fmt in CREATE_TIME_FORMATS:
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    return None
+def _merge_enrichment(base, additions):
+    """Merge `additions` vào `base` theo TỪNG KEY con (is_reopened/has_no_info),
+    KHÔNG ghi đè nguyên cả dict — nếu chỉ merge thô bằng {**base, **additions},
+    1 ticket đã có has_no_info=True từ nguồn A sẽ bị MẤT field đó khi nguồn B
+    chỉ trả về {"is_reopened": True} (thiếu has_no_info), do dict của B thay
+    thế toàn bộ dict cũ thay vì bổ sung. Trả về dict MỚI (không sửa base)."""
+    merged = dict(base)
+    for tid, data in additions.items():
+        merged[tid] = {**merged.get(tid, {}), **data}
+    return merged
 
 
-async def _classify_new_vs_reopened(df_current_open, previous_ticket_ids, success_accounts):
-    """So sánh Open-ticket hiện tại với snapshot Open của LẦN CÀO TRƯỚC
-    (previous_ticket_ids) để tìm các ticket "mới xuất hiện" — không có trong
-    lần trước. Với mỗi ticket mới xuất hiện, phân loại:
+async def _export_events_for_account(username, password, start_str, stop_str):
+    """Xuất Excel (lọc server-side theo OPEN_STATUSES) cho 1 tài khoản, trả về
+    DataFrame sheet "Events Record" (rỗng nếu lỗi/không có gì). Dùng lại
+    ClientPool.call_with_retry() nên tự login/relogin 1 lần khi cần — bản
+    thân export_and_download_tickets() cũng đã tự xử lý bị đá session trong
+    lúc chờ file (xem api_client.py), ở đây chỉ cần retry nếu toàn bộ lượt
+    export thất bại (vd lỗi mạng, timeout tạo task)."""
+    async def _action(client):
+        dfs = await client.export_and_download_tickets(
+            start_time=start_str, end_time=stop_str, ticket_status=OPEN_STATUSES,
+            timeout=REOPEN_EXPORT_TIMEOUT_SECONDS, usecols_map=REOPEN_EXPORT_USECOLS,
+        )
+        if not dfs:
+            raise RuntimeError("export_and_download_tickets trả về rỗng")
+        return dfs.get("Events Record")
 
-    - Create Time cách hiện tại (UTC) < NEW_TICKET_GRACE_HOURS -> ticket MỚI
-      THẬT (vừa tạo) -> không cần tra cứu gì thêm, is_reopened=False.
-    - Create Time cũ hơn (hoặc không parse được) -> KHÔNG đoán qua cache —
-      tra cứu timeline thật qua _lookup_ticket_enrichment() (machinery đã
-      dùng cho overdue-EV) để xác nhận is_reopened/has_no_info dựa trên
-      followRecordStatus thật, không dựa trên "có/không có trong cache".
-
-    Trả về dict {ticket_id_str: {"is_reopened": bool, "has_no_info": bool}}
-    — CHỈ chứa các ticket mới xuất hiện đã phân loại được (áp dụng cho MỌI
-    ticket mới xuất hiện, không giới hạn EV/overdue như enrichment kia — vì
-    mục đích khác nhau: cái này phục vụ đếm real-time, không phải cảnh báo
-    UI). Không raise.
-
-    LƯU Ý: success_accounts CHỈ cần cho nhánh tra cứu lại (ticket Create Time
-    cũ) — nhánh "mới thật" theo Create Time không gọi API gì cả, nên KHÔNG
-    được early-return {} chỉ vì success_accounts rỗng (bug đã sửa 2026-09-16:
-    trước đó success_accounts=[] làm mất luôn cả kết quả genuinely_new)."""
-    if df_current_open.empty:
-        return {}
-
-    current_ids = {str(t) for t in df_current_open["Ticket ID"].tolist() if t}
-    new_ids = current_ids - set(previous_ticket_ids or ())
-    if not new_ids:
-        return {}
-
-    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
-    create_time_by_id = dict(zip(
-        df_current_open["Ticket ID"].astype(str), df_current_open.get("Create Time", pd.Series(dtype=object))
-    ))
-
-    genuinely_new = set()
-    need_lookup = set()
-    for tid in new_ids:
-        created = _parse_create_time_utc(create_time_by_id.get(tid))
-        if created is not None and (now_utc - created) < timedelta(hours=NEW_TICKET_GRACE_HOURS):
-            genuinely_new.add(tid)
-        else:
-            need_lookup.add(tid)
-
-    result = {tid: {"is_reopened": False, "has_no_info": False} for tid in genuinely_new}
-    if not need_lookup:
-        return result
-
-    clients = []
-    for username, password in success_accounts:
-        try:
-            client, _ = await _pool.get_or_login(username, password)
-            clients.append(client)
-        except Exception as e:
-            print(f"[!] Không thể đăng nhập [{username}] để tra cứu ticket mới xuất hiện: {e}")
-    if not clients:
-        return result
-
-    semaphore = asyncio.Semaphore(ENRICH_MAX_CONCURRENCY)
-
-    async def _bounded_lookup(ticket_id):
-        async with semaphore:
-            return ticket_id, await _lookup_ticket_enrichment(clients, ticket_id)
-
-    print(f"[ccts_data] {len(need_lookup)} ticket mới xuất hiện có Create Time cũ "
-          f"(hoặc không parse được) — tra cứu lại timeline thật để xác nhận mở lại.")
-    lookups = await asyncio.gather(*(_bounded_lookup(tid) for tid in sorted(need_lookup)))
-    for tid, data in lookups:
-        if data is not None:
-            result[tid] = data
-
+    result, ok = await _pool.call_with_retry(username, password, _action)
+    if not ok or result is None:
+        return pd.DataFrame()
     return result
+
+
+async def _fetch_reopen_map_via_export(success_accounts):
+    """Xác nhận is_reopened cho MỌI ticket đang mở (không giới hạn EV/overdue)
+    bằng export Excel lọc theo OPEN_STATUSES — xem giải thích ở khai báo
+    hằng số OPEN_WINDOW_START_STR phía trên. Chạy THÊM song song với
+    fetch_live_tickets(), KHÔNG thay thế: nếu export lỗi/timeout, chỉ mất
+    is_reopened của CHU KỲ NÀY (map vẫn hiển thị bình thường bằng dữ liệu vị
+    trí/trạng thái đã cào được), không raise.
+
+    Trả {ticket_id_str: {"is_reopened": True}} — CHỈ chứa ticket đã XÁC NHẬN
+    mở lại (không có nghĩa "chưa xuất hiện ở đây" là "chắc chắn không mở lại"
+    — vd export lỗi cho 1 tài khoản thì ticket của tài khoản đó vẫn thiếu)."""
+    if not success_accounts:
+        return {}
+
+    # QUAN TRỌNG: phải dùng giờ VN (VN_TZ), KHÔNG dùng datetime.now() trần —
+    # server chạy trên Render mặc định giờ hệ thống là UTC (không có biến
+    # môi trường TZ), trong khi create_export_task() nhận start/end time kèm
+    # timezoneOffset=420 (7h) với ngụ ý chuỗi truyền vào LÀ giờ VN. Nếu lỡ
+    # truyền datetime.now() (thực chất là giờ UTC) vào như thể là giờ VN, mốc
+    # "end_time" gửi lên sẽ bị lùi ~7h so với thời điểm thật -> export bỏ sót
+    # ticket vừa tạo trong ~7h gần nhất. Cùng quy ước đã dùng ở
+    # stats_source.scrape_time_range() (nguồn export đã chạy ổn định lâu nay).
+    now_str = datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+    async def _do_export():
+        print(
+            f"[ccts_data] Đã giữ CCTS_API_LOCK — export Events Record (chỉ ticket đang mở) "
+            f"để xác nhận is_reopened cho MỌI ticket ({len(success_accounts)} tài khoản)..."
+        )
+        results = await asyncio.gather(
+            *(
+                _export_events_for_account(username, password, OPEN_WINDOW_START_STR, now_str)
+                for username, password in success_accounts
+            ),
+            return_exceptions=True,
+        )
+        print("[ccts_data] Nhả CCTS_API_LOCK (export Events Record).")
+        return results
+
+    async with CCTS_API_LOCK:
+        try:
+            results = await asyncio.wait_for(_do_export(), timeout=CCTS_LOCK_TIMEOUT_SECONDS)
+        except asyncio.TimeoutError:
+            print(f"[!] Export Events Record vượt quá {CCTS_LOCK_TIMEOUT_SECONDS}s — huỷ, nhả khoá.")
+            return {}
+
+    reopen_map: dict[str, dict] = {}
+    for result in results:
+        if isinstance(result, Exception):
+            print(f"[!] Lỗi export Events Record: {result}")
+            continue
+        events_df = result
+        if events_df is None or events_df.empty:
+            continue
+        events_df = events_df.copy()
+        events_df.columns = [str(c).strip() for c in events_df.columns]
+        if "Ticket ID" not in events_df.columns or "Ticket Status" not in events_df.columns:
+            print("[!] Sheet Events Record thiếu cột Ticket ID/Ticket Status — bỏ qua.")
+            continue
+        events_df["Ticket ID"] = events_df["Ticket ID"].astype(str).str.strip()
+        events_df["_status"] = events_df["Ticket Status"].astype(str).str.strip().str.lower()
+        for tid, g in events_df.groupby("Ticket ID"):
+            if g["_status"].isin(REOPEN_TRIGGER_STATUSES).any():
+                reopen_map[tid] = {"is_reopened": True}
+
+    print(f"[+] Export Events Record xác nhận {len(reopen_map)} ticket đang mở lại (mọi loại trụ).")
+    return reopen_map
 
 
 def _rollup_closed_by_tech(previous_rows, current_open_ids):
@@ -935,17 +988,19 @@ async def refresh_all_ccts_data(previous_ticket_rows=None):
 
     enrichment_map = await _enrich_open_overdue_ev_tickets(df_filtered, success_accounts)
 
-    # Diff với snapshot Open lần trước — CHỈ khi lần cào NÀY thành công (nếu
+    # Xác nhận is_reopened cho MỌI ticket đang mở (không giới hạn EV/overdue)
+    # bằng export Excel — chạy MỖI chu kỳ, độc lập với việc có snapshot chu
+    # kỳ trước hay không (khác với diff bên dưới, vốn cần previous_ticket_rows).
+    if any_success:
+        export_reopen_map = await _fetch_reopen_map_via_export(success_accounts)
+        if export_reopen_map:
+            enrichment_map = _merge_enrichment(enrichment_map, export_reopen_map)
+
+    # Đếm "vừa đóng" theo KT — CHỈ khi lần cào NÀY thành công (nếu
     # any_success=False, df_filtered có thể rỗng/thiếu do lỗi, không phải vì
     # ticket thật sự đóng hết -> diff lúc đó sẽ đếm nhầm cả loạt "đã đóng").
     if any_success and previous_ticket_rows is not None:
-        previous_ids = {str(r.get("ticket_id")) for r in previous_ticket_rows if r.get("ticket_id")}
         current_open_ids = {str(t) for t in df_filtered["Ticket ID"].tolist()} if not df_filtered.empty else set()
-
-        reopen_map = await _classify_new_vs_reopened(df_filtered, previous_ids, success_accounts)
-        if reopen_map:
-            enrichment_map = {**enrichment_map, **reopen_map}
-
         closed_by_tech = _rollup_closed_by_tech(previous_ticket_rows, current_open_ids)
         counter = _update_closed_today_counter(closed_by_tech)
     else:
