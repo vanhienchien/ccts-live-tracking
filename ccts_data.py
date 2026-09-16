@@ -14,7 +14,7 @@ import json
 import re
 import asyncio
 from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 
@@ -64,6 +64,39 @@ ENRICH_MAX_CONCURRENCY = 4  # số request tra cứu chi tiết chạy song song
 # (kể cả relogin thử lại) vẫn có thể kéo dài — trần này đảm bảo module kia
 # (stats_data.py, dùng chung khoá) không bị chờ vô thời hạn.
 CCTS_LOCK_TIMEOUT_SECONDS = 300
+
+# ==========================================
+# Diff Open-ticket giữa 2 lần cào liên tiếp (mỗi TICKET_REFRESH_SECONDS) để:
+#   1) Đếm real-time số ticket "vừa đóng" theo KTV (không cần tải lại lịch sử).
+#   2) Phân biệt ticket "mới xuất hiện" trong Open-list là MỚI THẬT hay là
+#      ticket CŨ vừa mở lại (mà lần cào trước lỡ không thấy — session lỗi,
+#      restart app, hoặc nó đóng/mở lại nhanh hơn 1 chu kỳ).
+#
+# Không cần ledger lưu toàn bộ lịch sử ticket: chỉ cần đúng snapshot Open
+# của LẦN CÀO NGAY TRƯỚC (đã có sẵn trong _latest_ticket_rows/last_known_data.json)
+# + field "Create Time" (ngày tạo ticket gốc, API trả sẵn) để phân loại:
+#   - Create Time cách hiện tại < NEW_TICKET_GRACE_HOURS -> ticket mới thật,
+#     không cần tra cứu gì thêm.
+#   - Create Time cũ hơn -> khả năng là ticket cũ vừa mở lại -> tra cứu
+#     timeline thật qua _lookup_ticket_enrichment() (dùng lại machinery đã có
+#     cho overdue-EV) để xác nhận is_reopened, không đoán qua cache.
+NEW_TICKET_GRACE_HOURS = 2  # rộng hơn nhiều 1 chu kỳ cào (mặc định 600s) để chịu được lệch/miss 1-2 chu kỳ
+CREATE_TIME_FORMATS = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d")
+CLOSED_COUNTER_FILE = "closed_today_counts.json"
+
+# ==========================================
+# Cảnh báo SỚM ticket Open + chưa có thông tin xử lý (has_no_info) sắp quá
+# hạn 48h — hạ ngưỡng enrichment xuống 47.5h (còn ≤30 phút) để is_no_info_
+# critical hiện lên UI TRƯỚC khi ticket thật sự overdue, đủ thời gian cho
+# người phân việc (QC) tự kiểm tra + yêu cầu kỹ thuật xử lý tay.
+#
+# 2026-09-16: ĐÃ BỎ tính năng tự động đóng (ticket_auto_resolver.py, port từ
+# scripts/ticket_closer_mul.py) — user quyết định vì rủi ro tính công sai
+# cho kỹ thuật (KTV đang xử lý/chuẩn bị đóng tay đúng lúc hệ thống đóng từ xa
+# trước). Chỉ còn lại phần CẢNH BÁO (enrichment sớm hơn), không còn hành
+# động ghi/đóng ticket tự động nào cả.
+# ==========================================
+NO_INFO_EARLY_WARNING_HOURS = float(os.environ.get("NO_INFO_EARLY_WARNING_HOURS", "47.5"))
 
 
 def _status_color(status):
@@ -311,6 +344,7 @@ def _process_raw_tickets(raw_tickets):
             "Problem Description": item.get("errorDesc"),
             "Ticket Status": item.get("cctsTicketStatus"),
             "Ticket Duration": item.get("duration"),
+            "Create Time": item.get("createTime"),
             "Creator": item.get("ticketCreator"),
             "Source_Account": item.get("_source_account"),
             "Address": item.get("address") or item.get("stationAddress") or "",
@@ -425,10 +459,17 @@ async def _lookup_ticket_enrichment(clients, ticket_id):
 
 
 async def _enrich_open_overdue_ev_tickets(df_tickets_filtered, success_accounts):
-    """Với các ticket đang Open + overdue (>48h) + là trụ EV (không phải
-    BSS): tra cứu chi tiết qua CCTSClient.search_ticket() (song song có
-    giới hạn ENRICH_MAX_CONCURRENCY) để phát hiện ticket "mở lại" và ticket
-    Open-overdue chưa có bất kỳ thông tin xử lý nào.
+    """Với các ticket đang Open + SẮP hoặc ĐÃ overdue (>=NO_INFO_EARLY_WARNING_HOURS,
+    mặc định 47.5h/còn ≤30') + là trụ EV (không phải BSS): tra cứu chi tiết
+    qua CCTSClient.search_ticket() (song song có giới hạn
+    ENRICH_MAX_CONCURRENCY) để phát hiện ticket "mở lại" và ticket chưa có
+    bất kỳ thông tin xử lý nào.
+
+    Ngưỡng hạ từ >48h xuống >=NO_INFO_EARLY_WARNING_HOURS (2026-09-16) để
+    is_no_info_critical hiện lên UI SỚM HƠN lúc ticket thực sự vượt 48h —
+    cho người phân việc (QC) thời gian yêu cầu kỹ thuật xử lý tay trước khi
+    quá hạn. KHÔNG có hành động tự động nào chạy theo cờ này (đã bỏ tính
+    năng tự đóng — xem comment ở khai báo NO_INFO_EARLY_WARNING_HOURS).
 
     Đăng nhập TẤT CẢ tài khoản đã cào live thành công trong chu kỳ này
     (success_accounts) — không chỉ tài khoản đầu tiên. Với mỗi ticket, tra
@@ -447,7 +488,7 @@ async def _enrich_open_overdue_ev_tickets(df_tickets_filtered, success_accounts)
 
     mask = (
         (df["Ticket Status"].astype(str).str.strip().str.lower() == "open")
-        & (df["Hours"] > 48)
+        & (df["Hours"] >= NO_INFO_EARLY_WARNING_HOURS)
         & (df["Charge Point ID"].apply(_is_ev_charge_point))
     )
     targets = df[mask]
@@ -516,6 +557,139 @@ def _apply_enrichment(status, ticket_id, enrichment_map):
     # Chỉ giữ is_no_info_critical để frontend hiện cờ cảnh báo.
     severity_override = None
     return status_display, severity_override, is_reopened, has_no_info
+
+
+def _parse_create_time_utc(value):
+    """Parse "Create Time" của CCTS thành datetime UTC-naive. API trả giờ
+    UTC (create_export_task() tự trừ 7h khi GỬI lên nên chiều ngược lại —
+    ĐỌC về — là giờ gốc UTC, chưa +7 để ra giờ VN). Trả None nếu không parse
+    được (không đoán bừa — nơi gọi sẽ coi là "cần tra cứu lại cho chắc")."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return None
+    for fmt in CREATE_TIME_FORMATS:
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+async def _classify_new_vs_reopened(df_current_open, previous_ticket_ids, success_accounts):
+    """So sánh Open-ticket hiện tại với snapshot Open của LẦN CÀO TRƯỚC
+    (previous_ticket_ids) để tìm các ticket "mới xuất hiện" — không có trong
+    lần trước. Với mỗi ticket mới xuất hiện, phân loại:
+
+    - Create Time cách hiện tại (UTC) < NEW_TICKET_GRACE_HOURS -> ticket MỚI
+      THẬT (vừa tạo) -> không cần tra cứu gì thêm, is_reopened=False.
+    - Create Time cũ hơn (hoặc không parse được) -> KHÔNG đoán qua cache —
+      tra cứu timeline thật qua _lookup_ticket_enrichment() (machinery đã
+      dùng cho overdue-EV) để xác nhận is_reopened/has_no_info dựa trên
+      followRecordStatus thật, không dựa trên "có/không có trong cache".
+
+    Trả về dict {ticket_id_str: {"is_reopened": bool, "has_no_info": bool}}
+    — CHỈ chứa các ticket mới xuất hiện đã phân loại được (áp dụng cho MỌI
+    ticket mới xuất hiện, không giới hạn EV/overdue như enrichment kia — vì
+    mục đích khác nhau: cái này phục vụ đếm real-time, không phải cảnh báo
+    UI). Không raise.
+
+    LƯU Ý: success_accounts CHỈ cần cho nhánh tra cứu lại (ticket Create Time
+    cũ) — nhánh "mới thật" theo Create Time không gọi API gì cả, nên KHÔNG
+    được early-return {} chỉ vì success_accounts rỗng (bug đã sửa 2026-09-16:
+    trước đó success_accounts=[] làm mất luôn cả kết quả genuinely_new)."""
+    if df_current_open.empty:
+        return {}
+
+    current_ids = {str(t) for t in df_current_open["Ticket ID"].tolist() if t}
+    new_ids = current_ids - set(previous_ticket_ids or ())
+    if not new_ids:
+        return {}
+
+    now_utc = datetime.now(timezone.utc).replace(tzinfo=None)
+    create_time_by_id = dict(zip(
+        df_current_open["Ticket ID"].astype(str), df_current_open.get("Create Time", pd.Series(dtype=object))
+    ))
+
+    genuinely_new = set()
+    need_lookup = set()
+    for tid in new_ids:
+        created = _parse_create_time_utc(create_time_by_id.get(tid))
+        if created is not None and (now_utc - created) < timedelta(hours=NEW_TICKET_GRACE_HOURS):
+            genuinely_new.add(tid)
+        else:
+            need_lookup.add(tid)
+
+    result = {tid: {"is_reopened": False, "has_no_info": False} for tid in genuinely_new}
+    if not need_lookup:
+        return result
+
+    clients = []
+    for username, password in success_accounts:
+        try:
+            client, _ = await _pool.get_or_login(username, password)
+            clients.append(client)
+        except Exception as e:
+            print(f"[!] Không thể đăng nhập [{username}] để tra cứu ticket mới xuất hiện: {e}")
+    if not clients:
+        return result
+
+    semaphore = asyncio.Semaphore(ENRICH_MAX_CONCURRENCY)
+
+    async def _bounded_lookup(ticket_id):
+        async with semaphore:
+            return ticket_id, await _lookup_ticket_enrichment(clients, ticket_id)
+
+    print(f"[ccts_data] {len(need_lookup)} ticket mới xuất hiện có Create Time cũ "
+          f"(hoặc không parse được) — tra cứu lại timeline thật để xác nhận mở lại.")
+    lookups = await asyncio.gather(*(_bounded_lookup(tid) for tid in sorted(need_lookup)))
+    for tid, data in lookups:
+        if data is not None:
+            result[tid] = data
+
+    return result
+
+
+def _rollup_closed_by_tech(previous_rows, current_open_ids):
+    """Ticket có trong snapshot Open lần trước nhưng KHÔNG còn trong lần này
+    -> vừa đóng (hoặc chuyển sang trạng thái khác không còn Open) — đếm theo
+    tech_name đã gắn ở snapshot trước (ticket đã rời Open nên không còn trong
+    dữ liệu lần này để tra tech_name lại). Trả dict {tech_name: count}."""
+    counts: dict[str, int] = {}
+    for row in previous_rows or []:
+        tid = str(row.get("ticket_id") or "")
+        if not tid or tid in current_open_ids:
+            continue
+        tech = row.get("tech_name") or "Unassigned"
+        counts[tech] = counts.get(tech, 0) + 1
+    return counts
+
+
+def _today_str_vn():
+    return datetime.now(VN_TZ).strftime("%Y-%m-%d")
+
+
+def _update_closed_today_counter(closed_by_tech: dict) -> dict:
+    """Cộng dồn closed_by_tech (số ticket vừa đóng ở CHU KỲ NÀY) vào counter
+    theo ngày VN, tự reset khi qua ngày mới (giữ lại counts cũ làm
+    "yesterday" trước khi reset). Đẩy R2/S3 như last_known_data.json (xem
+    cache_store.py) để không mất số khi Render redeploy giữa ngày.
+    Trả full counter {"date": ..., "counts": {tech: n}, "yesterday": {...}}."""
+    from cache_store import load_closed_counter_cache, save_closed_counter_cache
+
+    today = _today_str_vn()
+    stored = load_closed_counter_cache(CLOSED_COUNTER_FILE) or {}
+    if stored.get("date") != today:
+        stored = {"date": today, "counts": {}, "yesterday": stored.get("counts") or {}}
+
+    counts = stored.get("counts") or {}
+    for tech, n in (closed_by_tech or {}).items():
+        counts[tech] = counts.get(tech, 0) + n
+    stored = {"date": today, "counts": counts, "yesterday": stored.get("yesterday") or {}}
+
+    save_closed_counter_cache(stored, CLOSED_COUNTER_FILE)
+    return stored
 
 
 def _build_station_payload(
@@ -716,29 +890,36 @@ async def build_station_markers():
     return payload
 
 
-async def build_tech_performance_stats(open_stations):
-    """Chỉ đếm ticket ĐANG MỞ theo KT — KHÔNG gọi API ticket đã đóng.
+async def build_tech_performance_stats(open_stations, closed_today_counts=None, closed_yesterday_counts=None):
+    """Đếm ticket ĐANG MỞ theo KT + số ticket ĐÃ ĐÓNG hôm nay/hôm qua — 2 số
+    sau lấy từ counter tích luỹ real-time (xem _update_closed_today_counter),
+    tính bằng cách diff Open-list giữa 2 lần cào, KHÔNG gọi thêm API."""
+    closed_today_counts = closed_today_counts or {}
+    closed_yesterday_counts = closed_yesterday_counts or {}
 
-    closed_yesterday / closed_today tạm = 0.
-    Sau này thay bằng Engineer_info.csv (hoặc nguồn tĩnh khác).
-    """
     open_counts: dict[str, int] = {}
     for s in open_stations:
         tech = s.get("tech_name") or "Unassigned"
         open_counts[tech] = open_counts.get(tech, 0) + int(s.get("cp_count") or 0)
 
+    all_techs = set(open_counts) | set(closed_today_counts) | set(closed_yesterday_counts)
     return {
         tech: {
-            "closed_yesterday": 0,
-            "closed_today": 0,
-            "open_count": count,
+            "closed_yesterday": int(closed_yesterday_counts.get(tech, 0)),
+            "closed_today": int(closed_today_counts.get(tech, 0)),
+            "open_count": open_counts.get(tech, 0),
         }
-        for tech, count in open_counts.items()
+        for tech in all_techs
     }
 
 
-async def refresh_all_ccts_data():
-    """1 chu kỳ làm mới đầy đủ: trạm + stats KT (chỉ open) + ticket rows."""
+async def refresh_all_ccts_data(previous_ticket_rows=None):
+    """1 chu kỳ làm mới đầy đủ: trạm + stats KT (open + đã đóng real-time) +
+    ticket rows.
+
+    previous_ticket_rows: snapshot ticket_rows của LẦN CÀO NGAY TRƯỚC (main.py
+    truyền _latest_ticket_rows vào TRƯỚC KHI ghi đè) — dùng để diff Open-list,
+    không tải lại lịch sử. None ở lần chạy đầu tiên (không có gì để diff)."""
     coords_map, tech_map, region_map, cp_model_map, _ = get_static_data()
     df_tickets, any_success, success_accounts = await fetch_live_tickets()
 
@@ -754,6 +935,22 @@ async def refresh_all_ccts_data():
 
     enrichment_map = await _enrich_open_overdue_ev_tickets(df_filtered, success_accounts)
 
+    # Diff với snapshot Open lần trước — CHỈ khi lần cào NÀY thành công (nếu
+    # any_success=False, df_filtered có thể rỗng/thiếu do lỗi, không phải vì
+    # ticket thật sự đóng hết -> diff lúc đó sẽ đếm nhầm cả loạt "đã đóng").
+    if any_success and previous_ticket_rows is not None:
+        previous_ids = {str(r.get("ticket_id")) for r in previous_ticket_rows if r.get("ticket_id")}
+        current_open_ids = {str(t) for t in df_filtered["Ticket ID"].tolist()} if not df_filtered.empty else set()
+
+        reopen_map = await _classify_new_vs_reopened(df_filtered, previous_ids, success_accounts)
+        if reopen_map:
+            enrichment_map = {**enrichment_map, **reopen_map}
+
+        closed_by_tech = _rollup_closed_by_tech(previous_ticket_rows, current_open_ids)
+        counter = _update_closed_today_counter(closed_by_tech)
+    else:
+        counter = _update_closed_today_counter({})
+
     station_payload = _build_station_payload(
         df_filtered, cp_model_map, tech_map, region_map,
         total_tickets, len(missing_coord_tickets), filtered_north_count, any_success,
@@ -761,7 +958,11 @@ async def refresh_all_ccts_data():
         enrichment_map=enrichment_map,
     )
     ticket_rows = _build_ticket_rows(df_filtered, cp_model_map, tech_map, region_map, enrichment_map=enrichment_map)
-    tech_stats = await build_tech_performance_stats(station_payload["stations"])
+    tech_stats = await build_tech_performance_stats(
+        station_payload["stations"],
+        closed_today_counts=counter.get("counts"),
+        closed_yesterday_counts=counter.get("yesterday"),
+    )
 
     print(
         f"[+] Hoàn tất chu kỳ làm mới: {len(station_payload['stations'])} trạm, "

@@ -265,7 +265,13 @@ async def refresh_stations_once() -> bool:
     nếu lần này thất bại và dữ liệu trong bộ nhớ không đổi."""
     global _latest_station_payload, _latest_tech_stats, _latest_ticket_rows
 
-    new_payload, new_stats, new_rows = await ccts_data.refresh_all_ccts_data()
+    # Truyền snapshot Open-ticket của LẦN CÀO NGAY TRƯỚC (trước khi bị ghi đè
+    # ở dưới) — refresh_all_ccts_data() dùng để diff (đếm "vừa đóng" theo KT,
+    # phân biệt ticket mới xuất hiện là mới thật hay cũ mở lại). None ở lần
+    # chạy đầu tiên sau khi khởi động (không có gì để diff).
+    new_payload, new_stats, new_rows = await ccts_data.refresh_all_ccts_data(
+        previous_ticket_rows=_latest_ticket_rows or None
+    )
 
     if new_payload.get("fetch_success"):
         _latest_station_payload = new_payload

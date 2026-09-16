@@ -64,6 +64,11 @@ if PREFIX and not PREFIX.endswith("/"):
 
 KEY_MAP = f"{PREFIX}last_known_data.json"
 KEY_STATS = f"{PREFIX}stats_daily_cache.json"
+# Đếm số ticket "vừa đóng" theo KTV trong ngày (VN) — tính real-time bằng
+# cách diff Open-ticket giữa 2 lần cào (xem ccts_data._diff_ticket_transitions).
+# Cần đẩy lên S3/R2 như map/stats vì disk Render mất khi redeploy — mất file
+# này giữa ngày sẽ làm số "đã xử lý hôm nay" tụt về 0 dù thực tế đã đóng vài ca.
+KEY_CLOSED_COUNTER = f"{PREFIX}closed_today_counts.json"
 # Bản "gọn" chỉ gồm meta + 4 chart đã dựng sẵn (KHÔNG kèm mảng tickets thô)
 # — đây là thứ DUY NHẤT các route /api/stats/* cần lúc phục vụ request.
 # Nhỏ hơn bản đầy đủ ~30-50 lần → cold-start trên Render đọc gần như tức thì.
@@ -217,6 +222,27 @@ def save_map_cache(data: dict, local_path: str = "last_known_data.json") -> bool
     """Ghi local + đẩy S3 (best-effort). Trả về True nếu đã đẩy S3."""
     _write_local(local_path, data)
     return _s3_put_json(KEY_MAP, data)
+
+
+# ---------------------------------------------------------------------------
+# API công khai — counter "đã đóng hôm nay" theo KTV
+# ---------------------------------------------------------------------------
+def load_closed_counter_cache(local_path: str = "closed_today_counts.json") -> dict | None:
+    """Ưu tiên local → nếu thiếu thì kéo từ S3 rồi ghi local."""
+    data = _read_local(local_path)
+    if isinstance(data, dict) and data:
+        return data
+    remote = _s3_get_json(KEY_CLOSED_COUNTER)
+    if isinstance(remote, dict) and remote:
+        _write_local(local_path, remote)
+        return remote
+    return data if isinstance(data, dict) else None
+
+
+def save_closed_counter_cache(data: dict, local_path: str = "closed_today_counts.json") -> bool:
+    """Ghi local + đẩy S3 (best-effort). Trả về True nếu đã đẩy S3."""
+    _write_local(local_path, data)
+    return _s3_put_json(KEY_CLOSED_COUNTER, data)
 
 
 # ---------------------------------------------------------------------------
