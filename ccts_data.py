@@ -384,10 +384,22 @@ def _process_raw_tickets(raw_tickets):
             "Creator": item.get("ticketCreator"),
             "Source_Account": item.get("_source_account"),
             "Address": item.get("address") or item.get("stationAddress") or "",
+            "Contact": item.get("contact") or "",
             "OwnerUserName": item.get("cctsTicketOwnerUserName") or "",
             "AssistantName": item.get("assistantName") or "",
         })
     return processed
+
+
+def _combine_address_contact(address, contact) -> str:
+    """Gộp địa chỉ + liên hệ thành 1 chuỗi — y hệt logic
+    scripts/auto_ccts_optimized.py::enrich_and_filter_data() để 2 nguồn dữ
+    liệu (Excel export cục bộ vs cache app) ra cùng định dạng cột Địa chỉ."""
+    addr = str(address or "").strip()
+    ct = str(contact or "").strip()
+    if addr and ct:
+        return f"{addr} - Liên hệ: {ct}"
+    return addr or ct
 
 
 async def fetch_live_tickets():
@@ -893,6 +905,7 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map, 
             "ticket_id": row.get("Ticket ID"),
             "duration": row.get("Ticket Duration"),
             "hours": hours,
+            "create_time": row.get("Create Time") or "",
             "station_code": station_code,
             "is_bss_station": str(station_code or "").strip().upper().startswith("B."),
             "cp_id": cp_id,
@@ -905,7 +918,7 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map, 
             "tech_name": tech_name,
             "region": region,
             "is_near_overdue": 45 <= hours < 48,
-            "address": row.get("Address") or "",
+            "address": _combine_address_contact(row.get("Address"), row.get("Contact")),
             "owners": _build_owners_display(
                 row.get("OwnerUserName") or "",
                 row.get("AssistantName") or "",
