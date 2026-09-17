@@ -598,12 +598,19 @@ async def _enrich_open_overdue_ev_tickets(df_tickets_filtered, success_accounts)
 def _apply_enrichment(status, ticket_id, enrichment_map):
     """Trả về (status_display, severity_override, is_reopened, is_no_info_critical)
     cho 1 ticket, dựa trên enrichment_map (có thể rỗng / không chứa ticket này
-    — khi đó trả về mặc định, không đổi gì)."""
+    — khi đó trả về mặc định, không đổi gì).
+
+    is_reopened CHỈ áp dụng khi ticket đang ở trạng thái Open hiện tại
+    (KHÔNG áp dụng cho Appointment/Pending for spare parts/Pending for ASP
+    close dù các trạng thái này cũng thuộc nhóm OPEN theo SLA) — timeline có
+    từng đi qua 1 trạng thái "đã xử lý xong" rồi sang Pending for spare
+    parts/Appointment là luồng xử lý bình thường, không phải "mở lại"."""
     enrich = enrichment_map.get(str(ticket_id)) if enrichment_map else None
     if not enrich:
         return status, None, False, False
 
-    is_reopened = bool(enrich.get("is_reopened"))
+    is_currently_open = str(status).strip().lower() == "open"
+    is_reopened = is_currently_open and bool(enrich.get("is_reopened"))
     has_no_info = bool(enrich.get("has_no_info"))
 
     status_display = f"{status}{REOPEN_LABEL_SUFFIX}" if is_reopened else status
