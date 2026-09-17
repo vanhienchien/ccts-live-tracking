@@ -1142,24 +1142,52 @@ function renderTicketTable(tickets, techName) {
             </div>`;
         return;
     }
-    const rowsHtml = tickets.map((t) => {
+
+    // Ticket KHÔNG có toạ độ (on_map === false) -> KHÔNG có pin trên bản đồ,
+    // KT dễ bỏ sót nếu chỉ nhìn map. Ghim lên đầu danh sách để luôn thấy
+    // ngay khi mở panel, không cần cuộn/tìm.
+    const offMap = tickets.filter((t) => t.on_map === false);
+    const onMap = tickets.filter((t) => t.on_map !== false);
+    const sortedTickets = offMap.concat(onMap);
+
+    const offMapBanner = offMap.length > 0 ? `
+        <div style="background:#fef2f2;border:1px solid #fecaca;color:#991b1b;
+            font-weight:600;font-size:12.5px;padding:8px 12px;border-radius:8px;
+            margin-bottom:8px;display:flex;align-items:center;gap:6px;">
+            🚫 ${offMap.length} ticket KHÔNG hiện trên bản đồ (trạm chưa có toạ độ trong StationData.csv) — xem danh sách bên dưới, đừng chỉ dựa vào bản đồ.
+        </div>` : '';
+
+    const rowsHtml = sortedTickets.map((t) => {
         const hours = Number(t.hours) || 0;
-        const rowBg = (hours > 48 || t.is_no_info_critical)
-            ? 'background:#fef2f2 !important;'
-            : (hours >= 24 ? 'background:#fffbeb !important;' : '');
+        const isOffMap = t.on_map === false;
+        const rowBg = isOffMap
+            ? 'background:#fdf2f8 !important;'
+            : ((hours > 48 || t.is_no_info_critical)
+                ? 'background:#fef2f2 !important;'
+                : (hours >= 24 ? 'background:#fffbeb !important;' : ''));
         const statusLabel = t.status_display || t.status || '';
         // Mô tả lỗi/Địa chỉ giới hạn 2 dòng (line-clamp) thay vì wrap vô hạn -
         // trước đây 1 dòng mô tả dài làm CẢ HÀNG cao vọt (HTML table: các ô
         // cùng hàng luôn cao bằng ô cao nhất), lãng phí không gian hiển thị dù
         // các cột khác (Mã Ticket, Trạng thái...) chỉ có 1 dòng chữ ngắn.
         // title="" giữ nguyên văn đầy đủ, xem khi rê chuột vào phần bị cắt.
+        // QUAN TRỌNG: style clamp phải nằm ở <div> CON bên trong <td>, KHÔNG
+        // gán thẳng display:-webkit-box lên <td> — làm vậy phá display:table-cell
+        // của ô, khiến table-layout:auto tính sai độ rộng cột (cột Mô tả lỗi
+        // đè lên cột Địa chỉ, cột Địa chỉ bị đẩy trống ra ngoài — lỗi hiển thị
+        // đã gặp thực tế 2026-09-17). <td> giữ nguyên table-cell bình thường.
         const clampCell = (text, maxWidth) => `
-            <td style="max-width:${maxWidth}px;line-height:1.45;overflow:hidden;
-                display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;"
-                title="${escapeHtmlAttr(text ?? '')}">${text ?? ''}</td>`;
+            <td style="max-width:${maxWidth}px;">
+                <div style="line-height:1.45;overflow:hidden;
+                    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;"
+                    title="${escapeHtmlAttr(text ?? '')}">${text ?? ''}</div>
+            </td>`;
+        const offMapBadge = isOffMap
+            ? `<div style="margin-top:3px;color:#be185d;font-weight:700;font-size:10.5px;white-space:nowrap;">🚫 Không có trên bản đồ</div>`
+            : '';
         return `
         <tr style="${rowBg}">
-            <td style="font-weight:500;white-space:nowrap;position:sticky;left:0;${rowBg || 'background:#fff;'}">${t.ticket_id ?? ''}</td>
+            <td style="font-weight:500;white-space:nowrap;position:sticky;left:0;${rowBg || 'background:#fff;'}">${t.ticket_id ?? ''}${offMapBadge}</td>
             ${durationCellHtml(t)}
             <td style="white-space:nowrap;">${t.station_code ?? ''}</td>
             <td style="white-space:nowrap;">${t.cp_id ?? ''}</td>
@@ -1171,6 +1199,7 @@ function renderTicketTable(tickets, techName) {
     }).join('');
 
     ticketPanelTableWrap.innerHTML = `
+        ${offMapBanner}
         <table>
             <thead>
                 <tr>

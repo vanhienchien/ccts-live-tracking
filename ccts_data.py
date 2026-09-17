@@ -881,12 +881,19 @@ def _build_station_payload(
     }
 
 
-def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map, enrichment_map=None):
-    """Danh sách ticket phẳng cho panel theo KT — sắp xếp CAO → THẤP theo giờ tồn."""
+def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map, coords_map=None, enrichment_map=None):
+    """Danh sách ticket phẳng cho panel theo KT — sắp xếp CAO → THẤP theo giờ tồn.
+
+    on_map: False nếu trạm của ticket này KHÔNG có toạ độ trong StationData.csv
+    -> KHÔNG được cắm pin trên bản đồ (xem _apply_south_filter_and_coords).
+    Frontend dùng cờ này để cảnh báo KT — ticket vẫn nằm trong danh sách của
+    họ dù không thấy trên bản đồ, tránh bị hiểu nhầm "không có pin = không có
+    ticket"."""
     if df_tickets_filtered.empty:
         return []
 
     enrichment_map = enrichment_map or {}
+    coords_map = coords_map or {}
 
     df = df_tickets_filtered.copy()
     df["Model Name"] = df["Charge Box Model"].map(cp_model_map).fillna("N/A")
@@ -903,6 +910,7 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map, 
             continue
         cp_id = str(row.get("Charge Point ID") or "")
         hours = float(row.get("Hours") or 0)
+        on_map = bool(core_code and coords_map.get(core_code))
 
         status_display, severity_override, is_reopened, is_no_info_critical = _apply_enrichment(
             row.get("Ticket Status"), row.get("Ticket ID"), enrichment_map
@@ -925,6 +933,7 @@ def _build_ticket_rows(df_tickets_filtered, cp_model_map, tech_map, region_map, 
             "tech_name": tech_name,
             "region": region,
             "is_near_overdue": 45 <= hours < 48,
+            "on_map": on_map,
             "address": _combine_address_contact(row.get("Address"), row.get("Contact")),
             "owners": _build_owners_display(
                 row.get("OwnerUserName") or "",
@@ -1006,7 +1015,17 @@ async def refresh_all_ccts_data(previous_ticket_rows=None):
             df_tickets, coords_map
         )
 
-    enrichment_map = await _enrich_open_overdue_ev_tickets(df_filtered, success_accounts)
+    # QUAN TRỌNG: enrichment + ticket_rows (panel theo KT + cache đẩy S3 cho
+    # auto_ccts_optimized.py) PHẢI dùng df_tickets THÔ (chưa lọc miền
+    # Bắc/toạ độ), KHÔNG dùng df_filtered — _apply_south_filter_and_coords()
+    # loại BỎ HẲN ticket của trạm chưa có toạ độ trong StationData.csv (trạm
+    # mới thêm/thiếu lat-lng do sửa tay), trong khi _build_ticket_rows()
+    # KHÔNG hề cần coords (chỉ cần Station Code để tra tech_map/region_map).
+    # Trước đây dùng chung df_filtered khiến các ticket đó biến mất HOÀN
+    # TOÀN khỏi panel KT, cache S3, và mobile app — không chỉ khỏi bản đồ
+    # (nơi thật sự cần toạ độ để cắm pin). df_filtered CHỈ còn dùng cho
+    # station_payload (map) bên dưới.
+    enrichment_map = await _enrich_open_overdue_ev_tickets(df_tickets, success_accounts)
 
     # Xác nhận is_reopened cho MỌI ticket đang mở (không giới hạn EV/overdue)
     # bằng export Excel — chạy MỖI chu kỳ, độc lập với việc có snapshot chu
@@ -1017,10 +1036,12 @@ async def refresh_all_ccts_data(previous_ticket_rows=None):
             enrichment_map = _merge_enrichment(enrichment_map, export_reopen_map)
 
     # Đếm "vừa đóng" theo KT — CHỈ khi lần cào NÀY thành công (nếu
-    # any_success=False, df_filtered có thể rỗng/thiếu do lỗi, không phải vì
+    # any_success=False, df_tickets có thể rỗng/thiếu do lỗi, không phải vì
     # ticket thật sự đóng hết -> diff lúc đó sẽ đếm nhầm cả loạt "đã đóng").
+    # Dùng df_tickets (không lọc toạ độ) để ticket thiếu toạ độ không bị tính
+    # nhầm thành "đã đóng" chỉ vì biến mất khỏi df_filtered.
     if any_success and previous_ticket_rows is not None:
-        current_open_ids = {str(t) for t in df_filtered["Ticket ID"].tolist()} if not df_filtered.empty else set()
+        current_open_ids = {str(t) for t in df_tickets["Ticket ID"].tolist()} if not df_tickets.empty else set()
         closed_by_tech = _rollup_closed_by_tech(previous_ticket_rows, current_open_ids)
         counter = _update_closed_today_counter(closed_by_tech)
     else:
@@ -1032,7 +1053,9 @@ async def refresh_all_ccts_data(previous_ticket_rows=None):
         missing_coord_tickets=missing_coord_tickets,
         enrichment_map=enrichment_map,
     )
-    ticket_rows = _build_ticket_rows(df_filtered, cp_model_map, tech_map, region_map, enrichment_map=enrichment_map)
+    ticket_rows = _build_ticket_rows(
+        df_tickets, cp_model_map, tech_map, region_map, coords_map=coords_map, enrichment_map=enrichment_map
+    )
     tech_stats = await build_tech_performance_stats(
         station_payload["stations"],
         closed_today_counts=counter.get("counts"),
