@@ -110,7 +110,24 @@ app = FastAPI(title="CCTS Live Map", default_response_class=_DefaultJSONResponse
 # là điểm cân bằng tốc-độ/tỉ-lệ-nén khuyến nghị cho payload động.
 app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 templates = Jinja2Templates(directory="templates")
-app.mount("/static", StaticFiles(directory="static"), name="static")
+
+
+class _RevalidatingStaticFiles(StaticFiles):
+    """StaticFiles mặc định KHÔNG gửi Cache-Control -> trình duyệt tự đoán
+    thời hạn cache từ Last-Modified (file lâu không đổi có thể được giữ nhiều
+    ngày). Hậu quả thực tế: sau khi deploy đổi JS/CSS (vd bỏ khu vực DNA-QNA
+    khỏi stats_core.js) người dùng vẫn chạy bản JS cũ trong khi API đã trả dữ
+    liệu mới -> giao diện lệch dữ liệu. "no-cache" = luôn hỏi lại server
+    bằng ETag/Last-Modified (304 nếu chưa đổi, rất nhẹ) rồi mới dùng cache."""
+
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        if response.status_code in (200, 304):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+app.mount("/static", _RevalidatingStaticFiles(directory="static"), name="static")
 
 _latest_station_payload = {
     "stations": [], "total_tickets": 0, "missing_count": 0, "updated_at": None, "fetch_success": True,
