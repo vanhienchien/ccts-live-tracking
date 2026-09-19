@@ -19,10 +19,10 @@ Gom vào đây để tránh code trùng lặp và đảm bảo 2 module không b
    lúc (khởi động server + lịch 0h + admin bấm nút làm mới tay) thành 1 lượt
    duy nhất, tránh cào 2-3 lần liên tiếp gây lãng phí & dễ bị khoá tài khoản.
 
-3. `STATS_SCRAPE_ACCOUNTS` — 2 tài khoản CỐ ĐỊNH dùng riêng cho việc cào
+3. `STATS_SCRAPE_ACCOUNTS` — tài khoản CỐ ĐỊNH dùng riêng cho việc cào
    thống kê (không lấy từ config.CCTS_ACCOUNTS, vì danh sách đó dùng cho bản
    đồ realtime và có thể thay đổi). Vì việc cào thống kê chủ yếu chạy vào
-   0h — thời điểm không ai dùng các tài khoản tổng — nên cố định luôn 2 tài
+   0h — thời điểm không ai dùng các tài khoản tổng — nên cố định luôn tài
    khoản dưới đây cho an toàn & dễ kiểm soát.
 
 4. `ClientPool` — pool phiên đăng nhập tái sử dụng + cơ chế "gọi API, nếu bị
@@ -66,7 +66,9 @@ UNMANAGED_REGION_LABEL = "KV không quản lý"
 # "KV không quản lý" — kể cả khi dữ liệu gốc trên GitHub (StationData.csv)
 # chưa kịp cập nhật.
 #   - HCM: công ty đã rút khỏi khu vực TP.HCM (từ 08/2026).
-DEPRECATED_REGIONS = {"HCM"}
+#   - DNA-QNA: công ty đã rút khỏi Đà Nẵng - Quảng Nam (từ 09/2026); tài
+#     khoản its_frontdesk 04 phụ trách khu vực này cũng đã bị bỏ.
+DEPRECATED_REGIONS = {"HCM", "DNA-QNA"}
 
 _UNMANAGED_ALIASES = {
     "kv không quản lý", "kv khong quan ly", "không quản lý", "khong quan ly", "unmanaged",
@@ -125,19 +127,15 @@ except Exception:
 STATS_REFRESH_LOCK = asyncio.Lock()
 
 # ------------------------------------------------------------------
-# 2 tài khoản CỐ ĐỊNH dùng để cào thống kê (0h / khi khởi động).
-# Đọc từ cùng biến môi trường CCTS_USERNAME_ES/CCTS_PASSWORD và
-# CCTS_USERNAME_ITS/CCTS_PASSWORD_its như config.CCTS_ACCOUNTS, để đổi mật
-# khẩu CCTS chỉ cần sửa 1 chỗ (env) thay vì 2 nơi dễ lệch nhau.
+# Tài khoản CỐ ĐỊNH dùng để cào thống kê (0h / khi khởi động).
+# Đọc từ cùng biến môi trường CCTS_USERNAME_ES/CCTS_PASSWORD như
+# config.CCTS_ACCOUNTS, để đổi mật khẩu CCTS chỉ cần sửa 1 chỗ (env) thay
+# vì 2 nơi dễ lệch nhau.
 # ------------------------------------------------------------------
 STATS_SCRAPE_ACCOUNTS = [
     {
         "username": os.environ.get("CCTS_USERNAME_ES", "esmanager"),
         "password": os.environ.get("CCTS_PASSWORD", "Ccts123."),
-    },
-    {
-        "username": os.environ.get("CCTS_USERNAME_ITS", "its_frontdesk 04"),
-        "password": os.environ.get("CCTS_PASSWORD_its", "Duynam123."),
     },
 ]
 

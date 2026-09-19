@@ -23,10 +23,6 @@ services:
         sync: false
       - key: CCTS_PASSWORD
         sync: false
-      - key: CCTS_USERNAME_ITS
-        sync: false
-      - key: CCTS_PASSWORD_its
-        sync: false
       - key: GITHUB_DATA_REPO
         sync: false
       # ---- Tuỳ chọn ----

@@ -344,7 +344,7 @@ async def _seconds_until_next_midnight_vn() -> float:
 async def _run_stats_refresh(label: str):
     """Chạy 1 lượt cào thống kê nền, log thống nhất theo `label` (vd "0h",
     "khởi động"). stats_data.refresh_stats_cache() đã tự lo:
-    - Cào 2 tài khoản cố định, thử lại tối đa 10 vòng nếu chưa được ngay.
+    - Cào tài khoản cố định (STATS_SCRAPE_ACCOUNTS), thử lại tối đa 10 vòng nếu chưa được ngay.
     - Tự giữ nguyên cache cũ (KHÔNG ghi đè) nếu sau 10 vòng vẫn thất bại.
     - Tự gộp (single-flight) nếu có 1 lượt cào khác đang chạy cùng lúc.
     Vì vậy ở đây chỉ cần log, không cần tự xử lý giữ cache cũ nữa."""
@@ -720,7 +720,7 @@ async def api_stats_error_codes(request: Request):
 
 @app.get("/api/stats/heatmap")
 async def api_stats_heatmap(request: Request):
-    """Bản đồ nhiệt số ticket & ticket Overdue theo vị trí trạm, tách theo 5 khu vực."""
+    """Bản đồ nhiệt số ticket & ticket Overdue theo vị trí trạm, tách theo 4 khu vực."""
     user = get_current_user(request)
     if not user:
         return JSONResponse({"error": "unauthorized"}, status_code=401)

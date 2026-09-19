@@ -7,9 +7,6 @@ CÀO THỐNG KÊ 0H QUA GITHUB ACTIONS — VIỆC CẦN LÀM
 
    - CCTS_USERNAME_ES
    - CCTS_PASSWORD
-   - CCTS_USERNAME_ITS          (bỏ qua/xoá sau khi công ty rút khỏi khu
-                                  vực its_frontdesk cuối tháng này)
-   - CCTS_PASSWORD_its
    - GOOGLE_SERVICE_ACCOUNT_JSON
    - SPREADSHEET_URL
    - GITHUB_DATA_REPO

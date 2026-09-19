@@ -31,8 +31,6 @@ SPREADSHEET_URL=https://docs.google.com/spreadsheets/d/xxxxxxxx/edit
 GOOGLE_SERVICE_ACCOUNT_FILE=service_account.json
 CCTS_USERNAME_ES=esmanager
 CCTS_PASSWORD=Ccts123.
-CCTS_USERNAME_ITS=its_frontdesk 04
-CCTS_PASSWORD_its=Duynam123.
 TICKET_REFRESH_SECONDS=600
 
 # BẮT BUỘC trên Render — ký cookie web + token mobile (JWT). Thiếu thì mỗi

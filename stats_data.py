@@ -48,10 +48,11 @@ STATS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_daily_cache.js
 STATS_CHARTS_CACHE_FILE = os.path.join(os.path.dirname(__file__), "stats_charts_cache.json")
 SAMPLE_XLSX = os.path.join(os.path.dirname(__file__), "Tickets_esmanager_20260728_201743.xlsx")
 
-# Công ty đã RÚT KHỎI khu vực HCM (08/2026) -> HCM không còn nằm trong danh
-# sách khu vực được quản lý; xem thêm ccts_shared.DEPRECATED_REGIONS (nơi
-# region_map gốc cũng được tự động chuẩn hoá HCM -> "KV không quản lý").
-ALLOWED_REGIONS = ("DNA-QNA", "DNI-BPH", "LDO-BTH", "Tây Nguyên", "Mtay")
+# Công ty đã RÚT KHỎI khu vực HCM (08/2026) và DNA-QNA (09/2026) -> 2 khu vực
+# này không còn nằm trong danh sách khu vực được quản lý; xem thêm
+# ccts_shared.DEPRECATED_REGIONS (nơi region_map gốc cũng được tự động chuẩn
+# hoá HCM/DNA-QNA -> "KV không quản lý").
+ALLOWED_REGIONS = ("DNI-BPH", "LDO-BTH", "Tây Nguyên", "Mtay")
 _ALLOWED_SET = set(ALLOWED_REGIONS)
 
 EXCLUDED_TECH_NAMES = {
@@ -64,8 +65,7 @@ _REGION_PREFIX_RULES: list[tuple[str, str]] = [
     # B.HCM đã bị loại: công ty rút khỏi khu vực HCM, xem ccts_shared.DEPRECATED_REGIONS.
     ("B.DNI", "DNI-BPH"),
     ("B.BPH", "DNI-BPH"),
-    ("B.DNA", "DNA-QNA"),
-    ("B.QNA", "DNA-QNA"),
+    # B.DNA/B.QNA/C.QNA đã bị loại: công ty rút khỏi DNA-QNA, xem ccts_shared.DEPRECATED_REGIONS.
     ("B.LDO", "LDO-BTH"),
     ("B.BTH", "LDO-BTH"),
     ("B.STR", "Mtay"),
@@ -75,7 +75,6 @@ _REGION_PREFIX_RULES: list[tuple[str, str]] = [
     ("B.KG", "Mtay"),
     ("B.CMU", "Mtay"),
     ("C.NTH", "LDO-BTH"),
-    ("C.QNA", "DNA-QNA")
 ]
 
 _memory_cache: dict[str, Any] | None = None
@@ -135,8 +134,8 @@ def _infer_region_prefix(station_code: str | None) -> str | None:
 
 
 def is_managed_region(region: str | None) -> bool:
-    """Chỉ 5 KV được quản lý — loại 'KV không quản lý' (gồm cả HCM, đã rút
-    khỏi từ 08/2026) và mọi region lạ."""
+    """Chỉ 4 KV được quản lý — loại 'KV không quản lý' (gồm cả HCM đã rút
+    khỏi từ 08/2026 và DNA-QNA từ 09/2026) và mọi region lạ."""
     if not region:
         return False
     r = str(region).strip()

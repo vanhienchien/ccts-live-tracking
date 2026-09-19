@@ -95,7 +95,6 @@
 
   const REGIONS = Core.REGION_ORDER;
   const REGION_LABELS = {
-    "DNA-QNA": "Đà Nẵng - Quảng Nam",
     "DNI-BPH": "Đồng Nai - Bình Phước",
     "LDO-BTH": "Lâm Đồng - Bình Thuận",
     "Tây Nguyên": "Tây Nguyên",

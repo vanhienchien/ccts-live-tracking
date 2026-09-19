@@ -104,8 +104,8 @@ OPEN_WINDOW_START_STR = "2026-04-30 17:00:00"
 # Parts Record, Additional information) vẫn bị giữ FULL-WIDTH trong RAM cho
 # tới khi hàm return. Khai báo trim CHO CẢ 6 sheet (chỉ giữ "Ticket ID" ở 5
 # sheet không dùng, và đúng 2 cột cần ở "Events Record") để không có sheet
-# nào full-width sống trong RAM, kể cả tạm thời — quan trọng vì 2 tài khoản
-# chạy song song (asyncio.gather) nhân đôi mức đỉnh bộ nhớ cùng lúc.
+# nào full-width sống trong RAM, kể cả tạm thời — quan trọng vì các tài khoản
+# chạy song song (asyncio.gather) nhân mức đỉnh bộ nhớ cùng lúc.
 REOPEN_EXPORT_USECOLS = {
     "Ticket Information": ["Ticket ID"],
     "Events Record": ["Ticket ID", "Ticket Status"],

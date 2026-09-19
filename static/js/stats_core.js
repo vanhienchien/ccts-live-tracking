@@ -25,9 +25,10 @@
   "use strict";
 
   // ================== Hằng số dùng chung ==================
-  const REGION_ORDER = ["DNA-QNA", "LDO-BTH", "Mtay", "DNI-BPH", "Tây Nguyên"];
+  // DNA-QNA đã bị bỏ (công ty rút khỏi khu vực, 09/2026) — khớp
+  // stats_data.ALLOWED_REGIONS.
+  const REGION_ORDER = ["LDO-BTH", "Mtay", "DNI-BPH", "Tây Nguyên"];
   const REGION_COLORS = {
-    "DNA-QNA": { border: "#3b82f6", bg: "rgba(59,130,246,.12)" },
     "DNI-BPH": { border: "#10b981", bg: "rgba(16,185,129,.12)" },
     "Tây Nguyên": { border: "#f59e0b", bg: "rgba(245,158,11,.12)" },
     "LDO-BTH": { border: "#ef4444", bg: "rgba(239,68,68,.12)" },

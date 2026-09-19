@@ -2,7 +2,7 @@
 stats_source.py — CHỈ lo việc LẤY dữ liệu ticket thô (raw sheets), từ 1
 trong 2 nguồn:
 
-  1) "ccts"  — cào trực tiếp từ CCTS (2 tài khoản cố định trong
+  1) "ccts"  — cào trực tiếp từ CCTS (tài khoản cố định trong
      ccts_shared.STATS_SCRAPE_ACCOUNTS), có retry theo vòng + timeout,
      dùng chung CCTS_API_LOCK với ccts_data.py. Đây là nguồn mặc định cho
      production / lịch 0h / admin bấm refresh.
@@ -210,7 +210,7 @@ async def _export_one_account(username, password, start_time, end_time) -> dict 
 
 
 async def fetch_live_bundle():
-    """Cào 2 tài khoản cố định qua CCTS, retry theo vòng (tối đa
+    """Cào các tài khoản cố định qua CCTS, retry theo vòng (tối đa
     MAX_SCRAPE_ROUNDS, cách nhau SCRAPE_RETRY_DELAY_SECONDS giây).
 
     Trả (raw, events_raw, spare_raw, appt_raw, additional_raw,

@@ -1,6 +1,6 @@
 """
 stats_charts_heatmap.py — bản đồ nhiệt (heatmap) số lượng ticket & ticket
-Overdue theo vị trí trạm, tách riêng theo 5 khu vực quản lý.
+Overdue theo vị trí trạm, tách riêng theo 4 khu vực quản lý.
 
 - Nguồn: cache "tickets" (mọi ticket trong cửa sổ cào, đã lọc managed
   region) — lấy 30 ngày gần nhất theo Create Date (đồng bộ với
@@ -19,8 +19,9 @@ Overdue theo vị trí trạm, tách riêng theo 5 khu vực quản lý.
   thực tế, có đệm biên ~18% để không bị cắt sát mép bản đồ. Chỉ dùng toạ độ
   trung tâm dự phòng khi 1 khu vực không có bất kỳ trạm nào có toạ độ hợp
   lệ trong dữ liệu hiện tại (hiếm, ~99.5% trạm có toạ độ).
-- region_boundaries: ranh giới tỉnh CŨ (trước sáp nhập 2025) gộp theo 5 khu
-  vực, để frontend cắt bản đồ nhiệt đúng phạm vi (xem get_region_boundaries).
+- region_boundaries: ranh giới tỉnh CŨ (trước sáp nhập 2025) gộp theo 4 khu
+  vực quản lý, để frontend cắt bản đồ nhiệt đúng phạm vi (xem
+  get_region_boundaries / _managed_boundaries).
 - engineers: toạ độ nhà kỹ thuật viên (EngineerCoords.json qua GitHub), gán
   vào đúng khu vực bằng point-in-polygon trên region_boundaries, để điều
   phối biết khu vực nào đủ/thiếu KT xử lý sự cố (xem build_engineer_payload).
@@ -48,8 +49,8 @@ from stats_data import (
 
 VN_TZ = ZoneInfo("Asia/Ho_Chi_Minh")
 
-# Ranh giới hành chính (đã gộp theo tỉnh CŨ, trước sáp nhập 1/7/2025) của 5
-# khu vực quản lý — sinh 1 LẦN bằng scripts/build_region_boundaries.py
+# Ranh giới hành chính (đã gộp theo tỉnh CŨ, trước sáp nhập 1/7/2025) của các
+# khu vực — sinh 1 LẦN bằng scripts/build_region_boundaries.py
 # (union polygon các tỉnh, xem REGION_PROVINCES trong file đó để biết/chỉnh
 # tỉnh nào thuộc khu vực nào), KHÔNG tính lại lúc runtime. Dùng để frontend
 # "cắt" bản đồ nhiệt chỉ hiện đúng phạm vi tỉnh đã phân, giống kiểu bản đồ
@@ -83,6 +84,17 @@ def get_region_boundaries() -> dict[str, dict]:
         result = {}
     _region_boundaries_cache = result
     return result
+
+
+def _managed_boundaries(boundaries: dict[str, dict]) -> dict[str, dict]:
+    """Chỉ giữ ranh giới các khu vực ĐANG quản lý để gửi cho frontend.
+
+    File geojson vẫn chứa polygon DNA-QNA (đã rút, xem
+    ccts_shared.DEPRECATED_REGIONS) và CỐ Ý giữ lại cho việc gán KT vào khu
+    vực (build_engineer_payload): nếu bỏ hẳn polygon đó thì KT ở Đà Nẵng sẽ
+    bị gán nhầm (approx) vào khu vực GẦN NHẤT còn lại, làm sai số KT của
+    khu vực đó."""
+    return {r: g for r, g in boundaries.items() if r in ALLOWED_REGIONS}
 
 
 # ─────────────────────────────────────────────────────────────────────────
@@ -163,8 +175,8 @@ def _point_in_geometry(lat: float, lng: float, geometry: dict) -> bool:
 
 def _geometry_bbox_center(geometry: dict) -> tuple[float, float] | None:
     """Tâm bbox (lat, lng) của geometry — dùng để tìm khu vực GẦN NHẤT khi
-    1 điểm rơi ngoài cả 5 khu vực (vd KT ở TP.HCM/Bình Dương, ngoài phạm vi
-    5 khu vực đã phân) — heuristic đơn giản, đủ dùng cho việc gợi ý điều
+    1 điểm rơi ngoài mọi khu vực (vd KT ở TP.HCM/Bình Dương, ngoài phạm vi
+    các khu vực đã phân) — heuristic đơn giản, đủ dùng cho việc gợi ý điều
     phối, không cần chính xác tuyệt đối khoảng cách địa lý."""
     gtype = geometry.get("type")
     coords = geometry.get("coordinates")
@@ -209,9 +221,12 @@ def build_engineer_payload(boundaries: dict[str, dict]) -> dict[str, Any]:
     """Gán từng KT vào đúng khu vực (point-in-polygon theo ranh giới tỉnh
     cũ) để điều phối biết khu vực nào có/thiếu nhân lực xử lý sự cố.
 
-    KT rơi ngoài cả 5 khu vực (vd nhà ở TP.HCM/Bình Dương — ngoài phạm vi
+    KT rơi ngoài mọi khu vực (vd nhà ở TP.HCM/Bình Dương — ngoài phạm vi
     quản lý) vẫn được gán vào khu vực GẦN NHẤT nhưng đánh dấu approx=True,
     để điều phối biết đây là ước lượng, không phải KT thường trực tại đó.
+
+    `boundaries` là bản ĐẦY ĐỦ (gồm cả DNA-QNA đã rút): KT rơi vào khu vực
+    không còn quản lý bị loại khỏi kết quả (by_region chỉ có ALLOWED_REGIONS).
     """
     homes, rollup = load_engineer_homes()
     leads = set(rollup.values())
@@ -250,7 +265,6 @@ TOP_STATIONS_LIMIT = 12
 # trong StationCoords.json). Không dùng để định hình bounds khi có dữ liệu
 # thật — bounds thật luôn ưu tiên.
 _REGION_FALLBACK_CENTER: dict[str, tuple[float, float]] = {
-    "DNA-QNA": (16.02, 108.22),     # Đà Nẵng
     "DNI-BPH": (10.94, 106.82),     # Biên Hoà, Đồng Nai
     "LDO-BTH": (11.66, 108.44),     # Đà Lạt, Lâm Đồng cũ
     "Tây Nguyên": (13.06, 108.87),  # Buôn Ma Thuột
@@ -430,7 +444,7 @@ def build_heatmap_payload_from_cache(cache: dict[str, Any]) -> dict[str, Any]:
             "generated_at": meta.get("generated_at"),
             "counts": {"all": 0, "ev": 0, "bss": 0},
             "meta": meta,
-            "region_boundaries": boundaries,
+            "region_boundaries": _managed_boundaries(boundaries),
             "engineers": _safe_build_engineer_payload(boundaries),
         }
 
@@ -459,6 +473,6 @@ def build_heatmap_payload_from_cache(cache: dict[str, Any]) -> dict[str, Any]:
         "end_date_exclusive": meta.get("end_date_exclusive"),
         "accounts_ok": meta.get("accounts_ok"),
     }
-    root["region_boundaries"] = boundaries
+    root["region_boundaries"] = _managed_boundaries(boundaries)
     root["engineers"] = _safe_build_engineer_payload(boundaries)
     return root

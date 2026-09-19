@@ -2,7 +2,7 @@ name: Cào thống kê CCTS lúc 0h VN (thay wake-before-midnight.yml)
 
 # Chạy đúng lệnh `python stats_data.py` mà trước đây phải bấm tay ở local,
 # nhưng trên máy ảo GitHub Actions — KHÔNG phụ thuộc Render đang ngủ hay
-# thức. stats_data.refresh_stats_cache() tự cào CCTS (2 tài khoản cố định
+# thức. stats_data.refresh_stats_cache() tự cào CCTS (tài khoản cố định
 # trong ccts_shared.STATS_SCRAPE_ACCOUNTS), build charts, rồi cache_store.py
 # tự đẩy kết quả lên R2/S3 (CACHE_S3_*). Render chỉ cần đọc cache này khi có
 # người truy cập /stats — không cần tự cào, không cần "sống" đúng lúc 0h.
@@ -19,7 +19,7 @@ on:
 jobs:
   refresh-stats:
     runs-on: ubuntu-latest
-    # Dư sức so với worst-case hiện tại của stats_source.py (2 tài khoản x
+    # Dư sức so với worst-case hiện tại của stats_source.py (mỗi tài khoản
     # tối đa 10 vòng retry x (EXPORT_TIMEOUT_SECONDS=180s + SCRAPE_RETRY_
     # DELAY_SECONDS=20s) ≈ 33'/tài khoản) — GitHub Actions cho tối đa 6h/job.
     timeout-minutes: 90
@@ -40,8 +40,6 @@ jobs:
           # ---- Tài khoản CCTS dùng để cào thống kê ----
           CCTS_USERNAME_ES: ${{ secrets.CCTS_USERNAME_ES }}
           CCTS_PASSWORD: ${{ secrets.CCTS_PASSWORD }}
-          CCTS_USERNAME_ITS: ${{ secrets.CCTS_USERNAME_ITS }}
-          CCTS_PASSWORD_its: ${{ secrets.CCTS_PASSWORD_its }}
           # ---- Google Sheets (map KTV / users) ----
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           SPREADSHEET_URL: ${{ secrets.SPREADSHEET_URL }}
